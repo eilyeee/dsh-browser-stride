@@ -54,6 +54,8 @@ no release version has been assigned yet.
 - CI also runs on pushes to `stride/main`, not only `main`.
 - Dependencies and the Node/pnpm toolchain are pinned; the bridge is adapted
   to the DSH 0.2.1 release-candidate Host API.
+- Align the DSH Host and client peers on `0.2.1-rc.3` and allow the bridge
+  settings client to run with React 19.
 - Security overrides for vulnerable versions pinned by DSH, with focused MCP
   and archive compatibility checks and a clean npm advisory audit.
 - DOM settle timeouts now report an unquiet page and invalidate prior

@@ -3,7 +3,7 @@ packages:
   - extensions/*
   - packages/*/*
 
-# Keep DSH peer providers explicit and on the tested 0.2.1-rc.2 release line.
+# Keep DSH peer providers explicit and on the tested 0.2.1-rc.3 release line.
 autoInstallPeers: false
 
 # dsh 运行时与扩展构建依赖这些受信任包的安装脚本。
@@ -21,7 +21,7 @@ minimumReleaseAgeExclude:
   - '@types/chrome@0.3.7'
   - tsdown@0.23.3
 
-# Security fixes for exact transitive versions pinned by DSH 0.2.1-rc.2.
+# Security fixes for exact transitive versions in the dependency graph.
 # Keep these within the same major and verify with Host and browser tests.
 overrides:
   zod@4.4.3: 4.6.7
