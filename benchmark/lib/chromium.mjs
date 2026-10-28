@@ -45,8 +45,7 @@ export function systemBrowserCandidates({ platform = process.platform, requireEx
   return []
 }
 
-async function newestPlaywrightChromium({ requireExtensions = false } = {}) {
-  const cacheRoot = playwrightCacheRoot()
+export async function newestPlaywrightChromium({ requireExtensions = false, cacheRoot = playwrightCacheRoot() } = {}) {
   let entries
   try {
     entries = await readdir(cacheRoot, { withFileTypes: true })
@@ -60,14 +59,18 @@ async function newestPlaywrightChromium({ requireExtensions = false } = {}) {
     .sort((left, right) => right.name.localeCompare(left.name))
   const relativeExecutables = requireExtensions ? [
     ['chrome-mac-arm64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'],
+    ['chrome-mac-x64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'],
     ['chrome-mac', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'],
     ['chrome-linux', 'chrome'],
     ['chrome-win', 'chrome.exe'],
   ] : [
     ['chrome-mac-arm64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'],
+    ['chrome-mac-x64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'],
     ['chrome-mac', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'],
     ['chrome-linux', 'chrome'],
     ['chrome-win', 'chrome.exe'],
+    ['chrome-headless-shell-mac-arm64', 'chrome-headless-shell'],
+    ['chrome-headless-shell-mac-x64', 'chrome-headless-shell'],
     ['headless-shell-mac-arm64', 'headless_shell'],
     ['headless-shell-mac', 'headless_shell'],
     ['headless-shell-linux', 'headless_shell'],
