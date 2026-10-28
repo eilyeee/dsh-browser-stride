@@ -18,14 +18,14 @@
     "dompurify": "3.4.17",
     "marked": "18.1.2",
     "react": "19.3.1",
-    "react-dom": "18.3.1",
+    "react-dom": "19.3.1",
     "tldts": "7.4.19"
   },
   "devDependencies": {
     "@yuxianglin/dsh-bridge-browser": "workspace:^",
     "@types/chrome": "0.3.7",
     "@types/react": "19.3.0",
-    "@types/react-dom": "18.3.7",
+    "@types/react-dom": "19.3.0",
     "@vitejs/plugin-react": "6.1.2",
     "fake-indexeddb": "6.2.6",
     "jsdom": "30.1.3",
