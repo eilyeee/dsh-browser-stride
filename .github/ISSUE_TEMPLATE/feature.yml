@@ -1,0 +1,39 @@
+name: Feature or improvement
+description: Propose a capability, a reliability improvement, or a documentation change
+title: "[feat] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please describe the user-visible problem and check existing issues before proposing a change.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user-visible problem does this solve? Describe the task, not the implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: What should happen instead? If it changes contract semantics, name the affected module.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Including "do nothing" and any workaround.
+    validations:
+      required: false
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I checked existing issues; this is not already covered.
+          required: true
+        - label: This does not require collecting credentials or bypassing task authorization.
+          required: true

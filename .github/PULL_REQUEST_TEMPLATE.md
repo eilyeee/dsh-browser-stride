@@ -38,3 +38,9 @@
 - [ ] 已通过 `pnpm run build` / `bash -n scripts/install.sh` 等基础检查 / Passed basic checks
 - [ ] 文档已同步更新（如需要）/ Docs updated if needed
 - [ ] 不包含无关改动 / No unrelated changes included
+
+## Stride 约定 / Stride conventions
+
+- [ ] 契约语义变更已同步类型与不变量测试 / Contract changes include types and invariant tests
+- [ ] 能力声明附了适当的验证依据 / Capability claims cite appropriate verification
+- [ ] 不含密钥、真实账号数据、本机绝对路径、生成产物 / No secrets, real account data, absolute paths or generated artifacts

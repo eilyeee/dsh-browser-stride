@@ -1,0 +1,70 @@
+name: Bug report
+description: Something in the extension, bridge, side panel, installer, or docs does not work as described
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. **Do not include credentials, cookies, session tokens, or third-party personal data.**
+        Security issues go through the private reporting channel described in `SECURITY.md` in the repository root, never a public issue.
+  - type: textarea
+    id: expected-actual
+    attributes:
+      label: Expected vs actual
+      description: What did you expect, and what happened instead?
+      placeholder: |
+        Expected: ...
+        Actual: ...
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include the URL type (http/https/localhost) and whether you were logged in. Do not paste personal URLs.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Extension background / service worker
+        - Content script (snapshot, actions)
+        - Side panel
+        - Bridge plugin (Host side)
+        - Installer / packaging
+        - Documentation
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Run `pnpm run stride:baseline -- --json --no-write`, then inspect and redact machine-specific paths and other identifying details before sharing.
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or screenshots
+      description: Redact tokens, cookies, and personal data. Drag files into this box if useful.
+      render: shell
+    validations:
+      required: false
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I removed credentials and personal data from this report.
+          required: true
+        - label: This is not a security vulnerability (those go to SECURITY.md).
+          required: true

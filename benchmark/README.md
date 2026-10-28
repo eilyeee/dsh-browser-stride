@@ -25,11 +25,21 @@ node benchmark/run.mjs --dry-run --smoke
 pnpm --dir benchmark probe
 ```
 
+仓库还提供使用临时 DSH home、真实 Host 工具运行时和合成页面的独立浏览器 smoke：
+
+```bash
+pnpm run test:smoke-browser
+```
+
+它不调用模型，也不验证真实目标站点。先构建 bridge 和 Chrome 扩展；必要时通过 `PLAYWRIGHT_CHROMIUM_PATH` 指定支持加载扩展的 Chromium。
+
 真实 smoke 会调用当前 DSH profile 配置的模型，因此会消耗模型额度：
 
 ```bash
 node benchmark/run.mjs --smoke
 ```
+
+当前结果校验要求顶层工具调用名以 `browser_` 开头。DSH 的 PTC preset 使用顶层 `run_code`，即使其中只调用浏览器工具也会被判为失败；使用 `standard` 等原生工具 preset 后再运行。禁止其他工具目前依靠提示词和事后结果校验，不构成执行时权限隔离；评测须在受控环境中进行。
 
 正式运行默认执行 6 个任务 × 5 个 seed × 2 个后端，共 60 次：
 
@@ -77,13 +87,14 @@ node benchmark/report.mjs benchmark/results/<file>.jsonl
 
 每个任务的可见数据随 seed 确定性变化，降低模型记住固定答案的可能。网页状态通过独立 HTTP API 验证，不依据模型自报“已完成”。
 
-当前任务套件版本为 `2`。版本 `2` 修正了 `inventory_filter`：seed 继续改变商品根名称、SKU、价格和库存顺序，但不再把仅用于生成数据的 seed 数字拼进目标商品名。旧结果没有 `benchmarkSuiteVersion`，其成功率不能与版本 `2` 直接比较。以后只要任务提示、数据生成或 validator 语义变化，都必须递增该版本。
+当前评测套件版本为 `4`：文本观察加入校验状态，按键工具明确使用合成事件，不再伪造表单提交；不能与版本 `3` 或更早结果直接汇总。版本 `3` 引入观察绑定引用和单选工具；版本 `2` 修正了 `inventory_filter` 的目标商品名。以后只要任务提示、模型可见接口、数据生成或 validator 语义变化，都必须递增版本。
 
 ## 公平性控制
 
 - 两边共享同一提示词、任务实例、DSH profile、模型选择、浏览器尺寸、locale 和时区。
-- Playwright 适配器使用与扩展相同的 `browser_snapshot`、`browser_click`、`browser_type` 等模型可见工具名、说明、参数 schema 和通用系统提示；动作后的 DOM 稳定等待策略也使用相同时间预算。
+- Playwright 适配器与扩展的共同基础工具使用相同的名称、参数和主要说明，并共享浏览器策略提示；按键工具两边都只发送合成事件。Playwright 只支持顶层 frame，其他观察、动作与权限实现并不相同，也不提供扩展的全部标签管理工具。比较结果要连同这些差异一起解释，不能作为扩展安全或多 frame 能力的验收证据。
 - 两个 DSH 进程使用隔离的 session/storage 目录，避免相互污染；模型凭据仍来自同一个本机 DSH profile。
+- 扩展后端使用临时 Host 管理凭据签发一次性配对码；扩展只接收配对码和安装级凭据，不接收 Host 管理凭据。
 - 同任务、同 seed 形成一个 pair，谁先运行由确定性哈希交替，降低固定顺序导致的热身偏差。
 - 提示词禁止非 `browser_*` 工具，validator 也会把使用其他工具的运行判为失败。
 - 两边都使用当前仓库构建产物；正式评测前必须先执行 `pnpm build`。
