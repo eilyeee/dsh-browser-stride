@@ -6,7 +6,8 @@ body:
   - type: markdown
     attributes:
       value: |
-        Check `README.md` first. Security issues must use the private channel in `SECURITY.md`, not this form.
+        Check `README.md` first. Use the private channel in `SECURITY.md` for security reports. If it is unavailable,
+        use this form only to request a private contact channel; do not include vulnerability details.
   - type: textarea
     id: goal
     attributes:

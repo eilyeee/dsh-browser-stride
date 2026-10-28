@@ -15,7 +15,7 @@ The project is in **M0: compatibility and baseline verification**. The upstream 
 
 ## Run from source
 
-The public repository address has not been chosen yet. After checking out this repository:
+After checking out this repository:
 
 ```sh
 pnpm install --frozen-lockfile
@@ -24,7 +24,7 @@ pnpm run build
 pnpm start
 ```
 
-The installer modifies the local **web** DSH profile, builds the plugin and extension, and opens the browser's extension page. It may remove the legacy bridge package from that profile; review the script before running it. Desktop may use a different profile, so installation into `web` is not proof of Desktop integration. The installer must be run from a complete Stride checkout; it does not download an upstream project.
+The installer modifies the local **web** DSH profile, builds the plugin and Chrome extension, and attempts to open Chrome's extension page. It may remove the legacy bridge package from that profile; review the script before running it. Firefox requires a separate build and temporary installation; see the [extension README](extensions/dsh-browser/README.md). Desktop may use a different profile, so installation into `web` is not proof of Desktop integration. The installer must be run from a complete Stride checkout; it does not download an upstream project.
 
 After starting the Host, run `pnpm run pair:browser` in another terminal, then enter the one-time code in the unpacked extension's side-panel settings. The code expires after five minutes and is replaced by an installation-specific credential. The address can be discovered automatically. For a nondefault port use `pnpm run pair:browser -- issue --url http://127.0.0.1:PORT` and set the bridge address to `ws://127.0.0.1:PORT/ext/bridge`. Run `pnpm run pair:browser -- list` to see installations and `pnpm run pair:browser -- revoke INSTALLATION_ID` to revoke one and disconnect it. Add the same `--url` when needed.
 
@@ -37,7 +37,7 @@ The token file uses restrictive permissions where supported; protect the DSH hom
 - Text snapshots, observation-bound control references, page navigation, tab management and selected-text quoting. A new observation invalidates earlier references in that frame.
 - A side-panel conversation connected to the local Harness session API; chat image attachments depend on Host support.
 - User approval for page-changing actions, target checks, single-select options, and input/checkbox readback. Control readback does not prove a form was saved.
-- In-memory ordering for browser writes while the extension worker is alive; durable action receipts and restart reconciliation are still planned.
+- In-memory ordering for browser writes while the extension worker is alive; durable action receipts and restart reconciliation are not implemented.
 - A loopback-only bridge with one-time pairing and separately revocable installation credentials. Host settings, credentials and local-path operations are disabled over the bridge unless the Host explicitly opts in with `allowHostManagement`.
 
 Screenshots, CDP input, webpage uploads/downloads, reliable run recovery and a shared Desktop/side-panel task model are not currently supported. A successful click or model response is not independent proof that a business task completed.

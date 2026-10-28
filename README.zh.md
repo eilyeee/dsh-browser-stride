@@ -15,7 +15,7 @@ DSH Stride 是 [dsh-browser](https://github.com/omdsh-dev/dsh-browser) 的社区
 
 ## 从源码运行
 
-项目公开仓库地址尚未确定。检出本仓库后，在仓库根目录执行：
+检出本仓库后，在仓库根目录执行：
 
 ```sh
 pnpm install --frozen-lockfile
@@ -24,7 +24,7 @@ pnpm run build
 pnpm start
 ```
 
-安装脚本会修改本地 DSH 的 **web** profile、构建插件与扩展，并打开浏览器扩展管理页；如果该 profile 中存在旧版 Bridge 包，脚本可能移除它，请先阅读脚本。桌面端可能使用其他 profile，安装到 `web` 不等于桌面端已经接通。脚本必须从完整的 Stride 检出目录运行，不会下载上游项目代替本项目。
+安装脚本会修改本地 DSH 的 **web** profile、构建插件与 Chrome 扩展，并尝试打开 Chrome 扩展管理页；如果该 profile 中存在旧版 Bridge 包，脚本可能移除它，请先阅读脚本。Firefox 需要单独构建和临时安装，详见[扩展说明](extensions/dsh-browser/README.zh.md)。桌面端可能使用其他 profile，安装到 `web` 不等于桌面端已经接通。脚本必须从完整的 Stride 检出目录运行，不会下载上游项目代替本项目。
 
 启动 Host 后，在另一个终端的仓库根目录运行 `pnpm run pair:browser`，将得到的一次性配对码填入已加载扩展的侧栏设置。配对码五分钟后过期，使用后会换成该安装实例专用的凭据。地址可以自动发现；如果 Host 使用非默认端口，运行 `pnpm run pair:browser -- issue --url http://127.0.0.1:PORT`，并在扩展中将 Bridge 地址设为 `ws://127.0.0.1:PORT/ext/bridge`。使用 `pnpm run pair:browser -- list` 查看安装实例，使用 `pnpm run pair:browser -- revoke INSTALLATION_ID` 撤销并断开指定实例；非默认端口也需加上 `--url`。
 

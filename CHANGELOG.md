@@ -62,6 +62,8 @@ no release version has been assigned yet.
 - The benchmark connects the extension using a one-time pairing code, binds
   each session to its target tab, redacts Host launch credentials in logs, and
   owns the actual DSH process so it can shut down cleanly.
+- The benchmark detects current Intel macOS Chromium cache layouts, including
+  the full browser required for extension tests.
 - The key tool sends synthetic keyboard events without fabricating a form
   submit; native key behavior and effects of page handlers remain unconfirmed.
 - Bare-index clients are incompatible with the current element actions; update
