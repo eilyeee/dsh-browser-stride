@@ -9,6 +9,7 @@ interface ExtensionManifest {
   content_security_policy: { extension_pages: string }
   browser_specific_settings?: {
     gecko?: {
+      id?: string
       strict_min_version?: string
       data_collection_permissions?: { required?: string[] }
     }
@@ -31,13 +32,20 @@ describe('Firefox build contract', () => {
     expect(firefoxManifest.version).toBe(packageManifest.version)
     expect(firefoxManifest.version).toBe(chromeManifest.version)
     expect(firefoxManifest.permissions).toContain('notifications')
-    expect(firefoxManifest.content_security_policy.extension_pages).toContain('https://raw.githubusercontent.com')
+    expect(firefoxManifest.content_security_policy.extension_pages).not.toContain('https://raw.githubusercontent.com')
+    expect(chromeManifest.content_security_policy.extension_pages).not.toContain('https://raw.githubusercontent.com')
+  })
+
+  it('keeps the Windows installer readable by Windows PowerShell', async () => {
+    const installer = await readFile('../../scripts/install.ps1')
+    expect(installer.subarray(0, 3)).toEqual(Buffer.from([0xef, 0xbb, 0xbf]))
   })
 
   it('uses a Firefox event page, sidebar, and AMO data-transmission declaration', async () => {
     const manifest = await readJson<ExtensionManifest>('../manifest.firefox.json')
 
     expect(manifest.background).toEqual({ scripts: ['background.js'] })
+    expect(manifest.browser_specific_settings?.gecko?.id).toBe('dsh-browser-stride@stride.invalid')
     expect(manifest.sidebar_action).toMatchObject({
       default_panel: 'panel/index.html',
       open_at_install: false,

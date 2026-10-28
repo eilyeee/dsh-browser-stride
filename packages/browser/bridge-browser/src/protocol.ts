@@ -18,6 +18,9 @@ export const BRIDGE_PATH = '/ext/bridge'
 /** Zero-config discovery endpoint: returns `{ wsUrl }` for the extension. */
 export const BRIDGE_CONFIG_PATH = '/ext/bridge-config'
 
+/** Local, administrator-authenticated installation pairing endpoint. */
+export const BRIDGE_PAIRING_PATH = '/ext/bridge-pairing'
+
 /** Internal RPC used after an explicit tab handoff to seed the Agent's next step. */
 export const BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD = 'bridge.injectBrowserSnapshot'
 
@@ -36,7 +39,7 @@ export const DEFAULT_TOKEN_BYTES = 32
 /** Default rendered-snapshot character budget. */
 export const DEFAULT_SNAPSHOT_MAX_CHARS = 32_000
 
-/** Smallest snapshot budget that can carry both trust boundaries and page text. */
+/** Smallest accepted wire budget; frame metadata may require a larger practical limit. */
 export const MIN_SNAPSHOT_MAX_CHARS = 500
 
 /** Error codes a tool call may settle with. Open set: consumers must tolerate unknown codes. */
@@ -73,7 +76,7 @@ export interface BridgeCaps {
 /** Frames sent by the extension to the bridge plugin. */
 export type ClientFrame =
   /** First frame, within HELLO_TIMEOUT_MS of socket open. */
-  | { t: 'hello'; token: string; caps: BridgeCaps }
+  | { t: 'hello'; token: string; caps: BridgeCaps; installationId?: string }
   /** Unary call projected by the active dsh Host adapter. */
   | { t: 'rpc'; id: string; method: string; payload: unknown }
   /** Answer or cancel a pending Host interaction waterfall. */
@@ -87,7 +90,7 @@ export type ClientFrame =
 /** Frames sent by the bridge plugin to the extension. */
 export type ServerFrame =
   /** Accepted after a valid `hello`. */
-  | { t: 'hello.ok'; caps: BridgeCaps }
+  | { t: 'hello.ok'; caps: BridgeCaps; credential?: string }
   /** Reply to an `rpc` frame; `result` is the bridge's stable ServerResponse envelope. */
   | { t: 'rpc.result'; id: string; ok: true; result: unknown }
   | { t: 'rpc.result'; id: string; ok: false; error: { code: string; message: string } }
@@ -154,8 +157,10 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
   switch (frame.t) {
     case 'hello':
       return typeof frame.token === 'string'
+        && (frame.installationId === undefined || typeof frame.installationId === 'string')
         && isCaps(frame.caps)
-        ? { t: 'hello', token: frame.token, caps: frame.caps }
+        ? { t: 'hello', token: frame.token, caps: frame.caps,
+            ...(typeof frame.installationId === 'string' ? { installationId: frame.installationId } : {}) }
         : undefined
     case 'rpc':
       return typeof frame.id === 'string' && typeof frame.method === 'string'
@@ -176,8 +181,9 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
     case 'pong':
       return { t: 'pong' }
     case 'hello.ok':
-      return isCaps(frame.caps)
-        ? { t: 'hello.ok', caps: frame.caps }
+      return isCaps(frame.caps) && (frame.credential === undefined || typeof frame.credential === 'string')
+        ? { t: 'hello.ok', caps: frame.caps,
+            ...(typeof frame.credential === 'string' ? { credential: frame.credential } : {}) }
         : undefined
     case 'rpc.result':
       if (typeof frame.id !== 'string') return undefined

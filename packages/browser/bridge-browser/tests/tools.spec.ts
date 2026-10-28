@@ -34,8 +34,8 @@ describe('registerBrowserTools', () => {
     registerBrowserTools(ctx, bridge, { toolTimeoutMs: 1_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
     const tool = registered.find((r) => r.name === 'browser_click')!
     const exec = { signal: new AbortController().signal }
-    const result = await (tool.definition.execute as (args: unknown, e: { signal: AbortSignal }) => Promise<unknown>)({ index: 3, frame: 7 }, exec)
-    expect(requestTool).toHaveBeenCalledWith('browser_click', { index: 3, frame: 7 }, exec.signal, 1_000)
+    const result = await (tool.definition.execute as (args: unknown, e: { signal: AbortSignal }) => Promise<unknown>)({ elementRef: 'obs_test:3', frame: 7 }, exec)
+    expect(requestTool).toHaveBeenCalledWith('browser_click', { elementRef: 'obs_test:3', frame: 7 }, exec.signal, 1_000)
     expect(result).toEqual({ text: 'ok' })
   })
 
@@ -48,11 +48,11 @@ describe('registerBrowserTools', () => {
       agent: { id: 'session-browser' },
     }
 
-    await (tool.definition.execute as (args: unknown, e: typeof exec) => Promise<unknown>)({ index: 3 }, exec)
+    await (tool.definition.execute as (args: unknown, e: typeof exec) => Promise<unknown>)({ elementRef: 'obs_test:3' }, exec)
 
     expect(requestTool).toHaveBeenCalledWith(
       'browser_click',
-      { index: 3 },
+      { elementRef: 'obs_test:3' },
       exec.signal,
       1_000,
       'session-browser',
@@ -81,12 +81,14 @@ describe('registerBrowserTools', () => {
       await (byName.get(name)!.execute as (a: unknown, e: { signal: AbortSignal }) => Promise<unknown>)(args, exec)
     }
 
-    await run('browser_type', { index: 2, text: 'hello' })
-    expect(requestTool).toHaveBeenLastCalledWith('browser_type', { index: 2, text: 'hello' }, exec.signal, 1_000)
-    await run('browser_type', { index: 2, text: 'hello', replace: true })
-    expect(requestTool).toHaveBeenLastCalledWith('browser_type', { index: 2, text: 'hello', replace: true }, exec.signal, 1_000)
-    await run('browser_type', { index: 2, frame: 4, text: 'inside frame' })
-    expect(requestTool).toHaveBeenLastCalledWith('browser_type', { index: 2, frame: 4, text: 'inside frame' }, exec.signal, 1_000)
+    await run('browser_type', { elementRef: 'obs_test:2', text: 'hello' })
+    expect(requestTool).toHaveBeenLastCalledWith('browser_type', { elementRef: 'obs_test:2', text: 'hello' }, exec.signal, 1_000)
+    await run('browser_type', { elementRef: 'obs_test:2', text: 'hello', replace: true })
+    expect(requestTool).toHaveBeenLastCalledWith('browser_type', { elementRef: 'obs_test:2', text: 'hello', replace: true }, exec.signal, 1_000)
+    await run('browser_type', { elementRef: 'obs_test:2', frame: 4, text: 'inside frame' })
+    expect(requestTool).toHaveBeenLastCalledWith('browser_type', { elementRef: 'obs_test:2', frame: 4, text: 'inside frame' }, exec.signal, 1_000)
+    await run('browser_select', { elementRef: 'obs_test:2', frame: 4, optionIndex: 1 })
+    expect(requestTool).toHaveBeenLastCalledWith('browser_select', { elementRef: 'obs_test:2', frame: 4, optionIndex: 1 }, exec.signal, 1_000)
 
     await run('browser_press', { key: 'Enter' })
     expect(requestTool).toHaveBeenLastCalledWith('browser_press', { key: 'Enter' }, exec.signal, 1_000)
@@ -149,8 +151,8 @@ describe('registerBrowserTools', () => {
       properties: Record<string, unknown>
       required?: string[]
     }
-    expect(click.properties.index).toBeDefined()
-    expect(click.required).toContain('index')
+    expect(click.properties.elementRef).toBeDefined()
+    expect(click.required).toContain('elementRef')
   })
 
   it('declares cooperative timeoutMs on every tool', () => {

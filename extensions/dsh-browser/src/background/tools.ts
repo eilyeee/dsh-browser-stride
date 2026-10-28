@@ -10,6 +10,7 @@
 
 import { DEFAULT_SNAPSHOT_MAX_CHARS } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import type { ToolError } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+import { parseElementRef } from '@yuxianglin/dsh-bridge-browser/src/contracts/ids.ts'
 import {
   allocateFrameBudgets,
   frameDocumentKey,
@@ -17,7 +18,7 @@ import {
   listTabFrames,
   type TabFrame,
 } from './frames.ts'
-import { wrapUntrustedContent } from '../security/untrusted.ts'
+import { untrustedContentBudget, wrapUntrustedContent } from '../security/untrusted.ts'
 import { approvalPromptForCall, originFromUrl } from './authorization.ts'
 import { waitForNextDocumentReady } from './navigation.ts'
 import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
@@ -51,11 +52,16 @@ const CONTENT_SCRIPT_FILE = 'content.js'
 const ACTION_DELTA_TOOLS = new Set([
   'browser_click',
   'browser_type',
+  'browser_select',
   'browser_press',
   'browser_scroll',
   'browser_wait',
 ])
-const ACTION_DELTA_GUIDANCE = 'The page settled and its current changes are included below. Continue from this state; take another snapshot only when broader page context is needed.'
+const ACTION_DELTA_GUIDANCE = 'The page changes are below. Only shown references are current; take a full snapshot for other controls.'
+const MAX_ACTION_STATUS_CHARS = 300
+const FRAME_ERROR_CHARS = 100
+const FRAME_NOTES_CHARS = 160
+const MIN_FRAME_SNAPSHOT_CHARS = 100
 const NAVIGATION_CANDIDATE_TOOLS = new Set([
   'browser_click',
   'browser_navigate',
@@ -74,6 +80,7 @@ const TAB_NATIVE_TOOLS = new Set([
 const STATE_CHANGING_PAGE_TOOLS = new Set([
   'browser_click',
   'browser_type',
+  'browser_select',
   'browser_press',
   'browser_scroll',
   'browser_navigate',
@@ -90,10 +97,18 @@ export const TAB_MANAGEMENT_TOOL_NAMES = new Set([
 const NAVIGATION_SNAPSHOT_GUIDANCE = 'Navigation completed and the current page snapshot is included below. Use it directly instead of taking an immediate duplicate snapshot.'
 const pendingInjections = new Map<number, Promise<void>>()
 const snapshotDocumentsByTab = new Map<number, Map<number, string>>()
+const snapshotGenerationByTab = new Map<number, object>()
 
-/** Forget delta/element state whenever the user explicitly follows a new tab. */
+/** Invalidate captured documents and any in-flight observation for a tab. */
 export function resetTabSnapshot(tabId: number): void {
   snapshotDocumentsByTab.delete(tabId)
+  if (snapshotGenerationByTab.has(tabId)) snapshotGenerationByTab.set(tabId, {})
+}
+
+/** Forget a closed tab without letting an in-flight snapshot recreate its state. */
+export function forgetTabSnapshot(tabId: number): void {
+  snapshotDocumentsByTab.delete(tabId)
+  snapshotGenerationByTab.delete(tabId)
 }
 
 /** Whether a successful tool may have changed the controlled tab's page URL. */
@@ -343,11 +358,31 @@ async function snapshotAllFrames(
   call: ToolCall,
   budget: ContentBudget,
 ): Promise<ToolAnswer> {
-  const budgets = allocateFrameBudgets(frames, budget)
+  const generation = snapshotGenerationByTab.get(tabId) ?? {}
+  snapshotGenerationByTab.set(tabId, generation)
+  // Reserve the secure wrapper, frame headers and bounded error/omission notes
+  // before asking content scripts to mint references. The wrapper must never
+  // cut a reference-bearing frame response after it has been recorded.
+  const bodyBudget = untrustedContentBudget(budget.maxChars)
+  let remaining = Math.max(0, bodyBudget - FRAME_NOTES_CHARS)
+  const selected: TabFrame[] = []
+  for (const frame of frames) {
+    const overhead = (frame.frameId === 0 ? 0 : frameHeader(frame).length + 1) + FRAME_ERROR_CHARS + 1
+    if (overhead > remaining && frame.frameId !== 0) break
+    selected.push(frame)
+    remaining = Math.max(0, remaining - overhead)
+  }
+  const budgets = allocateFrameBudgets(selected, { ...budget, maxChars: remaining })
+  if ((budgets.get(0)?.maxChars ?? 0) < MIN_FRAME_SNAPSHOT_CHARS) {
+    return unavailable('The snapshot budget is too small to describe the main page. Increase snapshotMaxChars and try again.')
+  }
   const previous = snapshotDocumentsByTab.get(tabId) ?? new Map<number, string>()
   const deltaRequested = call.args.delta === true
 
-  const settled = await Promise.allSettled(frames.map(async (frame) => {
+  const settled = await Promise.allSettled(selected.map(async (frame) => {
+    if ((budgets.get(frame.frameId)?.maxChars ?? 0) < MIN_FRAME_SNAPSHOT_CHARS) {
+      return { frame, response: undefined, budgetInsufficient: true }
+    }
     const sameDocument = previous.get(frame.frameId) === frameDocumentKey(frame)
     const frameCall: ToolCall = {
       ...call,
@@ -356,18 +391,25 @@ async function snapshotAllFrames(
     const response = await sendAction(tabId, frameCall, frame, budgets.get(frame.frameId))
     return { frame, response }
   }))
+  if (snapshotGenerationByTab.get(tabId) !== generation) {
+    return unavailable('The page changed while the snapshot was being captured. Call browser_snapshot again.')
+  }
 
   const sections: string[] = []
   const capturedDocuments = new Map<number, string>()
   for (let index = 0; index < settled.length; index += 1) {
     const outcome = settled[index]!
-    const frame = frames[index]!
+    const frame = selected[index]!
     if (outcome.status === 'rejected') {
       if (frame.frameId === 0) throw outcome.reason
       sections.push(frameHeader(frame), '(This iframe was inaccessible or destroyed while loading.)')
       continue
     }
     const answer = outcome.value.response
+    if ('budgetInsufficient' in outcome.value) {
+      sections.push(frameHeader(frame), '(This iframe was omitted because its snapshot budget was too small.)')
+      continue
+    }
     if (!isToolAnswer(answer)) {
       if (frame.frameId === 0) return unavailable('The page content script returned an invalid response.')
       sections.push(frameHeader(frame), '(This iframe returned an invalid response.)')
@@ -376,7 +418,12 @@ async function snapshotAllFrames(
     const text = answerText(answer)
     if (text === undefined) {
       if (frame.frameId === 0) return answer
-      sections.push(frameHeader(frame), `(This iframe could not be read: ${answer.error?.message ?? 'unknown error'})`)
+      sections.push(frameHeader(frame), '(This iframe could not be read.)')
+      continue
+    }
+    if (text.length > (budgets.get(frame.frameId)?.maxChars ?? 0)) {
+      if (frame.frameId === 0) return unavailable('The page snapshot exceeded its assigned budget. Update the bridge and extension together.')
+      sections.push(frameHeader(frame), '(This iframe exceeded its snapshot budget.)')
       continue
     }
     capturedDocuments.set(frame.frameId, frameDocumentKey(frame))
@@ -387,15 +434,16 @@ async function snapshotAllFrames(
   if (deltaRequested) {
     const liveIds = new Set(frames.map((frame) => frame.frameId))
     const removed = [...previous.keys()].filter((frameId) => frameId !== 0 && !liveIds.has(frameId))
-    if (removed.length > 0) sections.push(`\nRemoved iframes: ${removed.join(', ')}`)
+    if (removed.length > 0) sections.push(`\nRemoved iframes: ${removed.join(', ')}`.slice(0, 75))
   }
+  if (selected.length < frames.length) sections.push('\n(Additional iframes omitted by the snapshot budget.)')
 
   snapshotDocumentsByTab.set(tabId, capturedDocuments)
   return { ok: true, result: { text: wrapUntrustedContent(sections.join('\n'), budget.maxChars) } }
 }
 
 function frameHeader(frame: TabFrame): string {
-  return `\n--- iframe frame=${frame.frameId} parent=${frame.parentFrameId} origin=${frameOrigin(frame)} ---`
+  return `\n--- iframe frame=${frame.frameId} parent=${frame.parentFrameId} origin=${frameOrigin(frame).slice(0, 200)} ---`
 }
 
 function stripDuplicateSnapshotPrompt(status: string): string {
@@ -451,7 +499,9 @@ async function dispatchOnce(
   if (isCancelled(call, signal)) return cancelled()
   if (targetStillAllowed?.() === false) return targetChanged()
   const hasSnapshotBaseline = snapshotDocumentsByTab.get(tabId)?.get(frameId) === frameDocumentKey(frame)
-  const requestPageDelta = includeActionDelta && hasSnapshotBaseline && ACTION_DELTA_TOOLS.has(call.name)
+  const deltaBoundary = budget.maxChars - MAX_ACTION_STATUS_CHARS - ACTION_DELTA_GUIDANCE.length - 3
+  const deltaChars = Math.max(0, untrustedContentBudget(deltaBoundary) - (frame.frameId === 0 ? 0 : frameHeader(frame).length + 1))
+  const requestPageDelta = includeActionDelta && hasSnapshotBaseline && ACTION_DELTA_TOOLS.has(call.name) && deltaChars > 0
   const navigationWait = includeActionDelta && isNavigationCandidateTool(call.name)
     ? waitForNextDocumentReady(tabId, frameId, frame.documentId, signal)
     : undefined
@@ -463,7 +513,7 @@ async function dispatchOnce(
       tabId,
       call,
       frame,
-      requestPageDelta ? budget : undefined,
+      requestPageDelta ? { ...budget, maxChars: deltaChars } : undefined,
       requestPageDelta,
     )
   } catch (error: unknown) {
@@ -503,11 +553,13 @@ async function dispatchOnce(
   if (call.name === 'browser_get_text') {
     return { ok: true, result: { text: wrapUntrustedContent(text, budget.maxChars) } }
   }
-  const pageContent = requestPageDelta ? answerPageContent(response) : undefined
+  const candidatePageContent = requestPageDelta ? answerPageContent(response) : undefined
+  const pageContent = candidatePageContent !== undefined && candidatePageContent.length <= deltaChars ? candidatePageContent : undefined
+  const boundedStatus = text.length <= MAX_ACTION_STATUS_CHARS ? text : `${text.slice(0, MAX_ACTION_STATUS_CHARS - 1)}…`
   return {
     ok: true,
     result: {
-      text: pageContent === undefined ? text : wrapActionDelta(text, pageContent, frame, budget.maxChars),
+      text: pageContent === undefined ? text : wrapActionDelta(boundedStatus, pageContent, frame, budget.maxChars),
     },
   }
 }
@@ -807,7 +859,10 @@ function validateFrameTarget(call: ToolCall, frames: TabFrame[]): ToolAnswer | u
 }
 
 function validateElementTarget(call: ToolCall, tabId: number, frames: TabFrame[]): ToolAnswer | undefined {
-  if (call.name !== 'browser_click' && call.name !== 'browser_type') return undefined
+  if (call.name !== 'browser_click' && call.name !== 'browser_type' && call.name !== 'browser_select') return undefined
+  if (typeof call.args.elementRef !== 'string' || parseElementRef(call.args.elementRef) === undefined) {
+    return { ok: false, error: { code: 'bad-args', message: 'An observation-bound elementRef is required. Call browser_snapshot and update the bridge and extension together.' } }
+  }
   const frameId = requestedFrame(call.args)
   const frame = frames.find((candidate) => candidate.frameId === frameId)
   const snapshotted = snapshotDocumentsByTab.get(tabId)?.get(frameId)
@@ -910,7 +965,9 @@ export async function dispatchOpenTab(
 
   const navigationWait = waitForNextDocumentReady(tabId, 0, undefined, signal)
   try {
-    created = await chrome.tabs.update(tabId, { url: parsed.href })
+    const updated = await chrome.tabs.update(tabId, { url: parsed.href })
+    if (updated === undefined) throw new Error('Chrome did not return the newly navigated tab.')
+    created = updated
   } catch (error: unknown) {
     navigationWait.cancel()
     await removeCreatedTab(tabId)

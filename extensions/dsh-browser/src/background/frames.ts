@@ -1,11 +1,10 @@
 /**
  * Frame discovery and budget allocation for one browser tab.
  *
- * Frame ids identify a frame slot and are the routing half of the model-facing
- * `(frame, index)` element address. They can survive navigation, so security
- * checks additionally bind element ids and message delivery to `documentId`.
- * Element ids remain local to each content script, so a re-render in one
- * iframe cannot invalidate otherwise-stable ids in the rest of the page.
+ * Frame ids identify a frame slot and route observation-bound element refs.
+ * They can survive navigation, so checks also bind message delivery to
+ * `documentId` where available. Each content script owns its own observation
+ * and reference registry; a new observation invalidates that frame's old refs.
  *
  * @module
  */

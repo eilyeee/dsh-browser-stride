@@ -50,6 +50,7 @@ function panelPort() {
   const postMessage = vi.fn()
   const port = {
     name: 'dsh-panel',
+    sender: { id: 'test-extension', url: 'chrome-extension://test/panel/index.html' },
     postMessage,
     onMessage,
     onDisconnect,
@@ -60,12 +61,17 @@ function panelPort() {
 function mockChrome(options: {
   localGet?: () => Promise<Record<string, unknown>>
   localSet?: (items: Record<string, unknown>) => Promise<void>
+  localSetAccessLevel?: () => Promise<void>
   tabGet?: (tabId: number) => Promise<chrome.tabs.Tab>
   tabQuery?: (queryInfo: chrome.tabs.QueryInfo) => Promise<chrome.tabs.Tab[]>
   tabRemove?: (tabId: number) => Promise<void>
   tabSendMessage?: (tabId: number, message: unknown) => Promise<unknown>
   executeScript?: () => Promise<unknown>
 } = {}) {
+  vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
+    const port = new URL(input.toString()).port
+    return new Response(JSON.stringify({ wsUrl: `ws://127.0.0.1:${port}/ext/bridge` }), { status: 200 })
+  }))
   const onConnect = chromeEvent<[chrome.runtime.Port]>()
   const onAlarm = chromeEvent<[chrome.alarms.Alarm]>()
   const alarms = {
@@ -94,6 +100,7 @@ function mockChrome(options: {
       local: {
         get: vi.fn(options.localGet ?? (async () => ({}))),
         set: vi.fn(options.localSet ?? (async () => {})),
+        setAccessLevel: vi.fn(options.localSetAccessLevel ?? (async () => {})),
       },
       session: {
         get: vi.fn(async () => ({})),
@@ -107,7 +114,7 @@ function mockChrome(options: {
       remove: vi.fn(options.tabRemove ?? (async () => {})),
       sendMessage: vi.fn(options.tabSendMessage ?? (async () => {})),
       onActivated: chromeEvent<[{ tabId: number; windowId: number }]>(),
-      onUpdated: chromeEvent<[number, chrome.tabs.TabChangeInfo, chrome.tabs.Tab]>(),
+      onUpdated: chromeEvent<[number, Parameters<Parameters<typeof chrome.tabs.onUpdated.addListener>[0]>[1], chrome.tabs.Tab]>(),
       onReplaced: chromeEvent<[number, number]>(),
       onRemoved: chromeEvent<[number]>(),
     },
@@ -140,6 +147,70 @@ afterEach(() => {
 })
 
 describe('background bridge lifecycle', () => {
+  it('rejects a content script attempting to open the privileged panel channel', async () => {
+    const chromeMock = mockChrome()
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+    const attacker = panelPort()
+    const disconnect = vi.fn()
+    Object.assign(attacker.port, { sender: { id: 'test-extension', url: 'https://example.com/' }, disconnect })
+    chromeMock.onConnect.emit(attacker.port)
+    expect(disconnect).toHaveBeenCalledOnce()
+    expect(attacker.onMessage.addListener).not.toHaveBeenCalled()
+    expect(chromeMock.alarms.create).not.toHaveBeenCalled()
+  })
+
+  it('binds the saved installation id and persists the issued credential before connecting', async () => {
+    let finish!: () => void
+    let blockSettingsWrite = false
+    const credential = 'a'.repeat(64)
+    const chromeMock = mockChrome({
+      localGet: async () => ({
+        dshSettings: { bridgeUrl: 'ws://127.0.0.1:3080/ext/bridge', token: 'one-time-code' },
+        dshBridgeInstallationId: 'installation-1234567890',
+      }),
+      localSet: async items => {
+        if (blockSettingsWrite && items.dshSettings !== undefined) {
+          await new Promise<void>(resolve => { finish = resolve })
+        }
+      },
+    })
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+    const panel = panelPort()
+    chromeMock.onConnect.emit(panel.port)
+    await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
+    const socket = FakeWebSocket.instances[0]!
+    socket.open()
+    await vi.waitFor(() => { expect(socket.sent).toContainEqual(expect.objectContaining({
+      t: 'hello', token: 'one-time-code', installationId: 'installation-1234567890',
+    })) })
+    blockSettingsWrite = true
+    vi.mocked(chrome.storage.local.set).mockClear()
+    socket.receive({ t: 'hello.ok', credential, caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
+    await vi.waitFor(() => { expect(chrome.storage.local.set).toHaveBeenCalled() })
+    const savedSettings = (vi.mocked(chrome.storage.local.set).mock.calls[0]![0] as Record<string, unknown>).dshSettings as Record<string, unknown>
+    expect(savedSettings).not.toHaveProperty('token')
+    const { readBridgeCredential } = await import('../src/background/credential-store.ts')
+    expect(await readBridgeCredential()).toBe(credential)
+    expect(panel.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'status', state: 'connected' }))
+    finish()
+    await vi.waitFor(() => { expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'status', state: 'connected' })) })
+    panel.onDisconnect.emit()
+    socket.close()
+  })
+
+  it('restricts stored credentials before loading settings', async () => {
+    let finish!: () => void
+    mockChrome({ localSetAccessLevel: () => new Promise(resolve => { finish = resolve }) })
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+    expect(chrome.storage.local.setAccessLevel).toHaveBeenCalledWith({ accessLevel: 'TRUSTED_CONTEXTS' })
+    expect(chrome.storage.local.get).not.toHaveBeenCalled()
+    finish()
+    await vi.waitFor(() => { expect(chrome.storage.local.get).toHaveBeenCalled() })
+  })
+
   it('does not probe, connect, or arm keepalive just because the extension loads', async () => {
     const chromeMock = mockChrome()
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
@@ -203,7 +274,7 @@ describe('background bridge lifecycle', () => {
     await Promise.resolve()
     socket.close(4000, 'replaced')
 
-    chromeMock.alarms.onAlarm.emit({ name: 'bridge-keepalive', scheduledTime: Date.now() })
+    chromeMock.alarms.onAlarm.emit({ name: 'bridge-keepalive', scheduledTime: Date.now(), persistAcrossSessions: false })
     await new Promise((resolve) => { setTimeout(resolve, 0) })
 
     expect(FakeWebSocket.instances).toHaveLength(1)
@@ -214,8 +285,8 @@ describe('background bridge lifecycle', () => {
     let finishSettingsWrite!: () => void
     const settingsWrite = new Promise<void>((resolve) => { finishSettingsWrite = resolve })
     const chromeMock = mockChrome({ localSet: async () => await settingsWrite })
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
-      wsUrl: 'ws://127.0.0.1:3080/ext/bridge',
+    const fetchMock = vi.fn(async (input: string | URL) => new Response(JSON.stringify({
+      wsUrl: `ws://127.0.0.1:${new URL(input.toString()).port}/ext/bridge`,
     }), { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
     vi.stubGlobal('WebSocket', FakeWebSocket)
@@ -256,7 +327,7 @@ describe('background bridge lifecycle', () => {
     let finishSettingsWrite!: () => void
     const settingsWrite = new Promise<void>((resolve) => { finishSettingsWrite = resolve })
     const chromeMock = mockChrome({
-      localGet: async () => ({ dshSettings: { bridgeUrl: 'wss://bridge.example/ext/bridge' } }),
+      localGet: async () => ({ dshSettings: { bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge' } }),
       localSet: async () => { await settingsWrite },
     })
     vi.stubGlobal('WebSocket', FakeWebSocket)
@@ -306,7 +377,7 @@ describe('background bridge lifecycle', () => {
   it('reports a settings persistence failure to the requesting panel', async () => {
     let settingsWrites = 0
     const chromeMock = mockChrome({
-      localGet: async () => ({ dshSettings: { bridgeUrl: 'wss://bridge.example/ext/bridge' } }),
+      localGet: async () => ({ dshSettings: { bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge' } }),
       localSet: async () => {
         settingsWrites += 1
         if (settingsWrites === 1) throw new Error('Storage is unavailable')
@@ -372,7 +443,7 @@ describe('background bridge lifecycle', () => {
     const chromeMock = mockChrome({
       localGet: async () => ({
         dshSettings: {
-          bridgeUrl: 'wss://bridge.example/ext/bridge',
+          bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge',
           unrestrictedBrowserAccess: true,
           sharePageContent: 'off',
         },
@@ -421,7 +492,7 @@ describe('background bridge lifecycle', () => {
     const chromeMock = mockChrome({
       localGet: async () => ({
         dshSettings: {
-          bridgeUrl: 'wss://bridge.example/ext/bridge',
+          bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge',
           unrestrictedBrowserAccess: true,
         },
       }),
@@ -487,7 +558,7 @@ describe('background bridge lifecycle', () => {
     const chromeMock = mockChrome({
       localGet: async () => ({
         dshSettings: {
-          bridgeUrl: 'wss://bridge.example/ext/bridge',
+          bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge',
           unrestrictedBrowserAccess: true,
         },
       }),
@@ -553,7 +624,7 @@ describe('background bridge lifecycle', () => {
     const chromeMock = mockChrome({
       localGet: async () => ({
         dshSettings: {
-          bridgeUrl: 'wss://bridge.example/ext/bridge',
+          bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge',
           unrestrictedBrowserAccess: true,
         },
       }),
@@ -599,13 +670,7 @@ describe('background bridge lifecycle', () => {
       expiresAt: Date.now() + 10_000,
     })
 
-    const approval = await vi.waitFor(() => {
-      const message = panel.postMessage.mock.calls
-        .map((args: unknown[]) => args[0] as { type?: string; request?: { id?: string } })
-        .find((value) => value.type === 'approval.request')
-      expect(message?.request?.id).toBeTypeOf('string')
-      return message!
-    })
+    expect(panel.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'approval.request' }))
     expect(chromeMock.tabs.remove).not.toHaveBeenCalledWith(2)
     expect(chrome.storage.local.set).not.toHaveBeenCalled()
 
@@ -616,6 +681,14 @@ describe('background bridge lifecycle', () => {
     })
     expect(persistedAccess).toEqual([false, true])
     expect(FakeWebSocket.instances).toHaveLength(1)
+
+    const approval = await vi.waitFor(() => {
+      const message = panel.postMessage.mock.calls
+        .map((args: unknown[]) => args[0] as { type?: string; request?: { id?: string } })
+        .find((value) => value.type === 'approval.request')
+      expect(message?.request?.id).toBeTypeOf('string')
+      return message!
+    })
 
     panel.onMessage.emit({
       type: 'approval.response',
@@ -631,7 +704,7 @@ describe('background bridge lifecycle', () => {
     const chromeMock = mockChrome({
       localGet: async () => ({
         dshSettings: {
-          bridgeUrl: 'wss://bridge.example/ext/bridge',
+          bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge',
           unrestrictedBrowserAccess: true,
         },
       }),
@@ -662,7 +735,7 @@ describe('background bridge lifecycle', () => {
 
     panel.onMessage.emit({
       type: 'settings',
-      settings: { bridgeUrl: 'wss://replacement.example/ext/bridge' },
+      settings: { bridgeUrl: 'ws://127.0.0.1:39002/ext/bridge' },
     })
     await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(2) })
     const replacementSocket = FakeWebSocket.instances[1]!
@@ -681,7 +754,7 @@ describe('background bridge lifecycle', () => {
     })
     await new Promise((resolve) => { setTimeout(resolve, 0) })
     const savedBeforeClose = vi.mocked(chrome.storage.local.set).mock.calls.some(([items]) => (
-      (items.dshSettings as { unrestrictedBrowserAccess?: boolean }).unrestrictedBrowserAccess === false
+      (items as { dshSettings: { unrestrictedBrowserAccess?: boolean } }).dshSettings.unrestrictedBrowserAccess === false
     ))
     finishClose()
     await vi.waitFor(() => {
@@ -701,7 +774,7 @@ describe('background bridge lifecycle', () => {
     const checkpoint = new Promise<chrome.tabs.Tab>((resolve) => { finishCheckpoint = resolve })
     const chromeMock = mockChrome({
       localGet: async () => ({ dshSettings: {
-        bridgeUrl: 'wss://bridge.example/ext/bridge',
+        bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge',
         unrestrictedBrowserAccess: true,
       } }),
       tabQuery: async () => [tab],
@@ -734,7 +807,7 @@ describe('background bridge lifecycle', () => {
       sessionId: 'checkpoint-session', args: {}, expiresAt: Date.now() + 10_000,
     })
     await vi.waitFor(() => { expect(checkpointStarted).toBe(true) })
-    panel.onMessage.emit({ type: 'settings', settings: { bridgeUrl: 'wss://replacement.example/ext/bridge' } })
+    panel.onMessage.emit({ type: 'settings', settings: { bridgeUrl: 'ws://127.0.0.1:39002/ext/bridge' } })
     await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(2) })
     const replacement = FakeWebSocket.instances[1]!
     replacement.open()
@@ -755,7 +828,7 @@ describe('background bridge lifecycle', () => {
     const chromeMock = mockChrome({
       localGet: async () => ({
         dshSettings: {
-          bridgeUrl: 'wss://bridge.example/ext/bridge',
+          bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge',
           unrestrictedBrowserAccess: true,
         },
       }),
@@ -818,7 +891,7 @@ describe('background bridge lifecycle', () => {
     const chromeMock = mockChrome({
       localGet: async () => ({
         dshSettings: {
-          bridgeUrl: 'wss://bridge.example/ext/bridge',
+          bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge',
           unrestrictedBrowserAccess: false,
           sharePageContent: 'auto',
         },
@@ -893,7 +966,7 @@ describe('background bridge lifecycle', () => {
     const chromeMock = mockChrome({
       localGet: async () => ({
         dshSettings: {
-          bridgeUrl: 'wss://bridge.example/ext/bridge',
+          bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge',
           unrestrictedBrowserAccess: true,
           sharePageContent: 'off',
         },

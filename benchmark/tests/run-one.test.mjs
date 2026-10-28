@@ -58,10 +58,14 @@ test('V3 benchmark measures first live token before settlement and counts durabl
   }
   const result = await runOne({
     backend: { backend: 'extension', client },
-    extensionBrowser: { prepare: async () => {} },
+    extensionBrowser: { prepare: async () => {}, bindSession: async (sessionId) => {
+      assert.equal(sessionId, 'session-metrics')
+      calls.push('extension.bindSession')
+    } },
     instance, siteOrigin: site.origin, workspace: '/tmp/benchmark', timeoutMs: 500,
   })
   assert.equal(result.success, true)
+  assert.ok(calls.indexOf('extension.bindSession') < calls.indexOf('session.prompt'))
   assert.ok(Math.abs(result.timings.completionMs - result.timings.ttftMs - 30) < 0.02)
   assert.deepEqual(result.tokens, { inputTokens: 100, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 })
   assert.equal(result.timings.llmMs, 27)

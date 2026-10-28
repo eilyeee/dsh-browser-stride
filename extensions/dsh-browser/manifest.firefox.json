@@ -6,7 +6,7 @@
   "version": "0.1.4",
   "browser_specific_settings": {
     "gecko": {
-      "id": "dsh-browser@lum1104.github.io",
+      "id": "dsh-browser-stride@stride.invalid",
       "strict_min_version": "140.0",
       "data_collection_permissions": {
         "required": [
@@ -68,7 +68,7 @@
     }
   ],
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self'; connect-src ws://127.0.0.1:* http://127.0.0.1:* https://raw.githubusercontent.com"
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src ws://127.0.0.1:* http://127.0.0.1:*"
   },
   "icons": {
     "16": "assets/icons/icon16.png",

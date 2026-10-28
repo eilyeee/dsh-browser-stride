@@ -1,17 +1,10 @@
 #!/bin/bash
-# dsh-browser 一键安装：支持远程托管安装和本地 checkout 安装。
-# dsh-browser one-command install: supports both managed remote installs and local checkout installs.
-# 之后无需任何配置：扩展自动探测本机 dsh 并连接（回环免 token）。
-# No further configuration is required: the extension discovers local dsh automatically and loopback connections require no token.
+# dsh-browser 安装：从本地 checkout 构建并安装。
+# dsh-browser installer: build and install from a local checkout.
+# The local address can be discovered; the bridge credential must be entered in the extension.
 set -euo pipefail
 
-REPOSITORY="Lum1104/dsh-browser"
-REMOTE_REF="main"
 DSH_HOME_DIR="${DSH_HOME:-$HOME/.dsh}"
-MANAGED_ROOT="$DSH_HOME_DIR/dsh-browser"
-MANAGED_MARKER="$MANAGED_ROOT/.managed-by-install-sh"
-ARCHIVE_URL="https://github.com/$REPOSITORY/archive/refs/heads/${REMOTE_REF}.tar.gz"
-BOOTSTRAP_TMP=""
 
 print_step() {
   printf '\n[%s/4] %s\n' "$1" "$2"
@@ -243,59 +236,10 @@ ensure_chrome() {
   return 1
 }
 
-cleanup_bootstrap() {
-  if [ -n "$BOOTSTRAP_TMP" ] && [ -d "$BOOTSTRAP_TMP" ]; then
-    rm -rf -- "$BOOTSTRAP_TMP"
-  fi
-}
-
-bootstrap_remote_install() {
-  local archive
-  local source_dir
-  local temp_base="${TMPDIR:-/tmp}"
-
-  require_command curl "未找到 curl；请先安装 curl。" "curl was not found; install curl first."
-  require_command tar "未找到 tar；请先安装 tar。" "tar was not found; install tar first."
-  require_command rsync "未找到 rsync；请先安装 rsync。" "rsync was not found; install rsync first."
-
-  if [ -d "$MANAGED_ROOT" ] && [ ! -f "$MANAGED_MARKER" ] && [ -n "$(ls -A "$MANAGED_ROOT" 2>/dev/null)" ]; then
-    fail_pair \
-      "$MANAGED_ROOT 已存在且不是脚本托管的安装目录；为避免覆盖，请移动该目录或在其中运行 ./scripts/install.sh。" \
-      "$MANAGED_ROOT already exists and is not managed by this installer; move it or run ./scripts/install.sh inside it to avoid overwriting it."
-  fi
-
-  print_pair "未检测到完整的本地 checkout，切换到免 clone 安装。" "No complete local checkout was detected; switching to the clone-free install."
-  print_pair "正在从 $REPOSITORY 的 $REMOTE_REF 分支下载安装文件……" "Downloading installation files from $REPOSITORY at ${REMOTE_REF}…"
-
-  BOOTSTRAP_TMP="$(mktemp -d "$temp_base/dsh-browser-install.XXXXXX")"
-  trap cleanup_bootstrap EXIT HUP INT TERM
-  archive="$BOOTSTRAP_TMP/source.tar.gz"
-  source_dir="$BOOTSTRAP_TMP/source"
-  mkdir -p "$source_dir"
-
-  curl --fail --location --silent --show-error --retry 3 "$ARCHIVE_URL" --output "$archive"
-  tar -xzf "$archive" -C "$source_dir" --strip-components=1
-  has_workspace "$source_dir" || fail_pair \
-    "下载内容不完整，未修改现有安装。" \
-    "The download is incomplete; the existing installation was not changed."
-
-  mkdir -p "$MANAGED_ROOT"
-  touch "$MANAGED_MARKER"
-  rsync -a --delete-after \
-    --exclude 'node_modules/' \
-    --exclude '.managed-by-install-sh' \
-    "$source_dir/" "$MANAGED_ROOT/"
-
-  cleanup_bootstrap
-  trap - EXIT HUP INT TERM
-  print_pair "安装文件已同步到 ${MANAGED_ROOT}。" "Installation files are ready in $MANAGED_ROOT."
-  exec /bin/bash "$MANAGED_ROOT/scripts/install.sh"
-}
-
 if ROOT="$(workspace_root_from_script)"; then
   :
 else
-  bootstrap_remote_install
+  fail_pair "请从 DSH Stride 的完整源码目录运行 scripts/install.sh。" "Run scripts/install.sh from a complete DSH Stride checkout."
 fi
 
 EXT="$ROOT/extensions/dsh-browser"
@@ -341,21 +285,6 @@ else
 fi
 mkdir -p "$DIST_DIR"
 rsync -a --delete-after "$EXT/dist/" "$DIST_DIR/"
-if [ -f "$ROOT/.managed-by-install-sh" ]; then
-  INSTALL_MODE="managed"
-else
-  INSTALL_MODE="checkout"
-fi
-node -e '
-  const { writeFileSync } = require("node:fs");
-  const [filename, mode, sourceRoot] = process.argv.slice(1);
-  const info = {
-    schemaVersion: 1,
-    mode,
-    ...(mode === "checkout" ? { sourceRoot } : {}),
-  };
-  writeFileSync(filename, `${JSON.stringify(info, null, 2)}\n`);
-' "$DIST_DIR/install-info.json" "$INSTALL_MODE" "$ROOT"
 if copy_to_clipboard "$DIST_DIR"; then
   CLIPBOARD_READY=1
 else
@@ -415,9 +344,7 @@ fi
 printf '\n'
 print_pair "加载完成后：" "After loading the extension:"
 print_pair "• 点击工具栏中的 DeepSeek 鲸鱼图标，打开侧边栏" "Click the DeepSeek whale icon in the toolbar to open the side panel"
-print_pair "• 扩展会自动发现本机 dsh，无需填写地址或 token" "The extension discovers local dsh automatically; no address or token is required"
+print_pair "• 启动 Host 后，在仓库根目录运行 pnpm run pair:browser，将一次性配对码填入侧栏设置" "After starting the Host, run pnpm run pair:browser from the repository and enter the one-time code in side-panel settings"
 printf '• 启动固定版本：cd %q && pnpm start\n' "$ROOT"
 printf '   Start the pinned version: cd %q && pnpm start\n' "$ROOT"
-print_pair "• 或直接启动固定版本：npx @deepseek-ai/dsh@0.2.0-rc.2 web" "Or start the pinned version directly: npx @deepseek-ai/dsh@0.2.0-rc.2 web"
 printf '\n'
-print_pair "如果用得顺手，欢迎在 GitHub 点个 Star 支持我们：https://github.com/Lum1104/dsh-browser" "If dsh-browser is useful to you, we'd appreciate a Star on GitHub: https://github.com/Lum1104/dsh-browser"

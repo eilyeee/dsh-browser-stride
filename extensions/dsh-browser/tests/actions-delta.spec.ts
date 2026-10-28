@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { runAction } from '../src/content/actions.ts'
 import { ElementIds } from '../src/content/ids.ts'
+import { observedRef } from './observed-ref.ts'
 
 const BUDGET = { maxItems: 20, maxForms: 10, maxChars: 8_000 }
 
@@ -36,9 +37,9 @@ describe('automatic action deltas', () => {
       document.querySelector('main')!.textContent = 'Complete'
     })
     const ids = new ElementIds()
-    await runAction('browser_snapshot', {}, { ids, budget: BUDGET })
+    const snapshot = await runAction('browser_snapshot', {}, { ids, budget: BUDGET })
 
-    const pending = runAction('browser_click', { index: ids.indexOf(button) }, {
+    const pending = runAction('browser_click', { elementRef: observedRef(snapshot, ids, button) }, {
       ids,
       budget: BUDGET,
       includePageDelta: true,
@@ -55,10 +56,10 @@ describe('automatic action deltas', () => {
     document.body.innerHTML = '<main>Sign in</main><input aria-label="Password" type="password">'
     const input = document.querySelector('input')!
     const ids = new ElementIds()
-    await runAction('browser_snapshot', {}, { ids, budget: BUDGET })
+    const snapshot = await runAction('browser_snapshot', {}, { ids, budget: BUDGET })
 
     const pending = runAction('browser_type', {
-      index: ids.indexOf(input),
+      elementRef: observedRef(snapshot, ids, input),
       text: 'secret-value',
     }, {
       ids,
@@ -80,9 +81,9 @@ describe('automatic action deltas', () => {
       document.querySelector('main')!.textContent = 'Complete'
     })
     const ids = new ElementIds()
-    await runAction('browser_snapshot', {}, { ids, budget: BUDGET })
+    const snapshot = await runAction('browser_snapshot', {}, { ids, budget: BUDGET })
 
-    const pending = runAction('browser_click', { index: ids.indexOf(button) }, {
+    const pending = runAction('browser_click', { elementRef: observedRef(snapshot, ids, button) }, {
       ids,
       budget: BUDGET,
       includePageDelta: false,
@@ -101,9 +102,9 @@ describe('automatic action deltas', () => {
       document.querySelector('main')!.textContent = 'Orders'
     })
     const ids = new ElementIds()
-    await runAction('browser_snapshot', {}, { ids, budget: BUDGET })
+    const snapshot = await runAction('browser_snapshot', {}, { ids, budget: BUDGET })
 
-    const pending = runAction('browser_click', { index: ids.indexOf(link) }, {
+    const pending = runAction('browser_click', { elementRef: observedRef(snapshot, ids, link) }, {
       ids,
       budget: BUDGET,
       includePageDelta: true,

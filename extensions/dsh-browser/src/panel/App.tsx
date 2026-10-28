@@ -29,7 +29,6 @@ import {
   uiScaleAtLimit,
 } from './ui-scale.ts'
 import { QuestionCard } from './QuestionCard.tsx'
-import { UpdateCard } from './UpdateCard.tsx'
 import { MessageImages } from './MessageImages.tsx'
 import type { QuestionAnswer } from './questions.ts'
 import {
@@ -786,13 +785,14 @@ export function App(): React.JSX.Element {
     saveUiScale(next)
   }
 
-  // Settings: seed from storage, then let the panel own the form.
+  // Credentials are held by the background in extension-origin storage; the
+  // panel only retains a newly entered pairing code until the settings save.
   useEffect(() => {
     void chrome.storage.local.get('dshSettings').then((stored) => {
       const raw = stored.dshSettings as Partial<PanelSettings> | undefined
       setSettings({
         bridgeUrl: raw?.bridgeUrl ?? '',
-        token: raw?.token ?? '',
+        token: '',
         sharePageContent: raw?.sharePageContent ?? 'auto',
         unrestrictedBrowserAccess: raw?.unrestrictedBrowserAccess ?? false,
         trustedActionOrigins: raw?.trustedActionOrigins ?? [],
@@ -1625,7 +1625,9 @@ export function App(): React.JSX.Element {
     try {
       const relaySaved = await saveRelayProfiles()
       if (!relaySaved) return
-      await api.updateSettings(settings)
+      const { token, ...otherSettings } = settings
+      await api.updateSettings({ ...otherSettings, ...(token.trim() === '' ? {} : { token: token.trim() }) })
+      setSettings(current => current !== null && current.token === token ? { ...current, token: '' } : current)
       setShowSettings(false)
       await refreshSessionModels(sessionRef.current)
     } catch (cause) {
@@ -1942,7 +1944,6 @@ export function App(): React.JSX.Element {
             <h1>{copy.settings.title}</h1>
           </div>
         </div>
-        <UpdateCard copy={copy.update} />
         <div className="settings-panel">
           <label>
             <span>{copy.settings.bridgeAddress}</span>
@@ -1954,7 +1955,7 @@ export function App(): React.JSX.Element {
             />
           </label>
           <label>
-            <span>Token</span>
+            <span>{copy.settings.tokenLabel}</span>
             <small>{copy.settings.tokenHelp}</small>
             <input
               type="password"

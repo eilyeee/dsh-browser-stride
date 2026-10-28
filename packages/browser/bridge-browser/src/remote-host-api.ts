@@ -27,15 +27,14 @@ import type { RespondResult } from './protocol.ts'
 export interface TypertGatewayLike {
   readonly wireStream: {
     /**
-     * dsh 0.2: `(endpoint, payload, uplink, peer, signal)`.
-     * Legacy stubs/tests: `(endpoint, payload, signal)`.
+     * dsh 0.2.1 requires an explicit Host-owned peer for every stream.
      */
     open(
       endpoint: string,
       payload: unknown,
-      uplinkOrSignal: AsyncIterable<unknown> | AbortSignal,
-      peer?: unknown,
-      signal?: AbortSignal,
+      uplink: AsyncIterable<unknown>,
+      peer: HostPeerLike,
+      signal: AbortSignal,
     ): Promise<AsyncIterable<unknown>>
     failure(error: unknown): HostRpcFailure
   }
@@ -43,8 +42,15 @@ export interface TypertGatewayLike {
     readonly namespace: string
     readonly method: string
     readonly args: Readonly<Record<string, unknown>>
+    readonly peer: HostPeerLike
     readonly signal?: AbortSignal
   }): Promise<unknown>
+}
+
+/** The Host owns and disposes this in-process identity. */
+export interface HostPeerLike {
+  readonly signal: AbortSignal
+  dispose(): Promise<void>
 }
 
 /**
@@ -57,27 +63,18 @@ const EMPTY_WIRE_UPLINK: AsyncIterable<unknown> = {
 }
 
 /**
- * Open a Host wire stream against either dsh 0.2 or the legacy three-arg form.
- *
- * - arity 3: composition/unit stubs still use `(endpoint, payload, signal)`.
- * - arity 5: real dsh 0.2 TypertGatewayWireStream.
- * - arity 0: Cordis/service wrappers — must use the five-arg call. Treating
- *   these as three-arg maps AbortSignal onto uplink and leaves signal
- *   undefined (hello.ok → stream-failed → WS 1011).
+ * Open a stream with the explicit peer required by the selected Host runtime.
  */
-function openWireStream(gateway: TypertGatewayLike, endpoint: string, payload: unknown, signal: AbortSignal): Promise<AsyncIterable<unknown>> {
-  const open = gateway.wireStream.open
-  if (open.length === 3) {
-    return open(endpoint, payload, signal)
-  }
-  return open(endpoint, payload, EMPTY_WIRE_UPLINK, undefined, signal)
+function openWireStream(gateway: TypertGatewayLike, peer: HostPeerLike, endpoint: string, payload: unknown, signal: AbortSignal): Promise<AsyncIterable<unknown>> {
+  return gateway.wireStream.open(endpoint, payload, EMPTY_WIRE_UPLINK, peer, signal)
 }
 
 /** Structural subset of dsh 0.2's Host Connection service. */
 export interface HostConnectionLike {
   createSharedFetchHandler(channel: '/api'): {
-    fetch(request: Request): Promise<Response>
+    fetch(request: Request, peer: HostPeerLike): Promise<Response>
   }
+  createPeer(options: { readonly principal: { readonly kind: 'owner' }; readonly interactions: 'answer' | 'none' }): HostPeerLike
 }
 
 interface InvokeTarget {
@@ -112,6 +109,7 @@ export function createRemoteHostApi(
 
 class RemoteHostApi implements BrowserHostApi {
   private readonly fetchHandler: ReturnType<HostConnectionLike['createSharedFetchHandler']>
+  private readonly peer: HostPeerLike
   private readonly extensionSessions = new ExtensionSessionRegistry()
   /** Last known session/follow tip per Session; drives session/page throughSeq. */
   private readonly historyCursors = new Map<string, number>()
@@ -121,7 +119,12 @@ class RemoteHostApi implements BrowserHostApi {
     private readonly gateway: TypertGatewayLike,
     connection: HostConnectionLike,
   ) {
+    this.peer = connection.createPeer({ principal: { kind: 'owner' }, interactions: 'answer' })
     this.fetchHandler = connection.createSharedFetchHandler('/api')
+  }
+
+  private invoke(request: Omit<Parameters<TypertGatewayLike['invoke']>[0], 'peer'>): Promise<unknown> {
+    return this.gateway.invoke({ ...request, peer: this.peer })
   }
 
   async call(call: HostRpcCall): Promise<HostRpcResult> {
@@ -140,7 +143,7 @@ class RemoteHostApi implements BrowserHostApi {
         const sessionId = sessionIdOf(call.payload)
         if (sessionId !== undefined) await this.activeEvents?.ensureSessionFollow(sessionId, call.signal)
       }
-      const value = await this.gateway.invoke({
+      const value = await this.invoke({
         namespace: target.namespace,
         method: target.method,
         args: target.args,
@@ -163,6 +166,7 @@ class RemoteHostApi implements BrowserHostApi {
   async *events(signal: AbortSignal): AsyncIterable<HostEventFrame> {
     const generation = new EventGeneration(
       this.gateway,
+      this.peer,
       this.sendRemoteEventResult.bind(this),
       this.extensionSessions,
       this.noteHistoryCursor.bind(this),
@@ -200,7 +204,7 @@ class RemoteHostApi implements BrowserHostApi {
     try {
       if (beforeSeq !== undefined) {
         const throughSeq = await this.historyThroughSeq(sessionId, call.signal)
-        const page = await this.gateway.invoke({
+        const page = await this.invoke({
           namespace: 'session',
           method: 'page',
           args: {
@@ -217,7 +221,7 @@ class RemoteHostApi implements BrowserHostApi {
       }
 
       const snapshot = this.activeEvents === undefined
-        ? await oneShotSessionSnapshot(this.gateway, sessionId, call.signal, maxMessages)
+        ? await oneShotSessionSnapshot(this.gateway, this.peer, sessionId, call.signal, maxMessages)
         : await this.activeEvents.openSessionHistory(sessionId, call.signal, maxMessages)
       this.noteHistoryCursor(sessionId, snapshot.cursor)
       return { ok: true, value: historyValue(snapshot) }
@@ -231,11 +235,11 @@ class RemoteHostApi implements BrowserHostApi {
     if (!isRecord(call.payload)) return badRequest('session.models payload must be an object')
     const sessionId = sessionIdOf(call.payload)
     try {
-      const catalog = await this.gateway.invoke({
+      const catalog = await this.invoke({
         namespace: 'session', method: 'modelCatalog', args: {}, signal: call.signal,
       })
       // Provisional Sessions request only the catalog and overlay their pending choice.
-      const projections = sessionId === undefined ? undefined : await this.gateway.invoke({
+      const projections = sessionId === undefined ? undefined : await this.invoke({
         namespace: 'session', method: 'projections', args: { request: { sessionId } }, signal: call.signal,
       })
       const values = isRecord(projections) ? projections.values : undefined
@@ -255,7 +259,7 @@ class RemoteHostApi implements BrowserHostApi {
     const cached = this.historyCursors.get(sessionId)
     if (cached !== undefined) return cached
     const snapshot = this.activeEvents === undefined
-      ? await oneShotSessionSnapshot(this.gateway, sessionId, signal)
+      ? await oneShotSessionSnapshot(this.gateway, this.peer, sessionId, signal)
       : await this.activeEvents.openSessionHistory(sessionId, signal)
     this.noteHistoryCursor(sessionId, snapshot.cursor)
     const throughSeq = this.historyCursors.get(sessionId)
@@ -277,7 +281,7 @@ class RemoteHostApi implements BrowserHostApi {
     try {
       const controller = new AbortController()
       const signal = AbortSignal.any([call.signal, controller.signal])
-      const source = await openWireStream(this.gateway, 'workspace/follow', { args: {} }, signal)
+      const source = await openWireStream(this.gateway, this.peer, 'workspace/follow', { args: {} }, signal)
       const iterator = source[Symbol.asyncIterator]()
       try {
         const first = await iterator.next()
@@ -320,7 +324,7 @@ class RemoteHostApi implements BrowserHostApi {
       }),
       signal,
     })
-    const response = await this.fetchHandler.fetch(request)
+    const response = await this.fetchHandler.fetch(request, this.peer)
     if (!response.ok) {
       throw new Error(`$events/result transport failed with HTTP ${String(response.status)}: ${await response.text()}`)
     }
@@ -376,6 +380,7 @@ class EventGeneration {
 
   constructor(
     private readonly gateway: TypertGatewayLike,
+    private readonly peer: HostPeerLike,
     private readonly sendResult: SendRemoteEventResult,
     private readonly extensionSessions: ExtensionSessionRegistry,
     private readonly onHistoryCursor: (sessionId: string, cursor: number) => void,
@@ -442,7 +447,7 @@ class EventGeneration {
     this.followedSessionId = sessionId
     const signal = AbortSignal.any([this.signal, callSignal, controller.signal])
     try {
-      const source = await openWireStream(this.gateway,
+      const source = await openWireStream(this.gateway, this.peer,
         'session/follow',
         {
           args: {
@@ -549,7 +554,7 @@ class EventGeneration {
 
   private async pumpRemoteEvents(): Promise<void> {
     try {
-      const source = await openWireStream(this.gateway, '$events', { args: {} }, this.signal)
+      const source = await openWireStream(this.gateway, this.peer, '$events', { args: {} }, this.signal)
       let ready = false
       for await (const value of source) {
         if (!ready) {
@@ -736,13 +741,14 @@ function invokeTarget(call: HostRpcCall): InvokeTarget | { readonly error: HostR
 
 async function oneShotSessionSnapshot(
   gateway: TypertGatewayLike,
+  peer: HostPeerLike,
   sessionId: string,
   outerSignal: AbortSignal,
   maxMessages?: number,
 ): Promise<SessionSnapshot> {
   const controller = new AbortController()
   const signal = AbortSignal.any([outerSignal, controller.signal])
-  const source = await openWireStream(gateway,
+  const source = await openWireStream(gateway, peer,
     'session/follow',
     {
       args: {

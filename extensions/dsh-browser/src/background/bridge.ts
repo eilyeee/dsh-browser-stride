@@ -23,7 +23,7 @@ export type BridgeState = 'connecting' | 'connected' | 'reconnecting' | 'stopped
 export interface BridgeSinks {
   onStateChange(state: BridgeState): void
   onFrame(frame: ServerFrame): void
-  onHelloOk(caps: BridgeCaps): void
+  onHelloOk(caps: BridgeCaps, credential?: string, presentedToken?: string): void | Promise<void>
 }
 
 /** Resolve whether opening a WebSocket is expected to succeed. */
@@ -44,6 +44,7 @@ export class BridgeClient {
   private generation = 0
   private url = ''
   private token = ''
+  private installationId = ''
   private ackTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(
@@ -62,10 +63,11 @@ export class BridgeClient {
    * @param url - bridge WebSocket URL (e.g. ws://127.0.0.1:3080/ext/bridge).
    * @param token - bearer token from settings.
    */
-  start(url: string, token: string): void {
+  start(url: string, token: string, installationId = ''): void {
     this.stop()
     this.url = url
     this.token = token
+    this.installationId = installationId
     this.running = true
     this.attempt = 0
     this.generation += 1
@@ -93,7 +95,7 @@ export class BridgeClient {
 
   /** Whether a frame can be sent right now. */
   get connected(): boolean {
-    return this.ws !== null && this.ws.readyState === WebSocket.OPEN
+    return this.state === 'connected' && this.ws !== null && this.ws.readyState === WebSocket.OPEN
   }
 
   /**
@@ -103,7 +105,7 @@ export class BridgeClient {
    */
   send(frame: ClientFrame): boolean {
     const socket = this.ws
-    if (socket === null || socket.readyState !== WebSocket.OPEN) return false
+    if (!this.connected || socket === null) return false
     socket.send(JSON.stringify(frame))
     return true
   }
@@ -126,7 +128,7 @@ export class BridgeClient {
       // failure. Yield permanently so two open profiles cannot reconnect in a
       // tight loop and repeatedly evict one another.
       socket.addEventListener('close', (event) => {
-        if (event.code !== 4000 || this.ws !== socket || !this.running) return
+        if ((event.code !== 4000 && event.code !== 4002) || this.ws !== socket || !this.running) return
         this.running = false
         this.clearAckTimer()
         this.ws = null
@@ -149,33 +151,48 @@ export class BridgeClient {
       }
 
       // Authenticate: hello must be accepted before any other traffic.
+      const presentedToken = this.token
       socket.send(JSON.stringify({
         t: 'hello',
-        token: this.token,
+        token: presentedToken,
+        ...(this.installationId === '' ? {} : { installationId: this.installationId }),
         caps: { textOnly: true, snapshotMaxChars: DEFAULT_SNAPSHOT_MAX_CHARS, maxInteractiveItems: 60 },
       } satisfies ClientFrame))
 
       let authed = false
+      let savingCredential = false
+      const pendingFrames: ServerFrame[] = []
+      const dispatch = (frame: ServerFrame): void => {
+        if (frame.t === 'ping') socket.send(JSON.stringify({ t: 'pong' } satisfies ClientFrame))
+        else this.sinks.onFrame(frame)
+      }
       const accepted = await new Promise<boolean>((resolve) => {
         const onMessage = (event: MessageEvent): void => {
           const frame = parseBridgeFrame(String(event.data))
-          if (frame === undefined) return
+          if (frame === undefined || !isServerFrame(frame)) return
           if (!authed) {
             if (frame.t === 'hello.ok') {
-              authed = true
-              this.clearAckTimer()
-              resolve(true)
-              this.sinks.onHelloOk(frame.caps)
-            } else if (frame.t === 'error' || frame.t === 'rpc.result' || frame.t === 'event') {
+              if (savingCredential) { socket.close(); resolve(false); return }
+              savingCredential = true
+              void Promise.resolve().then(() => this.sinks.onHelloOk(frame.caps, frame.credential, presentedToken)).then(() => {
+                if (!this.running || generation !== this.generation || socket.readyState !== WebSocket.OPEN) {
+                  resolve(false)
+                  return
+                }
+                this.clearAckTimer()
+                if (frame.credential !== undefined) this.token = frame.credential
+                authed = true
+                resolve(true)
+              }, () => { socket.close(); resolve(false) })
+            } else if (savingCredential) {
+              if (pendingFrames.length >= 256) { socket.close(); resolve(false) }
+              else pendingFrames.push(frame)
+            } else if (frame.t === 'error') {
               this.sinks.onFrame(frame)
             }
             return
           }
-          if (frame.t === 'ping') {
-            socket.send(JSON.stringify({ t: 'pong' } satisfies ClientFrame))
-            return
-          }
-          if (isServerFrame(frame)) this.sinks.onFrame(frame)
+          dispatch(frame)
         }
         socket.addEventListener('message', onMessage)
         socket.addEventListener('close', () => {
@@ -191,6 +208,14 @@ export class BridgeClient {
 
       this.attempt = 0
       this.emitState('connected')
+      for (const queued of pendingFrames) {
+        if (!this.running || generation !== this.generation || socket.readyState !== WebSocket.OPEN) break
+        dispatch(queued)
+      }
+      if (!this.running || generation !== this.generation || socket.readyState !== WebSocket.OPEN) {
+        socket.close()
+        return
+      }
 
       await new Promise<void>((resolve) => {
         socket.addEventListener('close', () => resolve(), { once: true })

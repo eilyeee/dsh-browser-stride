@@ -4,6 +4,13 @@
  * does not implement CSS.escape. Stub both with browser-equivalent behavior.
  */
 
+import { IDBFactory } from 'fake-indexeddb'
+import { beforeEach } from 'vitest'
+
+beforeEach(() => {
+  Object.defineProperty(globalThis, 'indexedDB', { configurable: true, value: new IDBFactory() })
+})
+
 const FAKE_RECT: DOMRect = {
   x: 0,
   y: 0,

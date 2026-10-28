@@ -60,6 +60,16 @@ describe('accessibleName', () => {
     const span = document.createElement('span')
     expect(accessibleName(span)).toBe('span')
   })
+
+  it('does not use textarea contents or select options as an unlabeled control name', () => {
+    const textarea = document.createElement('textarea')
+    textarea.textContent = 'private draft'
+    textarea.placeholder = 'Notes'
+    expect(accessibleName(textarea)).toBe('Notes')
+    const select = document.createElement('select')
+    select.innerHTML = '<option>Private choice</option>'
+    expect(accessibleName(select)).toBe('select')
+  })
 })
 
 describe('collectInteractive', () => {

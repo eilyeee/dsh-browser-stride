@@ -15,7 +15,7 @@ function panelPort() {
   const onMessage = chromeEvent<[unknown]>()
   const onDisconnect = chromeEvent<[]>()
   const postMessage = vi.fn()
-  const port = { name: 'dsh-panel', postMessage, onMessage, onDisconnect } as unknown as chrome.runtime.Port
+  const port = { name: 'dsh-panel', sender: { id: 'test-extension', url: 'chrome-extension://test/panel/index.html' }, postMessage, onMessage, onDisconnect } as unknown as chrome.runtime.Port
   return { onDisconnect, onMessage, port, postMessage }
 }
 
@@ -30,6 +30,8 @@ function tab(id: number, url: string, windowId = 1): chrome.tabs.Tab {
     selected: true,
     discarded: false,
     autoDiscardable: true,
+    frozen: false,
+    lastAccessed: 0,
     groupId: -1,
     windowId,
     title: `Tab ${id}`,
@@ -81,7 +83,7 @@ function mockChrome(initialTabs: chrome.tabs.Tab[], storedContext?: unknown) {
       query,
       sendMessage: vi.fn(async () => {}),
       onActivated: chromeEvent<[{ tabId: number; windowId: number }]>(),
-      onUpdated: chromeEvent<[number, chrome.tabs.TabChangeInfo, chrome.tabs.Tab]>(),
+      onUpdated: chromeEvent<[number, Parameters<Parameters<typeof chrome.tabs.onUpdated.addListener>[0]>[1], chrome.tabs.Tab]>(),
       onReplaced,
       onRemoved,
     },

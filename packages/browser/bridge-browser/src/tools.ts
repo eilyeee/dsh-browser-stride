@@ -5,8 +5,8 @@
  *
  * The browser tool surface uses structured text by design:
  * `browser_snapshot` renders the page as structured text with a numbered
- * interactive inventory, and every other tool addresses elements by that
- * inventory's stable index. Results are single `{ text }` objects rendered as
+ * interactive inventory, and element actions use its observation-bound
+ * references. Results are single `{ text }` objects rendered as
  * one text ContentBlock.
  *
  * @module
@@ -15,6 +15,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { BridgeServer } from './server.ts'
+import { BROWSER_PRESS_DESCRIPTION } from './browser-policy.ts'
 
 /** Options resolved from plugin config before tool registration. */
 export interface BrowserToolsOptions {
@@ -55,6 +56,7 @@ export const BROWSER_TOOL_NAMES = [
   'browser_snapshot',
   'browser_click',
   'browser_type',
+  'browser_select',
   'browser_press',
   'browser_scroll',
   'browser_navigate',
@@ -116,10 +118,10 @@ interface Call {
 function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[] {
   const snapshot = (): ToolDefinition => defineTool({
     name: 'browser_snapshot',
-    description: `Read the page and accessible iframes as structured text with numbered action targets. Use frame for iframe targets and delta=true for changes only. ${UNTRUSTED_CONTENT_WARNING}`,
+    description: `Read the page and accessible iframes. Use the shown elementRef for actions; delta=true returns only changes. ${UNTRUSTED_CONTENT_WARNING}`,
     parameters: {
       delta: { type: 'boolean', description: 'Return changes since the previous snapshot.' },
-      region: { type: 'string', description: 'CSS selector or "main" to read only that region.' },
+      region: { type: 'string', description: 'Limit main text to this CSS selector; the control inventory still covers the frame.' },
     },
     timeoutMs: options.toolTimeoutMs,
     output: TEXT_OUTPUT,
@@ -134,9 +136,9 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
 
   const click = (): ToolDefinition => defineTool({
     name: 'browser_click',
-    description: 'Click an element from the latest browser_snapshot by index; include frame for an iframe target.',
+    description: 'Click an element using its current snapshot reference; include frame for an iframe target.',
     parameters: {
-      index: { type: 'number', required: true, description: 'Element index from the browser_snapshot inventory.' },
+      elementRef: { type: 'string', required: true, description: 'Complete ref shown for this element in the latest observation.' },
       frame: FRAME_PARAMETER,
     },
     timeoutMs: options.toolTimeoutMs,
@@ -146,9 +148,9 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
 
   const type = (): ToolDefinition => defineTool({
     name: 'browser_type',
-    description: 'Append text to a field from browser_snapshot, or clear it first with replace=true. Include frame for an iframe target. Sensitive values are never returned.',
+    description: 'Type into a field using its current snapshot reference. Use replace=true to clear first; sensitive values are not returned.',
     parameters: {
-      index: { type: 'number', required: true, description: 'Form-field index from the browser_snapshot forms inventory.' },
+      elementRef: { type: 'string', required: true, description: 'Complete ref shown for this field in the latest observation.' },
       frame: FRAME_PARAMETER,
       text: { type: 'string', required: true, description: 'Text to enter.' },
       replace: { type: 'boolean', description: 'When true, clear the existing value before entering text. Defaults to append.' },
@@ -156,9 +158,9 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
     timeoutMs: options.toolTimeoutMs,
     output: TEXT_OUTPUT,
     execute: (args, exec) => {
-      const a = args as { index: number; frame?: number; text: string; replace?: boolean }
+      const a = args as { elementRef: string; frame?: number; text: string; replace?: boolean }
       return call(exec, 'browser_type', {
-        index: a.index,
+        elementRef: a.elementRef,
         ...a.frame !== undefined ? { frame: a.frame } : {},
         text: a.text,
         ...a.replace !== undefined ? { replace: a.replace } : {},
@@ -166,11 +168,24 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
     },
   })
 
+  const select = (): ToolDefinition => defineTool({
+    name: 'browser_select',
+    description: 'Select a shown option using the field reference; readback does not prove the form was saved.',
+    parameters: {
+      elementRef: { type: 'string', required: true, description: 'Complete ref shown with the select options in the latest observation.' },
+      optionIndex: { type: 'number', required: true, description: 'Zero-based option index shown for that field in the snapshot.' },
+      frame: FRAME_PARAMETER,
+    },
+    timeoutMs: options.toolTimeoutMs,
+    output: TEXT_OUTPUT,
+    execute: (args, exec) => call(exec, 'browser_select', args as Record<string, unknown>),
+  })
+
   const press = (): ToolDefinition => defineTool({
     name: 'browser_press',
-    description: 'Send one key press, such as Enter, Tab, Escape, an arrow, Backspace, or Delete.',
+    description: BROWSER_PRESS_DESCRIPTION,
     parameters: {
-      key: { type: 'string', required: true, description: 'Key name using KeyboardEvent.key semantics.' },
+      key: { type: 'string', required: true, description: 'Non-empty KeyboardEvent.key value, at most 64 characters, without control characters.' },
       frame: FRAME_PARAMETER,
     },
     timeoutMs: options.toolTimeoutMs,
@@ -302,6 +317,7 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
     snapshot(),
     click(),
     type(),
+    select(),
     press(),
     scroll(),
     navigate(),

@@ -65,6 +65,7 @@ export interface PanelCopy {
     bridgeAddress: string
     bridgeHelp: string
     bridgePlaceholder: string
+    tokenLabel: string
     tokenHelp: string
     tokenPlaceholder: string
     pageSharing: string
@@ -121,33 +122,6 @@ export interface PanelCopy {
     relaySaveFailed: (reason: string) => string
     relayEmpty: string
     relayInvalidName: string
-  }
-  update: {
-    eyebrow: string
-    title: string
-    idleTitle: string
-    idleBody: string
-    checking: string
-    checkingBody: string
-    currentTitle: string
-    currentBody: (latestVersion: string) => string
-    availableTitle: (latestVersion: string) => string
-    availableLoadingBody: string
-    availableManagedBody: string
-    availableCheckoutBody: string
-    availableUnknownBody: string
-    reloadReminder: string
-    loadingInstall: string
-    managedInstall: string
-    checkoutInstall: string
-    unknownInstall: string
-    errorTitle: string
-    errorBody: string
-    check: string
-    copyManagedCommand: string
-    copyCheckoutCommand: string
-    copied: string
-    copyError: string
   }
   textSize: {
     open: string
@@ -245,6 +219,7 @@ const EN: PanelCopy = {
       browser_snapshot: 'Read page',
       browser_click: 'Click element',
       browser_type: 'Enter text',
+      browser_select: 'Select an option',
       browser_press: 'Press key',
       browser_scroll: 'Scroll page',
       browser_navigate: 'Open page',
@@ -298,8 +273,9 @@ const EN: PanelCopy = {
     bridgeAddress: 'Bridge address',
     bridgeHelp: 'Leave blank to detect a local service automatically',
     bridgePlaceholder: 'Auto-detect 3080 / 3081 / 3090 / 14389 / 43189',
-    tokenHelp: 'Required by Firefox and remote deployments',
-    tokenPlaceholder: 'Required for Firefox / remote deployments',
+    tokenLabel: 'Pairing code',
+    tokenHelp: 'Enter a one-time pairing code generated on the Host',
+    tokenPlaceholder: 'Leave blank to keep the saved credential',
     pageSharing: 'Page content sharing',
     pageSharingHelp: 'Control when the assistant can read page text',
     sharingAuto: 'Share automatically (default)',
@@ -323,7 +299,7 @@ const EN: PanelCopy = {
     cancel: 'Cancel',
     snapshotHint: (maxChars) => `Page snapshots are limited to ${maxChars} characters and longer content is truncated. Change snapshotMaxChars in the dsh plugin to adjust this limit.`,
     relaySection: 'Models & API relay',
-    relayHelp: 'Point the assistant at your own API relay. Each profile becomes one provider route; changes take effect on the next message without a restart.',
+    relayHelp: 'Configure an API relay. This requires the Host to enable management access; browser pairing alone does not grant it.',
     relayName: 'Profile name',
     relayNamePlaceholder: 'e.g. my-relay',
     relayProtocol: 'API format',
@@ -354,33 +330,6 @@ const EN: PanelCopy = {
     relaySaveFailed: (reason) => `Saving failed: ${reason}`,
     relayEmpty: 'No relay profiles yet.',
     relayInvalidName: 'Enter a profile name.',
-  },
-  update: {
-    eyebrow: 'Release channel',
-    title: 'Updates',
-    idleTitle: 'Ready to check',
-    idleBody: 'Compare this build with the version on GitHub main.',
-    checking: 'Checking…',
-    checkingBody: 'Reading the latest extension manifest from GitHub.',
-    currentTitle: 'No update found',
-    currentBody: (latestVersion) => `Repository version: v${latestVersion}.`,
-    availableTitle: (latestVersion) => `Version ${latestVersion} is available`,
-    availableLoadingBody: 'Confirming how this extension was installed before offering an update command.',
-    availableManagedBody: 'Copy the managed update command and run it in Terminal.',
-    availableCheckoutBody: 'Pull or switch to the revision you want in the original checkout, then rerun its installer.',
-    availableUnknownBody: 'This copy predates install-source metadata. Use the same update flow you originally installed with; no command will be copied.',
-    reloadReminder: 'After updating, open chrome://extensions, find “dsh Browser Assistant,” click the rotating-arrow Reload button on its card, then restart dsh.',
-    loadingInstall: 'Identifying install…',
-    managedInstall: 'Managed install',
-    checkoutInstall: 'Local checkout',
-    unknownInstall: 'Install source unknown',
-    errorTitle: 'Could not check for updates',
-    errorBody: 'Check your network connection and try again.',
-    check: 'Check for updates',
-    copyManagedCommand: 'Copy update command',
-    copyCheckoutCommand: 'Copy checkout command',
-    copied: 'Command copied',
-    copyError: 'Could not copy the command. Run the installer from the original installation source instead.',
   },
   textSize: {
     open: 'Text size',
@@ -478,6 +427,7 @@ const ZH: PanelCopy = {
       browser_snapshot: '读取页面',
       browser_click: '点击元素',
       browser_type: '填写内容',
+      browser_select: '选择选项',
       browser_press: '按下按键',
       browser_scroll: '滚动页面',
       browser_navigate: '打开页面',
@@ -531,8 +481,9 @@ const ZH: PanelCopy = {
     bridgeAddress: '桥地址',
     bridgeHelp: '留空时自动检测本机服务',
     bridgePlaceholder: '自动检测 3080 / 3081 / 3090 / 14389 / 43189',
-    tokenHelp: 'Firefox 和远程部署需要填写',
-    tokenPlaceholder: 'Firefox / 远程部署时填写',
+    tokenLabel: '配对码',
+    tokenHelp: '填写在 Host 上生成的一次性配对码',
+    tokenPlaceholder: '留空以继续使用已保存的凭据',
     pageSharing: '页面内容共享',
     pageSharingHelp: '控制助手何时可以读取页面文字',
     sharingAuto: '自动共享（默认）',
@@ -556,7 +507,7 @@ const ZH: PanelCopy = {
     cancel: '取消',
     snapshotHint: (maxChars) => `页面快照上限为 ${maxChars} 字符，超出内容会被截断。可在 dsh 插件中调整 snapshotMaxChars。`,
     relaySection: '模型与中转服务',
-    relayHelp: '把助手接到你自己的 API 中转站。每个档案对应一条提供方路由，保存后下一条消息即生效，无需重启。',
+    relayHelp: '配置 API 中转服务需要 Host 显式启用管理权限；浏览器配对本身不会授予该权限。',
     relayName: '档案名称',
     relayNamePlaceholder: '例如 my-relay',
     relayProtocol: '接口格式',
@@ -587,33 +538,6 @@ const ZH: PanelCopy = {
     relaySaveFailed: (reason) => `保存失败：${reason}`,
     relayEmpty: '还没有中转档案。',
     relayInvalidName: '请填写档案名称。',
-  },
-  update: {
-    eyebrow: '发布通道',
-    title: '软件更新',
-    idleTitle: '可以检查新版本',
-    idleBody: '与 GitHub main 上的扩展版本进行比较。',
-    checking: '正在检查…',
-    checkingBody: '正在读取 GitHub 上的最新扩展清单。',
-    currentTitle: '未发现更新',
-    currentBody: (latestVersion) => `仓库版本：v${latestVersion}。`,
-    availableTitle: (latestVersion) => `发现新版本 ${latestVersion}`,
-    availableLoadingBody: '正在确认此扩展的安装来源，然后再提供更新命令。',
-    availableManagedBody: '复制托管更新命令并在终端运行。',
-    availableCheckoutBody: '请先在原 checkout 中 pull 或切换到目标 revision，再重新运行其中的安装脚本。',
-    availableUnknownBody: '这个副本没有安装来源记录。请沿用最初的更新方式；这里不会复制可能覆盖来源的命令。',
-    reloadReminder: '更新完成后，打开 chrome://extensions，找到“dsh 浏览器助手”，点击卡片上的“重新加载”旋转箭头，然后重启 dsh。',
-    loadingInstall: '正在识别安装来源…',
-    managedInstall: '托管安装',
-    checkoutInstall: '本地 checkout',
-    unknownInstall: '安装来源未知',
-    errorTitle: '暂时无法检查更新',
-    errorBody: '请检查网络连接，然后重试。',
-    check: '检查更新',
-    copyManagedCommand: '复制更新命令',
-    copyCheckoutCommand: '复制 checkout 命令',
-    copied: '命令已复制',
-    copyError: '无法复制命令，请回到原安装来源重新运行安装脚本。',
   },
   textSize: {
     open: '字号',

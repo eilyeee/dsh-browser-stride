@@ -170,13 +170,18 @@ export function rowFromEvent(event: SessionEventView): Row | null {
   }
 }
 
-/** 工具调用的友好展示名：带 index 参数时附上（如「点击元素 #7」）。 */
+/** 工具调用的友好展示名：从引用提取编号（如「点击元素 #7」）。 */
 export function toolSummary(name: string, argsJson: unknown, locale: UiLocale = getUiLocale()): string {
   let summary = PANEL_COPY[locale].tool.labels[name] ?? name
   try {
     const args = JSON.parse(String(argsJson ?? '{}')) as unknown
-    if (typeof args === 'object' && args !== null && 'index' in args) {
-      summary += ` #${String((args as { index?: unknown }).index)}`
+    if (typeof args === 'object' && args !== null) {
+      const ref = (args as { elementRef?: unknown }).elementRef
+      const match = typeof ref === 'string' ? /^obs_[a-f0-9-]+:(\d+)$/i.exec(ref) : null
+      if (match !== null) summary += ` #${match[1]}`
+      else if ('index' in args && typeof (args as { index?: unknown }).index === 'number') {
+        summary += ` #${String((args as { index: number }).index)}`
+      }
     }
   } catch {
     // 模型参数不可解析：只显示工具名。

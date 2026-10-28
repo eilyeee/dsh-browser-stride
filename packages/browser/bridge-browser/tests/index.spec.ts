@@ -18,6 +18,7 @@ function stubContext(): Context {
     invoke: async () => undefined,
   }
   const connection = {
+    createPeer: () => ({ signal: new AbortController().signal, dispose: async () => {} }),
     createSharedFetchHandler: () => ({ fetch: async () => new Response('not found', { status: 404 }) }),
   }
   return {
@@ -56,6 +57,8 @@ describe('config', () => {
   it('resolves defaults, including an enabled workspace under the dsh home', () => {
     expect(resolveConfig({})).toEqual({
       ...VALID,
+      allowHostManagement: false,
+      pairingProfile: 'web',
       sessionWorkspacePath: dshHomePath('browser-sessions'),
       deferSessionCreate: true,
     })
@@ -65,6 +68,8 @@ describe('config', () => {
   it('preserves explicit values and the empty-string workspace opt-out', () => {
     expect(resolveConfig({
       token: 'fixed',
+      allowHostManagement: true,
+      pairingProfile: 'test-profile',
       toolTimeoutMs: 1,
       snapshotMaxChars: 500,
       maxInteractiveItems: 3,
@@ -72,6 +77,8 @@ describe('config', () => {
       deferSessionCreate: false,
     })).toEqual({
       token: 'fixed',
+      allowHostManagement: true,
+      pairingProfile: 'test-profile',
       toolTimeoutMs: 1,
       snapshotMaxChars: 500,
       maxInteractiveItems: 3,
@@ -92,7 +99,7 @@ describe('apply', () => {
     const get = ctx.get.bind(ctx)
     vi.spyOn(ctx, 'get').mockImplementation((key) => key === 'typertGateway' ? gateway : get(key))
     const register = vi.spyOn(ctx.webServer, 'registerUpgrade')
-    await expect(apply(ctx, { token: 'fixed-token', ...VALID })).rejects.toThrow(/dsh 0\.2\.0-rc\.1.*wireStream unavailable/)
+    await expect(apply(ctx, { token: 'fixed-token', ...VALID })).rejects.toThrow(/dsh 0\.2\.1-rc\.2.*wireStream unavailable/)
     expect(register).not.toHaveBeenCalled()
   })
 

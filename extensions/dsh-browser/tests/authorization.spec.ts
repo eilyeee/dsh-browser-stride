@@ -40,6 +40,11 @@ describe('approvalPromptForCall', () => {
     expect(prompt?.summary).not.toContain('my-password')
   })
 
+  it('requires action approval for a select in the target frame', () => {
+    expect(approvalPromptForCall(call('browser_select', { frame: 4, index: 7, optionIndex: 1 }), 'auto', FRAMES, 'en'))
+      .toMatchObject({ kind: 'action', origins: ['https://login.example.net'], summary: 'Change selection in element [7], iframe 4' })
+  })
+
   it('never offers persistent trust for cross-origin navigation', () => {
     const prompt = approvalPromptForCall(call('browser_navigate', {
       url: 'https://bank.example/transfer?token=secret#confirm',

@@ -3,7 +3,7 @@ packages:
   - extensions/*
   - packages/*/*
 
-# Keep DSH peer providers explicit and on the tested 0.2.0-rc.2 release line.
+# Keep DSH peer providers explicit and on the tested 0.2.1-rc.2 release line.
 autoInstallPeers: false
 
 # dsh 运行时与扩展构建依赖这些受信任包的安装脚本。
@@ -18,3 +18,15 @@ allowBuilds:
 # 内测版 @deepseek-ai 包需要在发布后立即安装。
 minimumReleaseAgeExclude:
   - '@deepseek-ai/*'
+  - '@types/chrome@0.3.7'
+  - tsdown@0.23.3
+
+# Security fixes for exact transitive versions pinned by DSH 0.2.1-rc.2.
+# Keep these within the same major and verify with Host and browser tests.
+overrides:
+  zod@4.4.3: 4.6.7
+  undici@8.11.2: 8.12.3
+  fflate@0.8.2: 0.8.3
+  '@modelcontextprotocol/client@2.2.0': 2.4.0
+  # OpenTelemetry SDK peers currently require API <1.10; 1.9.1 is the newest compatible release.
+  '@opentelemetry/api@1.10.0': 1.9.1

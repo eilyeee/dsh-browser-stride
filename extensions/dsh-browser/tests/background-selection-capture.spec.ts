@@ -15,7 +15,7 @@ function panelPort() {
   const onMessage = chromeEvent<[unknown]>()
   const onDisconnect = chromeEvent<[]>()
   const postMessage = vi.fn()
-  const port = { name: 'dsh-panel', postMessage, onMessage, onDisconnect } as unknown as chrome.runtime.Port
+  const port = { name: 'dsh-panel', sender: { id: 'test-extension', url: 'chrome-extension://test/panel/index.html' }, postMessage, onMessage, onDisconnect } as unknown as chrome.runtime.Port
   return { onDisconnect, onMessage, port, postMessage }
 }
 
@@ -30,6 +30,8 @@ function tab(tabId: number, overrides: Partial<chrome.tabs.Tab> = {}): chrome.ta
     selected: true,
     discarded: false,
     autoDiscardable: true,
+    frozen: false,
+    lastAccessed: 0,
     groupId: -1,
     windowId: 1,
     title: `Tab ${tabId}`,
@@ -50,7 +52,7 @@ const capture = {
 function mockChrome(sharePageContent: 'auto' | 'off' = 'auto') {
   const onConnect = chromeEvent<[chrome.runtime.Port]>()
   const onMessage = chromeEvent<[unknown, chrome.runtime.MessageSender, (response: unknown) => void]>()
-  const onUpdated = chromeEvent<[number, chrome.tabs.TabChangeInfo, chrome.tabs.Tab]>()
+  const onUpdated = chromeEvent<[number, Parameters<Parameters<typeof chrome.tabs.onUpdated.addListener>[0]>[1], chrome.tabs.Tab]>()
   const onRemoved = chromeEvent<[number]>()
   const onReplaced = chromeEvent<[number, number]>()
   const onCommitted = chromeEvent<[{ tabId: number; frameId: number }]>()
@@ -120,6 +122,14 @@ async function connectPanelForTest(sharePageContent: 'auto' | 'off' = 'auto', wi
   await vi.waitFor(() => {
     expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'selection' }))
   })
+  if (sharePageContent === 'auto' && windowId === 1) {
+    // A panel can receive its empty selection before asynchronous credential
+    // storage finishes loading. A real content script sends captures only
+    // after the background has actually armed its watcher.
+    await vi.waitFor(() => {
+      expect(chromeMock.sendMessage).toHaveBeenCalledWith(1, expect.objectContaining({ type: 'DSH_SELECTION_WATCH', enabled: true }))
+    })
+  }
   panel.postMessage.mockClear()
   // Both the runtime (content scripts) and the port (panel) carry onMessage.
   return { ...chromeMock, ...panel, runtimeMessages: chromeMock.onMessage, panelMessages: panel.onMessage }

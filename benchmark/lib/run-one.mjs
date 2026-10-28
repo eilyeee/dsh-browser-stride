@@ -95,6 +95,7 @@ export async function runOne({
 
   const created = await backend.client.rpc('session.create', { cwd: workspace })
   const sessionId = created.sessionId
+  if (backend.backend === 'extension') await extensionBrowser.bindSession(sessionId)
   const models = await backend.client.rpc('session.modelCatalog')
   let selectedModel = models.default
   if (modelSelection !== undefined) {

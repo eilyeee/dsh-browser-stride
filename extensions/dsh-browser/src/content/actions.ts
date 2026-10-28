@@ -11,9 +11,9 @@
  */
 
 import { pageText, truncate } from './extract.ts'
-import type { ElementIds } from './ids.ts'
+import { SELECT_OPTION_LIMIT, type ElementIds } from './ids.ts'
 import type { SnapshotBudget } from './snapshot.ts'
-import { buildSnapshot, renderSnapshot } from './snapshot.ts'
+import { buildSnapshot, renderSnapshotDetails } from './snapshot.ts'
 
 /** A settled action result. */
 export interface ActionResult {
@@ -42,6 +42,7 @@ const SCROLL_SETTLE: PageSettlePolicy = { minimumMs: 50, quietMs: 50, maxAfterRe
 const EXPLICIT_WAIT_SETTLE: PageSettlePolicy = { minimumMs: 100, quietMs: 100, maxAfterReadyMs: 1_000, timeoutMs: 5_000 }
 /** Keep automatic action context focused while preserving the negotiated full snapshot budget. */
 const ACTION_DELTA_MAX_CHARS = 4_000
+const TYPABLE_INPUT_TYPES = new Set(['text', 'search', 'tel', 'url', 'email', 'password', 'number', 'date', 'datetime-local', 'month', 'time', 'week'])
 
 /**
  * Wait for document readiness and a mutation-free window. The old fixed delay
@@ -78,9 +79,12 @@ export function waitForPageSettled(policy: PageSettlePolicy = ACTION_SETTLE): Pr
       if (readyAt !== undefined) {
         const afterReady = now - readyAt
         const quietFor = now - lastMutationAt
-        if ((afterReady >= policy.minimumMs && quietFor >= policy.quietMs)
-          || afterReady >= policy.maxAfterReadyMs) {
+        if (afterReady >= policy.minimumMs && quietFor >= policy.quietMs) {
           finish(true)
+          return
+        }
+        if (afterReady >= policy.maxAfterReadyMs) {
+          finish(false)
           return
         }
         const untilMinimum = Math.max(0, policy.minimumMs - afterReady)
@@ -123,12 +127,31 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => { setTimeout(resolve, ms) })
 }
 
+function settleNote(settled: boolean): string {
+  return settled ? '' : ' The page did not become quiet within the limit; re-observe before continuing.'
+}
+
 function elementOrThrow(ids: ElementIds, index: number): Element {
   const el = ids.elementByIndex(index)
   if (el === undefined) {
-    throw new ActionError('action-failed', `Element [${index}] does not exist; the page may have changed. Call browser_snapshot again to get current indices.`)
+    throw new ActionError('action-failed', `Element [${index}] does not exist; the page may have changed. Call browser_snapshot again to get current references.`)
+  }
+  if (ids.isActionTargetCurrent?.(index) === false) {
+    throw new ActionError('action-failed', `Element [${index}] changed, disappeared or is not actionable. Call browser_snapshot again.`)
   }
   return el
+}
+
+function referenceArg(args: Record<string, unknown>, ids: ElementIds, needsOptions = false): number {
+  const index = ids.resolveReference(args.elementRef, needsOptions)
+  if (index === undefined) {
+    throw new ActionError('action-failed', 'The element reference is missing, stale, or was not fully shown in the current observation. Call browser_snapshot again and use its elementRef. Update the bridge and extension together.')
+  }
+  return index
+}
+
+function referenceStillCurrent(args: Record<string, unknown>, ids: ElementIds, index: number, needsOptions = false): boolean {
+  return ids.resolveReference(args.elementRef, needsOptions) === index && ids.isActionTargetCurrent?.(index) !== false
 }
 
 /** Error carrying a stable wire code. */
@@ -142,8 +165,8 @@ export class ActionError extends Error {
   }
 }
 
-/** React-compatible value write: native setter + input/change events. */
-function setNativeValue(input: HTMLInputElement | HTMLTextAreaElement, value: string): void {
+/** React-compatible value write, rechecking identity between page event handlers. */
+function setNativeValue(input: HTMLInputElement | HTMLTextAreaElement, value: string, stillCurrent: () => boolean): boolean {
   const prototype = input instanceof HTMLTextAreaElement
     ? HTMLTextAreaElement.prototype
     : HTMLInputElement.prototype
@@ -154,7 +177,9 @@ function setNativeValue(input: HTMLInputElement | HTMLTextAreaElement, value: st
     setter.call(input, value)
   }
   input.dispatchEvent(new Event('input', { bubbles: true }))
+  if (!stillCurrent()) return false
   input.dispatchEvent(new Event('change', { bubbles: true }))
+  return stillCurrent()
 }
 
 /** Action implementations; each returns a text result. */
@@ -174,18 +199,20 @@ export async function runAction(action: string, args: Record<string, unknown>, c
       return clickAction(args, ctx)
     case 'browser_type':
       return typeAction(args, ctx)
+    case 'browser_select':
+      return selectAction(args, ctx)
     case 'browser_press':
       return pressAction(args, ctx)
     case 'browser_scroll':
       return scrollAction(args, ctx)
     case 'browser_navigate':
-      return navigateAction(args)
+      return navigateAction(args, ctx)
     case 'browser_back':
-      return historyAction(-1)
+      return historyAction(-1, ctx)
     case 'browser_forward':
-      return historyAction(1)
+      return historyAction(1, ctx)
     case 'browser_reload':
-      return reloadAction()
+      return reloadAction(ctx)
     case 'browser_get_text':
       return getTextAction(args)
     case 'browser_wait':
@@ -196,37 +223,53 @@ export async function runAction(action: string, args: Record<string, unknown>, c
 }
 
 function snapshotAction(args: Record<string, unknown>, ctx: ActionContext): ActionResult {
-  const delta = args.delta === true
+  const previous = snapshotByRegistry.get(ctx.ids) ?? null
+  const lastSnapshot = previous?.url === location.href ? previous : null
+  const delta = args.delta === true && lastSnapshot !== null
   const region = typeof args.region === 'string' && args.region !== '' ? args.region : undefined
   // 基线在每次快照后都更新：delta 调用才能相对上一次（无论是否 delta）比较。
   const view = buildSnapshot(ctx.ids, { delta, region, budget: ctx.budget }, lastSnapshot)
-  lastSnapshot = view
-  return { text: renderSnapshot(view, delta) }
+  snapshotByRegistry.set(ctx.ids, view)
+  const rendered = renderSnapshotDetails(view, delta)
+  ctx.ids.publishObservation(view.observationId, rendered.targets, rendered.selects)
+  return { text: rendered.text }
 }
 
-/** Module-level last snapshot state for delta mode (content-script lifetime). */
-let lastSnapshot: ReturnType<typeof buildSnapshot> | null = null
+/** Delta state belongs to the content-script registry, not another instance. */
+const snapshotByRegistry = new WeakMap<ElementIds, ReturnType<typeof buildSnapshot>>()
 
 /** Invalidate delta state after navigation (new document). */
-function resetDeltaState(): void {
-  lastSnapshot = null
+export function resetDeltaState(ids: ElementIds): void {
+  snapshotByRegistry.delete(ids)
+  ids.clearObservation()
 }
 
 /** Attach the settled page change while retaining the full view as the next delta baseline. */
-function withPageDelta(text: string, ctx: ActionContext): ActionResult {
+function withPageDelta(text: string, ctx: ActionContext, settled = true): ActionResult {
+  if (!settled) {
+    resetDeltaState(ctx.ids)
+    return { text }
+  }
+  const lastSnapshot = snapshotByRegistry.get(ctx.ids) ?? null
   if (ctx.includePageDelta !== true || lastSnapshot === null) return { text }
-  const view = buildSnapshot(ctx.ids, { delta: true, budget: ctx.budget }, lastSnapshot)
-  lastSnapshot = view
+  const delta = lastSnapshot.url === location.href
+  const view = buildSnapshot(ctx.ids, { delta, budget: ctx.budget }, delta ? lastSnapshot : null)
+  snapshotByRegistry.set(ctx.ids, view)
+  const rendered = renderSnapshotDetails(view, delta, Math.min(ctx.budget.maxChars, ACTION_DELTA_MAX_CHARS))
+  ctx.ids.publishObservation(view.observationId, rendered.targets, rendered.selects)
   return {
     text,
-    pageContent: renderSnapshot(view, true, Math.min(ctx.budget.maxChars, ACTION_DELTA_MAX_CHARS)),
+    pageContent: rendered.text,
   }
 }
 
 async function clickAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
-  const index = numberArg(args, 'index')
+  const index = referenceArg(args, ctx.ids)
   const el = elementOrThrow(ctx.ids, index)
   el.scrollIntoView({ block: 'center', behavior: 'instant' })
+  // Synchronous scroll handlers can change the page before activation.
+  referenceArg(args, ctx.ids)
+  elementOrThrow(ctx.ids, index)
   if (el instanceof HTMLAnchorElement) {
     const target = el.target.trim().toLowerCase()
     const sameFrameTarget = target === '' || target === '_self'
@@ -247,47 +290,54 @@ async function clickAction(args: Record<string, unknown>, ctx: ActionContext): P
         || el.hasAttribute('ping')
         || el.hasAttribute('attributionsrc')
       if (requiresNativeActivation) {
-        setTimeout(() => { el.click() }, 0)
+        setTimeout(() => { if (referenceStillCurrent(args, ctx.ids, index)) el.click() }, 0)
         return {
-          text: `Clicked link [${index}] using native browser activation. Call browser_snapshot to read the resulting state.`,
+          text: `Scheduled native browser activation for link [${index}]; its outcome is not confirmed. Call browser_snapshot to read the resulting state.`,
         }
       }
-      // Dispatch the click handlers without its default navigation so a
-      // client-side router can cancel synchronously and keep this document.
+      // Dispatch once: in browsers this also performs the link's native
+      // default activation unless a page handler cancels it. Assigning the
+      // URL again would issue a second navigation.
       const shouldNavigate = el.dispatchEvent(new MouseEvent('click', {
         bubbles: true,
         cancelable: true,
         composed: true,
       }))
       if (!shouldNavigate) {
-        await waitForPageSettled(ACTION_SETTLE)
-        return withPageDelta(`Clicked link [${index}].`, ctx)
+        const settled = await waitForPageSettled(ACTION_SETTLE)
+        return withPageDelta(`Clicked link [${index}].${settleNote(settled)}`, ctx, settled)
+      }
+      if (!referenceStillCurrent(args, ctx.ids, index)) {
+        resetDeltaState(ctx.ids)
+        return { text: `Click was sent to link [${index}], but its target changed during page events. Its outcome is unknown; re-observe and check the result before continuing.` }
       }
       const sameDocument = href.origin === location.origin
         && href.pathname === location.pathname
         && href.search === location.search
       if (sameDocument) {
-        if (href.hash !== location.hash) location.hash = href.hash
-        await waitForPageSettled(ACTION_SETTLE)
-        return withPageDelta(`Clicked link [${index}].`, ctx)
+        const settled = await waitForPageSettled(ACTION_SETTLE)
+        return withPageDelta(`Clicked link [${index}].${settleNote(settled)}`, ctx, settled)
       }
-      // A cross-document navigation can unload this content script before an
-      // awaited response. Answer first and navigate in the next task.
-      setTimeout(() => { location.href = href.href }, 0)
+      // Native activation can unload the content script before its reply. A
+      // lost response is an unknown result, not permission to click again.
       return {
-        text: `Clicked link [${index}]. Call browser_snapshot again after navigation settles.`,
+        text: `Click was sent to link [${index}]; navigation is not confirmed. Call browser_snapshot again after navigation settles.`,
         navigationPending: true,
       }
     }
-    setTimeout(() => { el.click() }, 0)
-    return { text: `Clicked link [${index}]. The link may open outside the controlled frame.` }
+    setTimeout(() => { if (referenceStillCurrent(args, ctx.ids, index)) el.click() }, 0)
+    return { text: `Link [${index}] activation was scheduled but is not confirmed. It may open outside the controlled frame.` }
   }
   if (el instanceof HTMLButtonElement && el.disabled) {
     throw new ActionError('action-failed', `Button [${index}] is disabled.`)
   }
   ;(el as HTMLElement).click()
-  await waitForPageSettled(ACTION_SETTLE)
-  return withPageDelta(`Clicked [${index}].`, ctx)
+  const settled = await waitForPageSettled(ACTION_SETTLE)
+  if (el instanceof HTMLInputElement && (el.type === 'checkbox' || el.type === 'radio')) {
+    const observed = el.isConnected ? (el.checked ? 'checked' : 'unchecked') : 'unavailable (element was removed)'
+    return withPageDelta(`Clicked [${index}]. Observed control state: ${observed}; this does not confirm a saved change.${settleNote(settled)}`, ctx, settled)
+  }
+  return withPageDelta(`Clicked [${index}].${settleNote(settled)}`, ctx, settled)
 }
 
 /**
@@ -335,11 +385,12 @@ function isEditable(el: Element): el is HTMLElement {
  * @param text - text to insert.
  * @param replace - whether to replace the host's current contents.
  */
-function typeIntoContentEditable(el: HTMLElement, text: string, replace: boolean): void {
+function typeIntoContentEditable(el: HTMLElement, text: string, replace: boolean, stillCurrent: () => boolean): boolean {
   // `isEditable` already refused a disabled island, so a null host here means
   // the element is editable without the attribute; address it directly.
   const host = editingHost(el) ?? el
   host.focus()
+  if (!stillCurrent()) return false
   const selection = host.ownerDocument.getSelection()
   if (selection !== null) {
     const range = host.ownerDocument.createRange()
@@ -352,7 +403,7 @@ function typeIntoContentEditable(el: HTMLElement, text: string, replace: boolean
   const doc = host.ownerDocument
   if (typeof doc.execCommand === 'function') {
     try {
-      if (doc.execCommand('insertText', false, text)) return
+      if (doc.execCommand('insertText', false, text)) return stillCurrent()
     } catch {
       // Fall through to the direct-write path below.
     }
@@ -360,37 +411,86 @@ function typeIntoContentEditable(el: HTMLElement, text: string, replace: boolean
   if (replace) host.textContent = ''
   host.textContent = `${host.textContent ?? ''}${text}`
   host.dispatchEvent(new Event('input', { bubbles: true }))
+  return stillCurrent()
 }
 
 async function typeAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
-  const index = numberArg(args, 'index')
+  const index = referenceArg(args, ctx.ids)
   const text = typeof args.text === 'string' ? args.text : ''
   if (text === '') throw new ActionError('bad-args', 'text must not be empty.')
   const replace = args.replace === true
   const el = elementOrThrow(ctx.ids, index)
+  const stillCurrent = (): boolean => referenceStillCurrent(args, ctx.ids, index)
+    && el.closest('[aria-readonly="true"]') === null
+    && (!(el instanceof HTMLInputElement) || (!el.readOnly && TYPABLE_INPUT_TYPES.has(el.type)))
+    && (!(el instanceof HTMLTextAreaElement) || !el.readOnly)
+  let expectedValue: string | undefined
+  if (!stillCurrent()) throw new ActionError('action-failed', `Element [${index}] is read-only or does not support text input.`)
   if (isEditable(el)) {
-    typeIntoContentEditable(el, text, replace)
+    if (!typeIntoContentEditable(el, text, replace, stillCurrent)) {
+      resetDeltaState(ctx.ids)
+      return { text: `Input to [${index}] may have partially changed the field, but the target changed during page events. Re-observe and check its state before continuing.` }
+    }
   } else if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-    if (replace) setNativeValue(el, '')
-    setNativeValue(el, `${el.value}${text}`)
+    expectedValue = `${replace ? '' : el.value}${text}`
+    if ((replace && !setNativeValue(el, '', stillCurrent)) || !setNativeValue(el, `${el.value}${text}`, stillCurrent)) {
+      resetDeltaState(ctx.ids)
+      return { text: `Input to [${index}] may have partially changed the field, but the target changed during page events. Re-observe and check its state before continuing.` }
+    }
   } else {
     throw new ActionError('action-failed', `Element [${index}] is not editable (${el.tagName.toLowerCase()}).`)
   }
-  await waitForPageSettled(TYPE_SETTLE)
-  return withPageDelta(`Entered ${text.length} characters into [${index}].`, ctx)
+  const settled = await waitForPageSettled(TYPE_SETTLE)
+  if (expectedValue !== undefined && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)
+    && (!el.isConnected || el.value !== expectedValue)) {
+    return withPageDelta(`Input was sent to [${index}], but its value could not be confirmed at readback. Observe again before continuing.${settleNote(settled)}`, ctx, settled)
+  }
+  if (expectedValue !== undefined) {
+    return withPageDelta(`Entered ${text.length} characters into [${index}]. The field value was read back; this does not confirm a saved change.${settleNote(settled)}`, ctx, settled)
+  }
+  return withPageDelta(`Entered ${text.length} characters into [${index}].${settleNote(settled)}`, ctx, settled)
+}
+
+async function selectAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
+  const index = referenceArg(args, ctx.ids, true)
+  const optionIndex = numberArg(args, 'optionIndex')
+  const el = elementOrThrow(ctx.ids, index)
+  if (!(el instanceof HTMLSelectElement) || el.multiple) {
+    throw new ActionError('action-failed', `Element [${index}] is not a supported single-select control.`)
+  }
+  const option = optionIndex < SELECT_OPTION_LIMIT ? el.options.item(optionIndex) : null
+  if (option === null || option.matches(':disabled')) {
+    throw new ActionError('bad-args', 'The option is unavailable or was not included in the snapshot.')
+  }
+  el.selectedIndex = optionIndex
+  el.dispatchEvent(new Event('input', { bubbles: true }))
+  const stillCurrent = (): boolean => referenceStillCurrent(args, ctx.ids, index, true)
+  if (!stillCurrent()) {
+    resetDeltaState(ctx.ids)
+    return { text: `Selection in [${index}] may have partially changed, but the target changed during page events. Re-observe and check its state before continuing.` }
+  }
+  el.dispatchEvent(new Event('change', { bubbles: true }))
+  if (!stillCurrent()) {
+    resetDeltaState(ctx.ids)
+    return { text: `Selection in [${index}] may have partially changed, but the target changed during page events. Re-observe and check its state before continuing.` }
+  }
+  const settled = await waitForPageSettled(TYPE_SETTLE)
+  if (!el.isConnected || !option.isConnected || el.selectedIndex !== optionIndex || !option.selected) {
+    return withPageDelta(`Selection was sent to [${index}], but could not be confirmed at readback. Observe again before continuing.${settleNote(settled)}`, ctx, settled)
+  }
+  return withPageDelta(`Selected option ${optionIndex} in [${index}]. The control state was read back; this does not confirm a saved change.${settleNote(settled)}`, ctx, settled)
 }
 
 async function pressAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
   const key = typeof args.key === 'string' && args.key !== '' ? args.key : ''
-  if (key === '') throw new ActionError('bad-args', 'key must not be empty.')
+  if (key === '' || key.length > 64 || /[\u0000-\u001f\u007f]/u.test(key)) {
+    throw new ActionError('bad-args', 'key must be a non-empty KeyboardEvent.key value of at most 64 characters without control characters.')
+  }
   const target = document.activeElement instanceof HTMLElement ? document.activeElement : document.body
   target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
   target.dispatchEvent(new KeyboardEvent('keyup', { key, bubbles: true, cancelable: true }))
-  if (key === 'Enter' && target instanceof HTMLInputElement && target.form !== null) {
-    target.form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
-  }
-  await waitForPageSettled(ACTION_SETTLE)
-  return withPageDelta(`Sent key "${key}".`, ctx)
+  const settled = await waitForPageSettled(ACTION_SETTLE)
+  return withPageDelta(`Sent synthetic key events for ${JSON.stringify(key)}; native key behavior is not guaranteed. Page handlers may have caused effects; re-observe and check before continuing.${settleNote(settled)}`, ctx, settled)
 }
 
 async function scrollAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
@@ -412,11 +512,11 @@ async function scrollAction(args: Record<string, unknown>, ctx: ActionContext): 
     default:
       throw new ActionError('bad-args', `direction must be up, down, top, or bottom; received "${direction}".`)
   }
-  await waitForPageSettled(SCROLL_SETTLE)
-  return withPageDelta(`Scrolled ${direction}.`, ctx)
+  const settled = await waitForPageSettled(SCROLL_SETTLE)
+  return withPageDelta(`Scrolled ${direction}.${settleNote(settled)}`, ctx, settled)
 }
 
-async function navigateAction(args: Record<string, unknown>): Promise<ActionResult> {
+async function navigateAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
   const url = typeof args.url === 'string' && args.url !== '' ? args.url : ''
   if (url === '') throw new ActionError('bad-args', 'url must not be empty.')
   let parsed: URL
@@ -428,7 +528,7 @@ async function navigateAction(args: Record<string, unknown>): Promise<ActionResu
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new ActionError('bad-args', `Only http and https URLs are supported; received ${parsed.protocol}.`)
   }
-  resetDeltaState()
+  resetDeltaState(ctx.ids)
   // Cross-document navigation unloads this content script and destroys the
   // tabs.sendMessage response port before any await settles — so answer
   // FIRST, then navigate in a fresh task. The model re-snapshots after load.
@@ -439,8 +539,8 @@ async function navigateAction(args: Record<string, unknown>): Promise<ActionResu
   }
 }
 
-async function historyAction(delta: 1 | -1): Promise<ActionResult> {
-  resetDeltaState()
+async function historyAction(delta: 1 | -1, ctx: ActionContext): Promise<ActionResult> {
+  resetDeltaState(ctx.ids)
   // 同 navigate：先响应再导航（文档卸载会销毁响应端口）。
   setTimeout(() => { if (delta === -1) history.back(); else history.forward() }, 0)
   return {
@@ -449,8 +549,8 @@ async function historyAction(delta: 1 | -1): Promise<ActionResult> {
   }
 }
 
-function reloadAction(): ActionResult {
-  resetDeltaState()
+function reloadAction(ctx: ActionContext): ActionResult {
+  resetDeltaState(ctx.ids)
   setTimeout(() => { location.reload() }, 0)
   return {
     text: 'The page is reloading. Call browser_snapshot again after it loads.',
@@ -468,9 +568,11 @@ async function getTextAction(args: Record<string, unknown>): Promise<ActionResul
 
 async function waitAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
   const ms = typeof args.ms === 'number' && args.ms > 0 ? args.ms : 0
-  await waitForPageSettled(EXPLICIT_WAIT_SETTLE)
   if (ms > 0) await sleep(ms)
-  return withPageDelta(`The page is stable${ms > 0 ? ` after an additional ${ms}ms wait` : ''}.`, ctx)
+  const settled = await waitForPageSettled(EXPLICIT_WAIT_SETTLE)
+  return withPageDelta(settled
+    ? `The page was quiet when checked${ms > 0 ? ` after an additional ${ms}ms wait` : ''}.`
+    : 'The page did not become quiet within the limit; re-observe before continuing.', ctx, settled)
 }
 
 function numberArg(args: Record<string, unknown>, name: string): number {

@@ -7,9 +7,8 @@
  * fence (which only guards the client-connection routes), so the bridge brings
  * its own authentication: a bearer token presented in the `hello` frame within
  * HELLO_TIMEOUT_MS. Host calls terminate at the bridge-owned Host adapter.
- * Methods the /api carrier pins to loopback (`PRIVILEGED_METHODS`)
- * stay loopback-only here regardless of the token, defense in depth for
- * `--host 0.0.0.0` deployments.
+ * The bridge is loopback-only. Host management methods require a separate,
+ * explicit Host configuration in addition to the bearer token.
  *
  * One active connection at a time: a new authenticated socket replaces the
  * previous one (the old socket is closed and its in-flight tool calls settle
@@ -36,12 +35,10 @@ import {
 } from './protocol.ts'
 import { SessionPurgeError } from './session-purge.ts'
 import { verifyToken } from './token.ts'
+import type { PairingStore } from './pairing.ts'
 
 /**
- * Gateway methods the /api carrier pins to loopback (mirror of
- * client-connection's PRIVILEGED_METHODS; kept verbatim so the two fences
- * cannot drift). The bridge rejects these for non-loopback remotes even with
- * a valid token.
+ * Host management methods that must not be granted by browser pairing alone.
  */
 const PRIVILEGED_METHODS = new Set([
   'host.pickDirectory',
@@ -68,6 +65,11 @@ export function isLoopbackAddress(address: string | undefined): boolean {
   return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1'
 }
 
+/** Reject DNS rebinding and user-controlled non-local authorities. */
+export function isLoopbackHost(host: string | undefined): boolean {
+  return typeof host === 'string' && (/^127\.0\.0\.1(?::\d{1,5})?$/.test(host) || /^\[::1\](?::\d{1,5})?$/.test(host))
+}
+
 /** Error thrown by requestTool; the tool registry turns it into an isError result. */
 export class BridgeToolError extends Error {
   constructor(
@@ -83,6 +85,10 @@ export class BridgeToolError extends Error {
 export interface BridgeServerDeps {
   /** Bearer token the extension must present in `hello`. */
   token: string
+  /** When provided, the administrator token is never accepted as a browser credential. */
+  pairing?: PairingStore
+  /** Explicit Host-side opt-in for settings, credentials and local paths. */
+  allowHostManagement?: boolean
   /** Active dsh Host adapter used for unary calls, events, and waterfalls. */
   api: BrowserHostApi
   /** Default per-tool-call timeout in ms. */
@@ -118,11 +124,14 @@ interface PendingTool {
 /** A socket that passed authentication and owns the single active slot. */
 interface ReadyConnection {
   ws: WebSocket
+  installationId?: string
   /** Remote address captured at upgrade time (loopback gate for privileged methods). */
   remoteAddress: string | undefined
   abort: AbortController
   pump: Promise<void>
   ping: NodeJS.Timeout
+  /** Ordered requests belong to this connection, never to its replacement. */
+  orderedSessionRpcs: Map<string, Promise<void>>
 }
 
 function sendFrame(ws: WebSocket, frame: BridgeFrame): void {
@@ -153,7 +162,6 @@ export class BridgeServer {
   private readonly wss = new WebSocketServer({ noServer: true })
   private current: ReadyConnection | null = null
   private readonly pendingTools = new Map<string, PendingTool>()
-  private readonly orderedSessionRpcs = new Map<string, Promise<void>>()
   private closed = false
 
   constructor(private readonly deps: BridgeServerDeps) {}
@@ -166,8 +174,11 @@ export class BridgeServer {
    */
   handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
     const remote = this.deps.remoteAddressOverride ?? req.socket.remoteAddress
-    const origin = req.headers.origin
-    this.wss.handleUpgrade(req, socket, head, (ws) => { this.attach(ws, remote, origin) })
+    if (!isLoopbackAddress(remote) || !isLoopbackHost(req.headers.host)) {
+      socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+      return
+    }
+    this.wss.handleUpgrade(req, socket, head, (ws) => { this.attach(ws, remote) })
   }
 
   /**
@@ -273,7 +284,13 @@ export class BridgeServer {
     return this.current !== null
   }
 
-  private attach(ws: WebSocket, remoteAddress: string | undefined, origin: string | undefined): void {
+  /** Disconnect a revoked installation immediately after the revocation commits. */
+  revokeInstallation(installationId: string): void {
+    if (this.current?.installationId === installationId) this.replaceConnection()
+  }
+
+  private attach(ws: WebSocket, remoteAddress: string | undefined): void {
+    let authenticating = false
     let helloTimer: NodeJS.Timeout | undefined = setTimeout(() => {
       ws.close(4001, 'hello timeout')
     }, this.deps.helloTimeoutMs ?? HELLO_TIMEOUT_MS)
@@ -286,34 +303,35 @@ export class BridgeServer {
         return
       }
       if (helloTimer !== undefined) {
+        if (authenticating) {
+          ws.close(1008, 'authentication in progress')
+          return
+        }
         // Pending state: only `hello` is legal.
         if (frame.t !== 'hello') {
           ws.close(1008, 'hello first')
           return
         }
-        // Zero-config local mode: loopback sockets skip the token (the
-        // extension auto-discovers the bridge and connects without setup).
-        // WebSockets have no same-origin policy, so a malicious page could
-        // open a cross-origin socket to 127.0.0.1 with a loopback remote —
-        // the loopback shortcut therefore requires a chrome-extension://
-        // Origin (only extension contexts can present one; pages cannot
-        // forge the header). Firefox moz-extension:// origins contain a
-        // per-install UUID rather than the manifest's stable Gecko ID, so
-        // they are not an identity boundary and must present the bearer token.
-        // Non-loopback remotes must also present the bearer token.
-        const loopbackNoToken = isLoopbackAddress(remoteAddress)
-          && typeof origin === 'string'
-          && origin.startsWith('chrome-extension://')
-        if (!loopbackNoToken && !verifyToken(this.deps.token, frame.token)) {
-          ws.close(4002, 'bad token')
-          return
-        }
-        clearTimeout(helloTimer)
-        helloTimer = undefined
-        this.promote(ws, remoteAddress)
+        authenticating = true
+        // Origin headers are not credentials: a local process can forge them.
+        const authentication: Promise<{ credential?: string } | undefined> = this.deps.pairing === undefined
+          ? Promise.resolve(verifyToken(this.deps.token, frame.token) ? {} : undefined)
+          : this.deps.pairing.authenticate(frame.installationId ?? '', frame.token)
+        void authentication.then((result) => {
+          if (result === undefined) {
+            ws.close(4002, 'bad credential')
+            return
+          }
+          if (helloTimer === undefined || ws.readyState !== WebSocket.OPEN) return
+          clearTimeout(helloTimer)
+          helloTimer = undefined
+          this.promote(ws, remoteAddress, frame.installationId, result.credential)
+        }, () => { ws.close(1011, 'authentication unavailable') })
         return
       }
-      this.handleReadyFrame(frame)
+      const conn = this.current
+      if (conn === null || conn.ws !== ws || conn.abort.signal.aborted) return
+      this.handleReadyFrame(frame, conn)
     }
     const onClose = (): void => {
       if (helloTimer !== undefined) clearTimeout(helloTimer)
@@ -325,7 +343,7 @@ export class BridgeServer {
   }
 
   /** Promote an authenticated socket to the single active slot. */
-  private promote(ws: WebSocket, remoteAddress: string | undefined): void {
+  private promote(ws: WebSocket, remoteAddress: string | undefined, installationId?: string, credential?: string): void {
     this.replaceConnection()
     const abort = new AbortController()
     const ping = setInterval(() => { sendFrame(ws, { t: 'ping' }) }, this.deps.pingIntervalMs ?? PING_INTERVAL_MS)
@@ -348,21 +366,22 @@ export class BridgeServer {
         }
       }
     })()
-    this.current = { ws, remoteAddress, abort, pump, ping }
-    sendFrame(ws, { t: 'hello.ok', caps: this.deps.caps })
+    this.current = { ws, remoteAddress, abort, pump, ping, orderedSessionRpcs: new Map(),
+      ...(installationId === undefined ? {} : { installationId }) }
+    sendFrame(ws, { t: 'hello.ok', caps: this.deps.caps, ...(credential === undefined ? {} : { credential }) })
     ws.once('close', () => {
       clearInterval(ping)
       abort.abort()
     })
   }
 
-  private handleReadyFrame(frame: BridgeFrame): void {
+  private handleReadyFrame(frame: BridgeFrame, conn: ReadyConnection): void {
     switch (frame.t) {
       case 'rpc':
-        this.routeRpc(frame)
+        this.routeRpc(frame, conn)
         break
       case 'respond':
-        void this.handleRespond(frame)
+        void this.handleRespond(frame, conn)
         break
       case 'tool.result':
         this.settleTool(frame.id, frame.ok, frame.ok ? frame.result : frame.error)
@@ -388,32 +407,33 @@ export class BridgeServer {
    * first prompt may still be materializing a provisional session; its cancel
    * must not reach the gateway until that admission has completed.
    */
-  private routeRpc(frame: Extract<ClientFrame, { t: 'rpc' }>): void {
+  private routeRpc(frame: Extract<ClientFrame, { t: 'rpc' }>, conn: ReadyConnection): void {
     const sessionId = orderedSessionId(frame)
     if (sessionId === undefined) {
-      void this.handleRpc(frame)
+      void this.handleRpc(frame, conn)
       return
     }
-    const previous = this.orderedSessionRpcs.get(sessionId) ?? Promise.resolve()
+    const previous = conn.orderedSessionRpcs.get(sessionId) ?? Promise.resolve()
     const task = previous.then(
-      () => this.handleRpc(frame),
-      () => this.handleRpc(frame),
+      () => this.handleRpc(frame, conn),
+      () => this.handleRpc(frame, conn),
     )
-    this.orderedSessionRpcs.set(sessionId, task)
+    conn.orderedSessionRpcs.set(sessionId, task)
     const clear = (): void => {
-      if (this.orderedSessionRpcs.get(sessionId) === task) this.orderedSessionRpcs.delete(sessionId)
+      if (conn.orderedSessionRpcs.get(sessionId) === task) conn.orderedSessionRpcs.delete(sessionId)
     }
     void task.then(clear, clear)
   }
 
-  private async handleRpc(frame: Extract<ClientFrame, { t: 'rpc' }>): Promise<void> {
-    const conn = this.current
-    /* v8 ignore next -- replacement race: a frame can land between a socket
-    replacement and the next promotion; the re-check keeps the handler total */
-    if (conn === null) return
-    const forbidden = PRIVILEGED_METHODS.has(frame.method) && !isLoopbackAddress(conn.remoteAddress)
+  private async handleRpc(frame: Extract<ClientFrame, { t: 'rpc' }>, conn: ReadyConnection): Promise<void> {
+    // An ordered call may have waited while another connection replaced its
+    // owner. It must never borrow the new connection's identity or signal.
+    if (this.current !== conn || conn.abort.signal.aborted) return
+    const management = PRIVILEGED_METHODS.has(frame.method)
+      || frame.method.startsWith('settings.') || frame.method.startsWith('credentials.')
+    const forbidden = management && this.deps.allowHostManagement !== true
     if (forbidden) {
-      sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false, error: { code: 'forbidden', message: 'method is loopback-only' } })
+      sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false, error: { code: 'forbidden', message: 'host management is not enabled in the Host configuration' } })
       return
     }
     if (frame.method === BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD) {
@@ -480,10 +500,8 @@ export class BridgeServer {
   }
 
   /** Relay a pending Host waterfall response through the active adapter. */
-  private async handleRespond(frame: Extract<ClientFrame, { t: 'respond' }>): Promise<void> {
-    const conn = this.current
-    /* v8 ignore next -- replacement race; a closed socket simply drops the receipt */
-    if (conn === null) return
+  private async handleRespond(frame: Extract<ClientFrame, { t: 'respond' }>, conn: ReadyConnection): Promise<void> {
+    if (this.current !== conn || conn.abort.signal.aborted) return
     try {
       const result = await this.deps.api.respond(frame.rpcId, frame.result, conn.abort.signal)
       sendFrame(conn.ws, { t: 'respond.result', id: frame.id, ok: true, result })

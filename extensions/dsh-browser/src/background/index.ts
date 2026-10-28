@@ -41,10 +41,14 @@ import {
 import type { ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import { BRIDGE_CONFIG_PATH, BRIDGE_PATH } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import { BridgeClient, type BridgeState } from './bridge.ts'
+import { readBridgeCredential, writeBridgeCredential } from './credential-store.ts'
+import { needsWriteTurn, WriteQueue } from './write-queue.ts'
+import { localBridgeUrl } from './bridge-address.ts'
 import { createRpc } from './rpc.ts'
 import {
   dispatchOpenTab,
   dispatchToolCall,
+  forgetTabSnapshot,
   isNavigationCandidateTool,
   isTabManagementTool,
   resetTabSnapshot,
@@ -128,7 +132,9 @@ async function discoverBridge(shouldContinue: () => boolean = () => true): Promi
       if (!shouldContinue()) return undefined
       if (!response.ok) continue
       const body = await response.json() as { wsUrl?: unknown }
-      if (typeof body.wsUrl === 'string' && body.wsUrl.startsWith('ws://')) return body.wsUrl
+      const expected = localBridgeUrl(`ws://127.0.0.1:${port}${BRIDGE_PATH}`)
+      const discovered = typeof body.wsUrl === 'string' ? localBridgeUrl(body.wsUrl) : undefined
+      if (discovered !== undefined && discovered === expected) return discovered
     } catch {
       // 该端口没有 dsh 或未挂桥：试下一个。
     }
@@ -140,7 +146,6 @@ async function discoverBridge(shouldContinue: () => boolean = () => true): Promi
 async function probeBridge(url: string): Promise<boolean> {
   try {
     const target = new URL(url)
-    if (target.hostname !== '127.0.0.1') return true
     target.protocol = target.protocol === 'wss:' ? 'https:' : 'http:'
     target.pathname = BRIDGE_CONFIG_PATH
     target.search = ''
@@ -148,13 +153,14 @@ async function probeBridge(url: string): Promise<boolean> {
     const response = await fetch(target, { signal: AbortSignal.timeout(1_500) })
     if (!response.ok) return false
     const body = await response.json() as { wsUrl?: unknown }
-    return typeof body.wsUrl === 'string' && body.wsUrl.startsWith('ws://')
+    return typeof body.wsUrl === 'string' && localBridgeUrl(body.wsUrl) === localBridgeUrl(url)
   } catch {
     return false
   }
 }
 
 const STORAGE_KEY = 'dshSettings'
+const INSTALLATION_KEY = 'dshBridgeInstallationId'
 const TAB_AFFINITY_STORAGE_KEY = 'dshTabAffinity'
 
 type StoredTabAffinity =
@@ -164,6 +170,7 @@ type StoredTabAffinity =
 let settings: Settings = { ...SETTINGS_DEFAULTS }
 let unrestrictedAccessActive = SETTINGS_DEFAULTS.unrestrictedBrowserAccess
 let unrestrictedAccessRevision = 0
+let pageSharingRevision = 0
 let unrestrictedRevocation: Promise<void> | undefined
 let settingsPersistence = Promise.resolve()
 let caps: BridgeCaps | null = null
@@ -198,6 +205,7 @@ interface ActiveToolCall {
 }
 
 const activeToolCalls = new Map<string, ActiveToolCall>()
+const writeQueue = new WriteQueue()
 /** Disconnection drops result ownership, but dispatched operations must still settle before revocation. */
 const unsettledToolCalls = new Set<ActiveToolCall>()
 let lastPersistedAffinity: string | undefined
@@ -252,11 +260,24 @@ function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 }
 
 async function loadSettings(): Promise<Settings> {
+  // Restrict other settings where the browser supports it. The credential is
+  // separately stored in extension-origin IndexedDB on every browser.
+  if (typeof chrome.storage.local.setAccessLevel === 'function') {
+    await chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }).catch(() => {})
+  }
   const stored = await chrome.storage.local.get(STORAGE_KEY)
-  const loaded = normalizeSettings({ ...SETTINGS_DEFAULTS, ...(stored[STORAGE_KEY] as Partial<Settings> | undefined) })
+  const previous = stored[STORAGE_KEY] as Partial<Settings> | undefined
+  let credential = await readBridgeCredential()
+  if (credential === undefined && typeof previous?.token === 'string' && previous.token !== '') {
+    credential = previous.token
+    await writeBridgeCredential(credential)
+  }
+  const loaded = normalizeSettings({ ...SETTINGS_DEFAULTS, ...previous, token: credential ?? '' })
+  const { token: _secret, ...publicSettings } = loaded
+  if (previous !== undefined && 'token' in previous) await chrome.storage.local.set({ [STORAGE_KEY]: publicSettings })
   if (loaded.bridgeUrl === LEGACY_LOCAL_URL || loaded.bridgeUrl === `${LEGACY_LOCAL_URL}/`) {
     loaded.bridgeUrl = ''
-    await chrome.storage.local.set({ [STORAGE_KEY]: loaded })
+    await chrome.storage.local.set({ [STORAGE_KEY]: { ...publicSettings, bridgeUrl: '' } })
   }
   return loaded
 }
@@ -266,6 +287,7 @@ async function persistSettings(next: Partial<Settings>): Promise<void> {
   const accessRevision = changesUnrestrictedAccess ? ++unrestrictedAccessRevision : unrestrictedAccessRevision
   const updated = normalizeSettings({ ...settings, ...next })
   const revokesUnrestrictedAccess = settings.unrestrictedBrowserAccess && !updated.unrestrictedBrowserAccess
+  if (settings.sharePageContent !== updated.sharePageContent || revokesUnrestrictedAccess) pageSharingRevision += 1
   settings = updated
   if (!updated.unrestrictedBrowserAccess) unrestrictedAccessActive = false
   syncSelectionWatch()
@@ -285,7 +307,9 @@ async function persistSettings(next: Partial<Settings>): Promise<void> {
   const persisted = updated
   const write = settingsPersistence.then(async () => {
     await accessTransition
-    await chrome.storage.local.set({ [STORAGE_KEY]: persisted })
+    if (next.token !== undefined) await writeBridgeCredential(persisted.token)
+    const { token: _secret, ...publicSettings } = persisted
+    await chrome.storage.local.set({ [STORAGE_KEY]: publicSettings })
   })
   settingsPersistence = write.catch(() => {})
   await write
@@ -323,6 +347,23 @@ const settingsReady = loadSettings().then((loaded) => {
   unrestrictedAccessActive = loaded.unrestrictedBrowserAccess
   settingsLoaded = true
 })
+
+// The identifier belongs to this extension installation, not a tab or session.
+// Share the in-flight write so concurrent panel starts cannot create two IDs.
+let installationIdPromise: Promise<string> | undefined
+function ensureInstallationId(): Promise<string> {
+  if (installationIdPromise === undefined) {
+    installationIdPromise = (async () => {
+      const stored = await chrome.storage.local.get(INSTALLATION_KEY)
+      const existing: unknown = stored[INSTALLATION_KEY]
+      if (typeof existing === 'string' && /^[a-zA-Z0-9_-]{16,128}$/.test(existing)) return existing
+      const id = crypto.randomUUID()
+      await chrome.storage.local.set({ [INSTALLATION_KEY]: id })
+      return id
+    })().catch((error: unknown) => { installationIdPromise = undefined; throw error })
+  }
+  return installationIdPromise
+}
 
 function armBridgeKeepalive(): void {
   chrome.alarms.create(BRIDGE_KEEPALIVE_ALARM, { periodInMinutes: 0.5 })
@@ -1084,7 +1125,10 @@ function routeToolCall(call: ToolCall): void {
   const budget = caps === null
     ? undefined
     : { maxItems: caps.maxInteractiveItems, maxChars: caps.snapshotMaxChars }
-  const sharePageContent = unrestrictedAccess ? 'auto' : settings.sharePageContent
+  // A queued operation must observe privacy changes made while it waited.
+  // An operation that arrived without unrestricted access must not acquire a
+  // newer grant merely because the user enabled it later.
+  const sharePageContent = (): Settings['sharePageContent'] => unrestrictedAccess ? 'auto' : settings.sharePageContent
   const managementDispatch = async (): Promise<ToolAnswer> => {
     await affinityReady
     const affinity = tabAffinity.snapshot()
@@ -1099,7 +1143,7 @@ function routeToolCall(call: ToolCall): void {
       : tabAffinity.getSessionTab(call.sessionId)?.tabId
     return dispatchToolCall(
       call,
-      sharePageContent,
+      sharePageContent(),
       budget,
       (prompt) => authorizeToolCall(prompt, controller.signal, windowId ?? 0, call.sessionId, unrestrictedAccess),
       controller.signal,
@@ -1114,7 +1158,7 @@ function routeToolCall(call: ToolCall): void {
       },
     )
   }
-  void (isTabManagementTool(call.name)
+  const dispatch = (): Promise<ToolAnswer> => (isTabManagementTool(call.name)
     ? managementDispatch()
     : call.name === 'browser_open_tab'
     ? resolveOpenTabWindow(call.sessionId).then((target) => 'ok' in target
@@ -1122,7 +1166,7 @@ function routeToolCall(call: ToolCall): void {
       : dispatchOpenTab(
           call,
           target.windowId,
-          sharePageContent,
+          sharePageContent(),
           budget,
           (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, call.sessionId, unrestrictedAccess),
           controller.signal,
@@ -1134,7 +1178,7 @@ function routeToolCall(call: ToolCall): void {
       ? target
       : dispatchToolCall(
           call,
-          sharePageContent,
+          sharePageContent(),
           budget,
           (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, call.sessionId, unrestrictedAccess),
           controller.signal,
@@ -1142,7 +1186,26 @@ function routeToolCall(call: ToolCall): void {
           () => target.id !== undefined && tabAffinity.allowsTarget(target.id, call.sessionId),
           { unrestrictedAccess, commitAction, rollbackActionCommit },
         ))
-  ).then(
+  )
+  const dispatchAndCheckpoint = async (): Promise<ToolAnswer> => {
+    const sharingAtDispatch = pageSharingRevision
+    let answer = await dispatch()
+    if (answer.ok && isNavigationCandidateTool(call.name) && activeToolCalls.get(call.id) === activeCall) {
+      await checkpointSessionPage(call.sessionId)
+    }
+    if (sharingAtDispatch !== pageSharingRevision && !unrestrictedAccessEnabled() && settings.sharePageContent !== 'auto') {
+      if (call.name === 'browser_snapshot' || call.name === 'browser_get_text') {
+        answer = { ok: false, error: { code: 'action-failed', message: 'Page sharing changed before the observation could be delivered.' } }
+      } else if (answer.ok && typeof answer.result === 'object' && answer.result !== null
+        && typeof (answer.result as { text?: unknown }).text === 'string'
+        && (answer.result as { text: string }).text.includes('<UNTRUSTED_PAGE_CONTENT')) {
+        answer = { ok: true, result: { text: 'Browser action returned; page content was withheld because sharing settings changed. This does not confirm a saved change.' } }
+      }
+    }
+    return answer
+  }
+  const result = needsWriteTurn(call.name) ? writeQueue.run(controller.signal, dispatchAndCheckpoint) : dispatchAndCheckpoint()
+  void result.then(
     async (answer) => {
       if (activeToolCalls.get(call.id) !== activeCall) return
       // A committed browser_open_tab already rebound affinity; prefer that
@@ -1159,7 +1222,6 @@ function routeToolCall(call: ToolCall): void {
         return
       }
       if (answer.ok) {
-        if (isNavigationCandidateTool(call.name)) await checkpointSessionPage(call.sessionId)
         if (activeToolCalls.get(call.id) !== activeCall) return
         const socket = bridge
         if (socket === null) return
@@ -1224,7 +1286,7 @@ function cancelAllToolCalls(): void {
   activeToolCalls.clear()
 }
 
-/** (Re)start the bridge with the current settings. 零配置：地址留空时自动探测；回环连接无需 token。 */
+/** (Re)start the bridge with the current settings; address discovery contains no credential. */
 async function startBridge(): Promise<void> {
   const revision = ++bridgeStartRevision
   if (panelPorts.size === 0) return
@@ -1242,15 +1304,17 @@ async function startBridge(): Promise<void> {
     broadcastStatus()
     return
   }
-  // 手动填的地址常只有主机部分（如 ws://127.0.0.1:3080）；桥路径是协议
-  // 常量，缺省时自动补全，避免连到根路径失败。
-  try {
-    const parsed = new URL(url)
-    if (parsed.pathname === '' || parsed.pathname === '/') parsed.pathname = BRIDGE_PATH
-    url = parsed.toString()
-  } catch {
-    // 非法 URL 原样交给 WebSocket 构造函数报错。
+  const localUrl = localBridgeUrl(url)
+  if (localUrl === undefined) {
+    bridge?.stop()
+    bridge = null
+    rpc = null
+    broadcastStatus()
+    return
   }
+  url = localUrl
+  const installationId = settings.token === '' ? '' : await ensureInstallationId()
+  if (revision !== bridgeStartRevision || panelPorts.size === 0) return
   if (bridge === null) {
     const client = new BridgeClient({
       onStateChange: (state) => {
@@ -1273,7 +1337,13 @@ async function startBridge(): Promise<void> {
         else if (frame.t === 'respond.result') interactionResponses.route(frame)
         // rpc.result is settled by the rpc facade (wrapped below).
       },
-      onHelloOk: (negotiated) => {
+      onHelloOk: async (negotiated, credential, presentedToken) => {
+        if (credential !== undefined) {
+          if (!/^[a-f0-9]{64}$/.test(credential) || settings.token !== presentedToken) {
+            throw new Error('Pairing was superseded or returned an invalid credential')
+          }
+          await persistSettings({ token: credential })
+        }
         caps = negotiated
         broadcastStatus()
         void pushBudgetToControlledTab(negotiated)
@@ -1282,15 +1352,15 @@ async function startBridge(): Promise<void> {
     bridge = client
     rpc = createRpc(client)
   }
-  bridge.start(url, settings.token)
+  bridge.start(url, settings.token, installationId)
 }
 
 /** Gateway RPC with a helpful error when the bridge is down. */
 async function gatewayRpc(method: string, payload: unknown): Promise<unknown> {
   if (rpc === null || bridge === null || !bridge.connected) {
     throw new Error(getUiLocale() === 'zh'
-      ? '未连接 dsh（请检查设置中的地址与 token）'
-      : 'dsh is not connected (check the bridge address and token in Settings)')
+      ? '未连接 dsh（请检查设置中的地址与配对状态）'
+      : 'dsh is not connected (check the bridge address and pairing in Settings)')
   }
   return rpc.request(method, payload)
 }
@@ -1321,6 +1391,13 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'dsh-panel') return
+  // Content scripts can open runtime ports too. Only the extension's own
+  // panel may submit settings, approvals or Host RPCs through this channel.
+  if (port.sender?.id !== chrome.runtime.id
+    || port.sender.url?.split(/[?#]/, 1)[0] !== chrome.runtime.getURL('panel/index.html')) {
+    port.disconnect()
+    return
+  }
   const wasIdle = panelPorts.size === 0
   const tabAffinityRebinds = new Map<string, {
     controller: AbortController
@@ -1644,6 +1721,8 @@ chrome.tabs.onUpdated.addListener((tabId, _changeInfo, tab) => {
 
 chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
   // The old document is gone even though Chrome transfers the tab identity.
+  forgetTabSnapshot(removedTabId)
+  resetTabSnapshot(addedTabId)
   broadcastSelections(selections.clearTab(removedTabId))
   void pageSessionContexts.ready.then(() => {
     pageSessionContexts.replaceTab(removedTabId, addedTabId)
@@ -1658,8 +1737,6 @@ chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
       activeFollowRefreshes.get(sid)?.controller.abort()
       cancelPendingApprovals(sid)
     }
-    resetTabSnapshot(removedTabId)
-    resetTabSnapshot(addedTabId)
     persistTabAffinity()
     broadcastTabAffinity()
     return chrome.tabs.get(addedTabId).then((tab) => {
@@ -1670,6 +1747,7 @@ chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
 })
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  forgetTabSnapshot(tabId)
   broadcastSelections(selections.clearTab(tabId))
   void pageSessionContexts.ready.then(() => {
     pageSessionContexts.removeTab(tabId)
@@ -1691,8 +1769,15 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 // Matching the exact frame keeps an iframe's navigation from invalidating a
 // quote taken from its parent page, and vice versa.
 chrome.webNavigation.onCommitted.addListener(({ tabId, frameId }) => {
+  resetTabSnapshot(tabId)
   broadcastSelections(selections.clearTab(tabId, frameId))
 })
+
+// The document and even its URL can remain unchanged after SPA history
+// transitions. Invalidate every frame's pre-transition snapshot while keeping
+// the user's visible text selection intact.
+chrome.webNavigation.onHistoryStateUpdated?.addListener(({ tabId }) => { resetTabSnapshot(tabId) })
+chrome.webNavigation.onReferenceFragmentUpdated?.addListener(({ tabId }) => { resetTabSnapshot(tabId) })
 
 // Ports are cleaned up by their own disconnect; only the window's quote is
 // left behind when the whole window goes away.

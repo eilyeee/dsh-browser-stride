@@ -9,7 +9,7 @@ import type { BrowserHostApi, HostEventFrame } from '../src/host-api.ts'
 
 const TOKEN = 'deadbeefdeadbeefdeadbeefdeadbeef'
 
-/** 扩展上下文的 Origin（回环免 token 的必要条件）。 */
+/** A browser-looking Origin is not proof of identity. */
 const EXT_ORIGIN = 'chrome-extension://test-extension-id'
 const FIREFOX_EXT_ORIGIN = 'moz-extension://per-install-uuid'
 
@@ -129,14 +129,13 @@ describe('BridgeServer', () => {
     ws.close()
   })
 
-  it('accepts loopback connections without a token when Origin is an extension (zero-config mode)', async () => {
+  it('rejects an extension Origin without a token', async () => {
     const h = await startBridge()
     harnesses.push(h)
-    const { ws, frames } = await connect(h.url, EXT_ORIGIN)
+    const { ws, done } = await connect(h.url, EXT_ORIGIN)
     send(ws, { t: 'hello', token: '', caps: CAPS })
-    await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
-    expect(frames.find((f) => f.t === 'hello.ok')).toBeDefined()
-    ws.close()
+    await done
+    expect(ws.readyState).toBe(WebSocket.CLOSED)
   })
 
   it('requires a token from Firefox extension origins because their UUID is not an extension identity', async () => {
@@ -176,13 +175,10 @@ describe('BridgeServer', () => {
     expect(ws.readyState).toBe(WebSocket.CLOSED)
   })
 
-  it('still requires the token from non-loopback remotes', async () => {
+  it('rejects non-loopback remotes before accepting a WebSocket', async () => {
     const h = await startBridge({ remoteAddressOverride: '192.168.1.5' })
     harnesses.push(h)
-    const { ws, done } = await connect(h.url)
-    send(ws, { t: 'hello', token: '', caps: CAPS })
-    await done
-    expect(ws.readyState).toBe(WebSocket.CLOSED)
+    await expect(connect(h.url)).rejects.toThrow(/403/)
   })
 
   it('closes sockets that never present hello', async () => {
@@ -462,7 +458,7 @@ describe('BridgeServer', () => {
     const h = await startBridge()
     harnesses.push(h)
     const { ws, frames } = await connect(h.url, EXT_ORIGIN)
-    send(ws, { t: 'hello', token: '', caps: CAPS })
+    send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
     const abort = new AbortController()
     abort.abort()
@@ -526,6 +522,43 @@ describe('BridgeServer', () => {
     await waitFor(() => second.frames.some((f) => f.t === 'hello.ok'))
 
     await pendingAssertion
+    first.ws.close()
+    second.ws.close()
+  })
+
+  it('discards old queued RPCs and does not block the replacement connection', async () => {
+    let releaseOld: (() => void) | undefined
+    let oldReturned = false
+    const calls: string[] = []
+    const h = await startBridge({ api: hostApi({
+      call: async (request) => {
+        calls.push(request.rpcId)
+        if (request.rpcId === 'old-prompt') {
+          await new Promise<void>((resolve) => { releaseOld = resolve })
+          oldReturned = true
+        }
+        return { ok: true, value: 'ok' }
+      },
+    }) })
+    harnesses.push(h)
+    const first = await connect(h.url)
+    send(first.ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await waitFor(() => first.frames.some(frame => frame.t === 'hello.ok'))
+    send(first.ws, { t: 'rpc', id: 'old-prompt', method: 'session.prompt', payload: { sessionId: 's1' } })
+    await waitFor(() => releaseOld !== undefined)
+    send(first.ws, { t: 'rpc', id: 'old-cancel', method: 'session.cancel', payload: { sessionId: 's1' } })
+    // WebSocket ping is ordered after the preceding RPC on the same socket.
+    await new Promise<void>((resolve) => { first.ws.once('pong', () => resolve()); first.ws.ping() })
+
+    const second = await connect(h.url)
+    send(second.ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await waitFor(() => second.frames.some(frame => frame.t === 'hello.ok'))
+    send(second.ws, { t: 'rpc', id: 'new-prompt', method: 'session.prompt', payload: { sessionId: 's1' } })
+    await waitFor(() => second.frames.some(frame => frame.t === 'rpc.result' && frame.id === 'new-prompt'))
+    releaseOld!()
+    await waitFor(() => oldReturned)
+    await new Promise(resolve => setTimeout(resolve, 30))
+    expect(calls).toEqual(['old-prompt', 'new-prompt'])
     first.ws.close()
     second.ws.close()
   })
@@ -723,10 +756,8 @@ describe('BridgeServer', () => {
     ws.close()
   })
 
-  it('rejects privileged methods from non-loopback remotes over a real socket', async () => {
-    // The sandbox cannot bind arbitrary loopback literals, so the remote
-    // address is forced through the test seam; the socket itself is real.
-    const h = await startBridge({ remoteAddressOverride: '192.168.1.5' })
+  it('requires a separate Host opt-in for privileged methods', async () => {
+    const h = await startBridge()
     harnesses.push(h)
     const { ws, frames } = await connect(h.url)
     send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
@@ -735,11 +766,23 @@ describe('BridgeServer', () => {
     await waitFor(() => frames.some((f) => f.t === 'rpc.result' && f.id === 'priv-1'))
     expect(frames.find((f) => f.t === 'rpc.result' && f.id === 'priv-1'))
       .toMatchObject({ t: 'rpc.result', id: 'priv-1', ok: false, error: { code: 'forbidden' } })
-    // Non-privileged methods still pass for the same remote.
+    // Non-privileged methods still pass for the same connection.
     send(ws, { t: 'rpc', id: 'priv-2', method: 'session.list', payload: {} })
     await waitFor(() => frames.some((f) => f.t === 'rpc.result' && f.id === 'priv-2'))
     const allowed = frames.find((f): f is Extract<BridgeFrame, { t: 'rpc.result' }> => f.t === 'rpc.result' && f.id === 'priv-2')!
     expect(allowed.ok).toBe(true)
+    ws.close()
+  })
+
+  it('allows Host management only when explicitly enabled by the Host', async () => {
+    const h = await startBridge({ allowHostManagement: true })
+    harnesses.push(h)
+    const { ws, frames } = await connect(h.url)
+    send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await waitFor(() => frames.some(frame => frame.t === 'hello.ok'))
+    send(ws, { t: 'rpc', id: 'priv-enabled', method: 'settings.describe', payload: {} })
+    await waitFor(() => frames.some(frame => frame.t === 'rpc.result' && frame.id === 'priv-enabled'))
+    expect(frames.find(frame => frame.t === 'rpc.result' && frame.id === 'priv-enabled')).toMatchObject({ ok: true })
     ws.close()
   })
 

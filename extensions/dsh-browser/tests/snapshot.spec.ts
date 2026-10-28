@@ -21,6 +21,8 @@ describe('buildSnapshot', () => {
     expect(view.url).toBe('http://localhost:3000/')
     expect(view.items.length).toBeGreaterThanOrEqual(3)
     const text = renderSnapshot(view, false)
+    expect(text).toContain(`Observation: ${view.observationId}`)
+    expect(text).toContain('control inventory: current frame')
     expect(text).toContain('Title: 示例页标题')
     expect(text).toContain('Main content:')
     expect(text).toContain('Interactive elements:')
@@ -56,6 +58,7 @@ describe('buildSnapshot', () => {
     expect(second.changed).toContain(ids.indexOf(a))
     expect(second.changed).not.toContain(bIndex)
     const secondText = renderSnapshot(second, true)
+    expect(secondText).toContain(`Observation: ${second.observationId}; base: ${first.observationId}`)
     expect(secondText).toContain('Changed interactive elements:')
     expect(secondText).toContain('甲已改名')
     expect(secondText).not.toContain('Call browser_snapshot again')
@@ -128,12 +131,20 @@ describe('buildSnapshot', () => {
 
   it('supports region-scoped snapshots', () => {
     document.body.innerHTML = `
-      <div id="sidebar">侧边栏内容</div>
-      <div id="content">主体内容区</div>
+      <div id="sidebar">侧边栏内容<button>侧边操作</button></div>
+      <div id="content">主体内容区<button>主体操作</button></div>
     `
     const ids = new ElementIds()
     const view = buildSnapshot(ids, { region: '#content', budget: BUDGET }, null)
     expect(view.main).toContain('主体内容区')
     expect(view.main).not.toContain('侧边栏内容')
+    expect(view.items.map(item => item.name)).toEqual(expect.arrayContaining(['侧边操作', '主体操作']))
+    expect(renderSnapshot(view, false)).toContain('Text scope: selector "#content"; control inventory: current frame.')
+  })
+
+  it('fails when the requested text region does not exist instead of returning the whole page', () => {
+    document.body.innerHTML = '<main>Unrelated content</main>'
+    expect(() => buildSnapshot(new ElementIds(), { region: '#missing', budget: BUDGET }, null))
+      .toThrow('requested snapshot region does not exist')
   })
 })

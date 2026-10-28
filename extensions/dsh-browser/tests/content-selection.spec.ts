@@ -74,6 +74,15 @@ describe('reading a page selection', () => {
     expect(readSelectionCapture()).toBeNull()
   })
 
+  it('never reads a focused one-time code even when it is a plain text input', () => {
+    document.body.innerHTML = '<input autocomplete="one-time-code" value="synthetic-otp">'
+    const field = document.querySelector('input')!
+    field.focus()
+    field.setSelectionRange(0, field.value.length)
+    selectText('')
+    expect(readSelectionCapture()).toBeNull()
+  })
+
   it('never reads a contenteditable card-number widget', () => {
     document.body.innerHTML = '<div id="cc" contenteditable="true" aria-label="Credit card number">4111 1111</div>'
     selectText('4111 1111', document.getElementById('cc'))

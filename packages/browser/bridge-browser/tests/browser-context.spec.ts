@@ -28,7 +28,7 @@ describe('browser page context', () => {
       text: expect.stringContaining('browser page context was refreshed'),
     }])
     expect(message.content[0].text).toContain('already completed browser_snapshot')
-    expect(message.content[0].text).toContain('do not take an immediate duplicate snapshot')
+    expect(message.content[0].text).toContain('Use its shown elementRef values')
   })
 
   it('injects immediately when the Agent is live', () => {

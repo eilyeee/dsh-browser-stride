@@ -41,6 +41,72 @@ afterEach(() => {
 })
 
 describe('BridgeClient connection probe', () => {
+  it('waits for the installation credential to persist before dispatching frames or reporting connected', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    let finish!: () => void
+    let sentFromQueuedFrame = false
+    const frames: unknown[] = []
+    const save = vi.fn(() => new Promise<void>(resolve => { finish = resolve }))
+    const client = new BridgeClient({
+      onStateChange: () => {},
+      onFrame: frame => { frames.push(frame); sentFromQueuedFrame = client.send({ t: 'pong' }) },
+      onHelloOk: save,
+    })
+    client.start('ws://127.0.0.1:3080/ext/bridge', 'one-time-code', 'installation-1234567890')
+    await vi.advanceTimersByTimeAsync(0)
+    const socket = FakeWebSocket.instances[0]!
+    socket.open()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(client.connected).toBe(false)
+    socket.receive({ t: 'hello.ok', credential: 'a'.repeat(64), caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
+    await vi.advanceTimersByTimeAsync(0)
+    socket.receive({ t: 'event', frame: { type: 'ready' } })
+    expect(client.connected).toBe(false)
+    expect(frames).toHaveLength(0)
+    expect(save).toHaveBeenCalledWith(expect.anything(), 'a'.repeat(64), 'one-time-code')
+    finish()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(client.connected).toBe(true)
+    expect(frames).toHaveLength(1)
+    expect(sentFromQueuedFrame).toBe(true)
+    client.stop()
+  })
+
+  it('closes when persisting a new credential fails or never finishes', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    const client = new BridgeClient({ onStateChange: () => {}, onFrame: () => {}, onHelloOk: () => new Promise(() => {}) })
+    client.start('ws://127.0.0.1:3080/ext/bridge', 'one-time-code', 'installation-1234567890')
+    await vi.advanceTimersByTimeAsync(0)
+    const socket = FakeWebSocket.instances[0]!
+    socket.open()
+    await vi.advanceTimersByTimeAsync(0)
+    socket.receive({ t: 'hello.ok', credential: 'a'.repeat(64), caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(socket.readyState).toBe(FakeWebSocket.CLOSED)
+    expect(client.connected).toBe(false)
+    client.stop()
+  })
+
+  it('closes if the credential callback throws synchronously', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    const client = new BridgeClient({
+      onStateChange: () => {}, onFrame: () => {}, onHelloOk: () => { throw new Error('storage unavailable') },
+    })
+    client.start('ws://127.0.0.1:3080/ext/bridge', 'one-time-code', 'installation-1234567890')
+    await vi.advanceTimersByTimeAsync(0)
+    const socket = FakeWebSocket.instances[0]!
+    socket.open()
+    await vi.advanceTimersByTimeAsync(0)
+    socket.receive({ t: 'hello.ok', credential: 'a'.repeat(64), caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(socket.readyState).toBe(FakeWebSocket.CLOSED)
+    expect(client.connected).toBe(false)
+    client.stop()
+  })
+
   it('waits without opening a WebSocket while the local bridge is unavailable', async () => {
     vi.useFakeTimers()
     vi.stubGlobal('WebSocket', FakeWebSocket)

@@ -4,15 +4,16 @@
  * The browser tools use text snapshots, so the snapshot renders the page as
  * structured text under a hard character budget: URL/title, main content, a
  * numbered interactive inventory, and form fields (sensitive values masked).
- * `delta` mode returns only what changed since the last snapshot, and stable
- * element ids keep the model's addressing valid across snapshots.
+ * `delta` mode returns only what changed since the last snapshot. A new
+ * observation mints new references; only controls shown in it are actionable.
  *
  * @module
  */
 
 import { accessibleName, collectInteractive, isInViewport, isVisible, mainText, pageText, truncate } from './extract.ts'
-import { ElementIds } from './ids.ts'
+import { ElementIds, SELECT_OPTION_LIMIT } from './ids.ts'
 import { isSensitiveField, maskValue } from './privacy.ts'
+import { makeElementRef, makeObservationId, type ObservationId } from '@yuxianglin/dsh-bridge-browser/src/contracts/ids.ts'
 
 /** Role label per element kind (model-facing vocabulary). */
 function roleOf(el: Element): string {
@@ -40,6 +41,7 @@ interface InventoryItem {
   name: string
   disabled?: boolean
   checked?: boolean
+  ariaInvalid?: AriaInvalidState
   selected?: boolean
   href?: string
   inViewport: boolean
@@ -54,10 +56,50 @@ interface FormFieldView {
   masked: boolean
   checked?: boolean
   required?: boolean
+  readOnly?: boolean
+  nativeConstraints: string
+  ariaInvalid?: AriaInvalidState
+  options?: readonly { index: number; label: string; disabled: boolean }[]
+  optionsTruncated?: boolean
+}
+
+type AriaInvalidState = 'true' | 'grammar' | 'spelling'
+
+/** Map page-provided ARIA values to bounded tokens rather than echoing them. */
+function ariaInvalidState(el: Element): AriaInvalidState | undefined {
+  const value = el.getAttribute('aria-invalid')?.trim().toLowerCase()
+  if (value === undefined || value === '' || value === 'false') return undefined
+  return value === 'grammar' || value === 'spelling' ? value : 'true'
+}
+
+const NATIVE_VALIDITY_REASONS = [
+  ['valueMissing', 'value-missing'],
+  ['typeMismatch', 'type-mismatch'],
+  ['patternMismatch', 'pattern-mismatch'],
+  ['tooLong', 'too-long'],
+  ['tooShort', 'too-short'],
+  ['rangeUnderflow', 'range-underflow'],
+  ['rangeOverflow', 'range-overflow'],
+  ['stepMismatch', 'step-mismatch'],
+  ['badInput', 'bad-input'],
+  ['customError', 'custom-error'],
+] as const
+
+/** Reading validity is passive; checkValidity() would dispatch an invalid event. */
+function nativeConstraintState(el: Element): string {
+  if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement)
+    || !el.willValidate) return 'not-validated'
+  const validity = el.validity
+  if (validity.valid) return 'valid'
+  const reasons = NATIVE_VALIDITY_REASONS.filter(([key]) => validity[key]).map(([, reason]) => reason)
+  return `invalid(${reasons.length === 0 ? 'unspecified' : reasons.join(',')})`
 }
 
 /** One page snapshot. */
 export interface SnapshotView {
+  observationId: ObservationId
+  baseObservationId?: ObservationId
+  region?: string
   version: number
   url: string
   title: string
@@ -178,6 +220,9 @@ function openDialogOf(el: Element, isOpen: (dialog: Element) => boolean): Elemen
  * @returns the snapshot view.
  */
 export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: SnapshotView | null): SnapshotView {
+  const region = options.region !== undefined && options.region !== '' ? options.region : undefined
+  const regionEl = region === undefined ? null : document.querySelector(region)
+  if (region !== undefined && regionEl === null) throw new Error('The requested snapshot region does not exist; choose another selector.')
   const elements = collectInteractive(document)
   const { added, removed } = ids.assign(elements)
   // A renumbering is only meaningful relative to a previous snapshot: the
@@ -198,7 +243,11 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
   const nameOf = (element: Element): string => {
     let name = names.get(element)
     if (name === undefined) {
-      name = accessibleName(element)
+      // Some controls derive their accessible name from their own contents;
+      // even a truncated name can otherwise disclose a sensitive value.
+      const fieldLike = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
+        || element instanceof HTMLSelectElement || element.hasAttribute('contenteditable')
+      name = fieldLike && isSensitiveField(element) ? 'sensitive field' : accessibleName(element)
       names.set(element, name)
     }
     return name
@@ -214,9 +263,12 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
       name: nameOf(el),
       inViewport,
     }
-    if (el instanceof HTMLButtonElement && el.disabled) item.disabled = true
+    const ariaInvalid = ariaInvalidState(el)
+    if (ariaInvalid !== undefined) item.ariaInvalid = ariaInvalid
+    // Match the same disabled/inert boundary used when deciding whether an
+    // observed target can be operated on, including disabled fieldsets.
+    if (el.matches(':disabled') || el.closest('[inert], [aria-disabled="true"]') !== null) item.disabled = true
     if (el instanceof HTMLInputElement) {
-      if (el.disabled) item.disabled = true
       if (el.type === 'checkbox' || el.type === 'radio') item.checked = el.checked
     }
     const ariaChecked = el.getAttribute('aria-checked')
@@ -236,6 +288,7 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
     const index = ids.indexOf(el)
     if (index === undefined) continue
     const masked = isSensitiveField(el)
+    const ariaInvalid = ariaInvalidState(el)
     const checkable = el instanceof HTMLInputElement && (el.type === 'checkbox' || el.type === 'radio')
     const value = checkable
       ? ''
@@ -250,14 +303,21 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
       kind: el instanceof HTMLInputElement ? el.type : el.tagName.toLowerCase(),
       value: masked ? maskValue(value) : value.slice(0, 120),
       masked,
+      nativeConstraints: nativeConstraintState(el),
+      ...(ariaInvalid === undefined ? {} : { ariaInvalid }),
       ...checkable ? { checked: el.checked } : {},
-      ...el instanceof HTMLInputElement && el.required ? { required: true } : {},
+      ...(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) && el.required ? { required: true } : {},
+      ...((el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) && el.readOnly
+        || el.closest('[aria-readonly="true"]') !== null) ? { readOnly: true } : {},
+      ...el instanceof HTMLSelectElement && !masked && !el.multiple ? {
+        options: Array.from({ length: Math.min(el.options.length, SELECT_OPTION_LIMIT) }, (_, index) => el.options.item(index)!).map((option, index) => ({
+          index, label: option.label.replace(/\s+/g, ' ').trim().slice(0, 120), disabled: option.matches(':disabled'),
+        })),
+        optionsTruncated: el.options.length > SELECT_OPTION_LIMIT,
+      } : {},
     })
   }
 
-  const regionEl = options.region !== undefined && options.region !== ''
-    ? document.querySelector(options.region)
-    : null
   const mainSource = regionEl !== null ? pageText(regionEl) : mainText(document)
   const mainBudget = Math.floor(options.budget.maxChars * 0.5)
   const main = truncate(mainSource, mainBudget)
@@ -286,6 +346,9 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
   }
 
   return {
+    observationId: makeObservationId(),
+    ...(options.delta === true && last !== null ? { baseObservationId: last.observationId } : {}),
+    ...(region === undefined ? {} : { region }),
     version: (last?.version ?? 0) + 1,
     url: location.href,
     title: document.title,
@@ -311,12 +374,14 @@ function selectedText(select: HTMLSelectElement): string {
 
 function sameItem(a: InventoryItem, b: InventoryItem): boolean {
   return a.role === b.role && a.name === b.name && a.href === b.href
-    && a.disabled === b.disabled && a.checked === b.checked && a.inViewport === b.inViewport
+    && a.disabled === b.disabled && a.checked === b.checked && a.ariaInvalid === b.ariaInvalid && a.inViewport === b.inViewport
 }
 
 function sameForm(a: FormFieldView, b: FormFieldView): boolean {
   return a.label === b.label && a.kind === b.kind && a.value === b.value && a.masked === b.masked
-    && a.checked === b.checked && a.required === b.required
+    && a.checked === b.checked && a.required === b.required && a.readOnly === b.readOnly && a.optionsTruncated === b.optionsTruncated
+    && a.nativeConstraints === b.nativeConstraints && a.ariaInvalid === b.ariaInvalid
+    && JSON.stringify(a.options) === JSON.stringify(b.options)
 }
 
 /**
@@ -328,28 +393,35 @@ function sameForm(a: FormFieldView, b: FormFieldView): boolean {
  * @returns the text payload.
  */
 /** 渲染结果的整体预算：主文/清单之外的部分（标题、URL、包装行）也计入。 */
-function capRendered(text: string, budgetChars: number): string {
-  if (text.length <= budgetChars) return text
-  return `${text.slice(0, budgetChars)}…(truncated to the snapshot character budget)`
+function capRendered(text: string, budgetChars: number): { text: string; bodyLength: number } {
+  const cap = Math.max(0, Math.floor(budgetChars))
+  if (text.length <= cap) return { text, bodyLength: text.length }
+  const suffix = '…(truncated to the snapshot character budget)'
+  const bodyLength = Math.max(0, cap - suffix.length)
+  return { text: `${text.slice(0, bodyLength)}${suffix}`.slice(0, cap), bodyLength }
 }
 
-function renderItem(item: InventoryItem): string {
+function renderItem(item: InventoryItem, observationId: ObservationId): string {
   const state = [
     item.disabled === true ? 'disabled' : undefined,
     item.checked === undefined ? undefined : item.checked ? 'checked' : 'unchecked',
+    item.ariaInvalid === undefined ? undefined : `aria-invalid=${item.ariaInvalid}`,
     item.inViewport ? undefined : 'outside viewport',
   ].filter((value) => value !== undefined).join('/')
   const stateText = state === '' ? '' : ` [${state}]`
   const hrefText = item.href !== undefined ? ` → ${item.href}` : ''
-  return `  [${item.index}] ${item.role} "${item.name}"${stateText}${hrefText}`
+  return `  [${item.index}] ${item.role} "${item.name}"${stateText}${hrefText} ref=${makeElementRef(observationId, item.index)}`
 }
 
-function renderForm(form: FormFieldView, includeIdentity: boolean): string {
+function renderForm(form: FormFieldView, includeIdentity: boolean, observationId: ObservationId): string {
   const identity = includeIdentity ? `${form.label} (${form.kind}) ` : ''
   const state = form.checked === undefined
     ? `value="${form.masked ? '••••' : form.value}"`
     : `checked=${String(form.checked)}`
-  return `  [${form.index}] ${identity}${state}${form.required === true ? ' required' : ''}`
+  const options = form.options === undefined ? '' : `; options (0-based): ${form.options.map(option =>
+    `${option.index}=${JSON.stringify(option.label)}${option.disabled ? ' (disabled)' : ''}`).join(', ')}${form.optionsTruncated ? ' (additional options omitted)' : ''}`
+  const validation = ` native-constraints=${form.nativeConstraints}${form.ariaInvalid === undefined ? '' : ` aria-invalid=${form.ariaInvalid}`}`
+  return `  [${form.index}] ${identity}${state}${form.required === true ? ' required' : ''}${form.readOnly === true ? ' readonly' : ''}${validation}${options} ref=${makeElementRef(observationId, form.index)}`
 }
 
 function appendTruncationNotes(lines: string[], view: SnapshotView): void {
@@ -360,16 +432,42 @@ function appendTruncationNotes(lines: string[], view: SnapshotView): void {
   if (notes.length > 0) lines.push(`\n(${notes.join('; ')}. Use browser_get_text or specify region for more content.)`)
 }
 
+function snapshotScope(view: SnapshotView): string {
+  const textScope = view.region === undefined ? 'page main content' : `selector ${JSON.stringify(view.region)}`
+  return `Text scope: ${textScope}; control inventory: current frame.`
+}
+
+function snapshotLimits(view: SnapshotView): string {
+  const optionsOmitted = view.forms.filter((form) => form.optionsTruncated).length
+  return `Snapshot limits: ${view.truncated.mainChars} main characters, ${view.truncated.itemsDropped} controls, ${view.truncated.formsDropped} fields, and options from ${optionsOmitted} selects omitted by collection limits; other inaccessible content may also be missing.`
+}
+
 export function renderSnapshot(view: SnapshotView, delta: boolean, maxChars: number = view.budgetChars): string {
+  return renderSnapshotDetails(view, delta, maxChars).text
+}
+
+/** References are admitted only when their entire corresponding line survives the render cap. */
+export function renderSnapshotDetails(view: SnapshotView, delta: boolean, maxChars: number = view.budgetChars): {
+  text: string; targets: Set<number>; selects: Set<number>
+} {
   const lines: string[] = []
+  const renderedTargets: Array<{ line: number; index: number; select: boolean }> = []
+  const addTarget = (line: string, index: number, select = false): void => {
+    renderedTargets.push({ line: lines.length, index, select })
+    lines.push(line)
+  }
   if (delta) {
     lines.push(`Page change v${view.version} (${view.url})`)
+    lines.push(`Observation: ${view.observationId}; base: ${view.baseObservationId ?? '(unavailable)'}`)
+    lines.push(snapshotScope(view))
+    lines.push(snapshotLimits(view))
+    lines.push('Only references shown in this observation are current. Take a full snapshot for other controls.')
     const elementChanges = view.changed.filter((id) => id !== -1)
     const changedIds = new Set(elementChanges)
     const changedItems = view.items.filter((item) => changedIds.has(item.index))
     const changedForms = view.forms.filter((form) => changedIds.has(form.index))
 
-    lines.push(`Status: ${view.ready}${view.reindexed ? ' (element indices were reassigned; use the indices in this snapshot)' : ''}`)
+    lines.push(`Status: ${view.ready}${view.reindexed ? ' (element indices were reassigned; use the references in this snapshot)' : ''}`)
     if (view.changed.includes(-1)) {
       lines.push(`Title: ${view.title || '(untitled)'}`)
       if (view.main.length > 0) {
@@ -381,40 +479,55 @@ export function renderSnapshot(view: SnapshotView, delta: boolean, maxChars: num
     if (changedItems.length > 0) {
       lines.push('')
       lines.push('Changed interactive elements:')
-      for (const item of changedItems) lines.push(renderItem(item))
+      for (const item of changedItems) addTarget(renderItem(item, view.observationId), item.index)
     }
     if (changedForms.length > 0) {
       lines.push('')
       lines.push('Changed form fields:')
       const renderedItems = new Set(changedItems.map((item) => item.index))
-      for (const form of changedForms) lines.push(renderForm(form, !renderedItems.has(form.index)))
+      for (const form of changedForms) addTarget(renderForm(form, !renderedItems.has(form.index), view.observationId), form.index, form.options !== undefined)
     }
     if (view.removed.length > 0) lines.push(`Removed elements: ${view.removed.join(', ')}`)
     if (view.changed.length === 0 && view.removed.length === 0) lines.push('(No visible changes.)')
     appendTruncationNotes(lines, view)
-    return capRendered(lines.join('\n'), maxChars)
+  } else {
+    lines.push(`Observation: ${view.observationId}`)
+    lines.push(snapshotScope(view))
+    lines.push(snapshotLimits(view))
+    lines.push(`Title: ${view.title || '(untitled)'}`)
+    lines.push(`URL: ${view.url}`)
+    lines.push(`Status: ${view.ready}${view.reindexed ? ' (element indices were reassigned; use the references in this snapshot)' : ''}`)
+    if (view.main.length > 0) {
+      lines.push('')
+      lines.push('Main content:')
+      lines.push(view.main)
+    }
+    if (view.items.length > 0) {
+      lines.push('')
+      lines.push('Interactive elements:')
+      for (const item of view.items) addTarget(renderItem(item, view.observationId), item.index)
+    }
+    if (view.forms.length > 0) {
+      lines.push('')
+      lines.push('Form fields:')
+      const renderedItems = new Set(view.items.map((item) => item.index))
+      for (const form of view.forms) {
+        addTarget(renderForm(form, !renderedItems.has(form.index), view.observationId), form.index, form.options !== undefined)
+      }
+    }
+    appendTruncationNotes(lines, view)
   }
-  lines.push(`Title: ${view.title || '(untitled)'}`)
-  lines.push(`URL: ${view.url}`)
-  lines.push(`Status: ${view.ready}${view.reindexed ? ' (element indices were reassigned; use the indices in this snapshot)' : ''}`)
-  if (view.main.length > 0) {
-    lines.push('')
-    lines.push('Main content:')
-    lines.push(view.main)
-  }
-  if (view.items.length > 0) {
-    lines.push('')
-    lines.push('Interactive elements:')
-    for (const item of view.items) lines.push(renderItem(item))
-  }
-  if (view.forms.length > 0) {
-    lines.push('')
-    lines.push('Form fields:')
-    const renderedItems = new Set(view.items.map((item) => item.index))
-    for (const form of view.forms) {
-      lines.push(renderForm(form, !renderedItems.has(form.index)))
+  const capped = capRendered(lines.join('\n'), maxChars)
+  const ends: number[] = []
+  let offset = 0
+  for (const line of lines) { offset += line.length; ends.push(offset); offset += 1 }
+  const targets = new Set<number>()
+  const selects = new Set<number>()
+  for (const entry of renderedTargets) {
+    if (ends[entry.line]! <= capped.bodyLength) {
+      targets.add(entry.index)
+      if (entry.select) selects.add(entry.index)
     }
   }
-  appendTruncationNotes(lines, view)
-  return capRendered(lines.join('\n'), maxChars)
+  return { text: capped.text, targets, selects }
 }

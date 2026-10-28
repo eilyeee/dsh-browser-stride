@@ -10,6 +10,8 @@
  * @module
  */
 
+import { redactSensitivePageText } from './privacy.ts'
+
 /** Every element type the model may be asked to operate on. */
 const INTERACTIVE_SELECTOR = [
   'a[href]',
@@ -88,17 +90,18 @@ export function truncate(text: string, max: number): { text: string; truncated: 
  * (aria-label → aria-labelledby → associated label → own text →
  * placeholder/alt).
  * @param el - element.
- * @returns a ≤80-char name, or the tag name as last resort.
+ * @param maxChars - maximum name length (80 for snapshots by default).
+ * @returns a bounded name, or the tag name as last resort.
  */
-export function accessibleName(el: Element): string {
+export function accessibleName(el: Element, maxChars: number = MAX_ITEM_NAME_CHARS): string {
   const ariaLabel = el.getAttribute('aria-label')
-  if (ariaLabel !== null && ariaLabel.trim() !== '') return truncate(clean(ariaLabel), MAX_ITEM_NAME_CHARS).text
+  if (ariaLabel !== null && ariaLabel.trim() !== '') return truncate(clean(ariaLabel), maxChars).text
 
   const labelledBy = el.getAttribute('aria-labelledby')
   if (labelledBy !== null) {
     const ref = document.getElementById(labelledBy.split(/\s+/)[0] ?? '')
     const refText = ref?.textContent
-    if (refText !== undefined && refText.trim() !== '') return truncate(clean(refText), MAX_ITEM_NAME_CHARS).text
+    if (refText !== undefined && refText.trim() !== '') return truncate(clean(refText), maxChars).text
   }
 
   const labelable = el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement
@@ -106,27 +109,30 @@ export function accessibleName(el: Element): string {
     if (el.id !== '') {
       const label = el.ownerDocument.querySelector<HTMLLabelElement>(`label[for="${cssEscape(el.id)}"]`)
       const labelText = label?.textContent
-      if (labelText !== undefined && labelText.trim() !== '') return truncate(clean(labelText), MAX_ITEM_NAME_CHARS).text
+      if (labelText !== undefined && labelText.trim() !== '') return truncate(clean(labelText), maxChars).text
     }
     const wrappingLabelText = el.closest('label')?.textContent
     if (wrappingLabelText !== undefined && wrappingLabelText.trim() !== '') {
-      return truncate(clean(wrappingLabelText), MAX_ITEM_NAME_CHARS).text
+      return truncate(clean(wrappingLabelText), maxChars).text
     }
   }
 
-  const ownText = el instanceof HTMLInputElement ? '' : el.textContent
-  if (ownText !== undefined && ownText.trim() !== '') return truncate(clean(ownText), MAX_ITEM_NAME_CHARS).text
+  // Textarea contents and select options are data, not a control's label.
+  const ownText = labelable ? '' : el.textContent
+  if (ownText !== undefined && ownText.trim() !== '') return truncate(clean(ownText), maxChars).text
 
   if (el instanceof HTMLInputElement) {
     // Button-like inputs carry their label in `value`; other inputs never use
     // the current value as a name (it is data, not identity — and for
     // password/credit fields it would leak the secret into the snapshot).
     const buttonLike = el.type === 'submit' || el.type === 'button' || el.type === 'reset'
-    if (buttonLike && el.value !== '') return truncate(clean(el.value), MAX_ITEM_NAME_CHARS).text
-    if (el.placeholder !== '') return truncate(clean(el.placeholder), MAX_ITEM_NAME_CHARS).text
-    if (el.alt !== '') return truncate(clean(el.alt), MAX_ITEM_NAME_CHARS).text
-    return truncate(clean(el.type), MAX_ITEM_NAME_CHARS).text
+    if (buttonLike && el.value !== '') return truncate(clean(el.value), maxChars).text
+    if (el.placeholder !== '') return truncate(clean(el.placeholder), maxChars).text
+    if (el.alt !== '') return truncate(clean(el.alt), maxChars).text
+    return truncate(clean(el.type), maxChars).text
   }
+
+  if (el instanceof HTMLTextAreaElement && el.placeholder !== '') return truncate(clean(el.placeholder), maxChars).text
 
   return el.tagName.toLowerCase()
 }
@@ -164,9 +170,9 @@ export function collectInteractive(root: Document | Element): Element[] {
  */
 export function mainText(doc: Document): string {
   const main = doc.querySelector('main, [role="main"]')
-  if (main !== null) return clean(elementText(main))
+  if (main !== null) return redactSensitivePageText(main, clean(elementText(main)))
   const articles = doc.querySelectorAll('article')
-  if (articles.length === 1) return clean(elementText(articles[0]!))
+  if (articles.length === 1) return redactSensitivePageText(articles[0]!, clean(elementText(articles[0]!)))
 
   let best: Element | null = null
   let bestScore = 0
@@ -180,8 +186,8 @@ export function mainText(doc: Document): string {
       best = candidate
     }
   }
-  if (best !== null) return clean(elementText(best))
-  return clean(elementText(doc.body))
+  if (best !== null) return redactSensitivePageText(best, clean(elementText(best)))
+  return redactSensitivePageText(doc.body, clean(elementText(doc.body)))
 }
 
 /**
@@ -192,5 +198,5 @@ export function mainText(doc: Document): string {
 export function pageText(root?: Element | null): string {
   const source = root ?? document.body
   if (source === null || source === undefined) return ''
-  return clean(elementText(source))
+  return redactSensitivePageText(source, clean(elementText(source)))
 }

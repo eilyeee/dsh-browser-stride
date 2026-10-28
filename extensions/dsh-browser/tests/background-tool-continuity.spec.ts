@@ -49,7 +49,7 @@ function chromeEvent<T extends unknown[]>() {
 function panelPort() {
   const onMessage = chromeEvent<[unknown]>()
   const onDisconnect = chromeEvent<[]>()
-  const port = { name: 'dsh-panel', postMessage: vi.fn(), onMessage, onDisconnect } as unknown as chrome.runtime.Port
+  const port = { name: 'dsh-panel', sender: { id: 'test-extension', url: 'chrome-extension://test/panel/index.html' }, postMessage: vi.fn(), onMessage, onDisconnect } as unknown as chrome.runtime.Port
   return { onDisconnect, onMessage, port }
 }
 
@@ -64,6 +64,8 @@ function browserTab(url: string): chrome.tabs.Tab {
     selected: true,
     discarded: false,
     autoDiscardable: true,
+    frozen: false,
+    lastAccessed: 0,
     groupId: -1,
     windowId: 1,
     title: 'Page',
@@ -86,12 +88,12 @@ afterEach(() => {
 describe('tool-driven session checkpoints', () => {
   it('updates only after a successful navigation candidate', async () => {
     let currentTab = browserTab('https://example.com/start')
-    let action: (name: string) => Promise<unknown> = async () => ({ ok: true, result: { text: 'snapshot' } })
+    let action: (name: string, message?: unknown) => Promise<unknown> = async () => ({ ok: true, result: { text: 'snapshot' } })
     const onConnect = chromeEvent<[chrome.runtime.Port]>()
     const sessionData: Record<string, unknown> = {}
     const sendMessage = vi.fn(async (_tabId: number, message: unknown) => {
       const name = (message as { action?: string }).action
-      return name === undefined ? undefined : await action(name)
+      return name === undefined ? undefined : await action(name, message)
     })
     vi.stubGlobal('chrome', {
       alarms: { create: vi.fn(), clear: vi.fn(async () => true), onAlarm: chromeEvent<[chrome.alarms.Alarm]>() },
@@ -111,7 +113,7 @@ describe('tool-driven session checkpoints', () => {
         local: {
           get: vi.fn(async () => ({
             dshSettings: {
-              bridgeUrl: 'wss://bridge.example/ext/bridge',
+              bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge',
               sharePageContent: 'auto',
               trustedActionOrigins: ['https://example.com'],
             },
@@ -129,7 +131,7 @@ describe('tool-driven session checkpoints', () => {
         query: vi.fn(async () => [currentTab]),
         sendMessage,
         onActivated: chromeEvent<[{ tabId: number; windowId: number }]>(),
-        onUpdated: chromeEvent<[number, chrome.tabs.TabChangeInfo, chrome.tabs.Tab]>(),
+        onUpdated: chromeEvent<[number, Parameters<Parameters<typeof chrome.tabs.onUpdated.addListener>[0]>[1], chrome.tabs.Tab]>(),
         onReplaced: chromeEvent<[number, number]>(),
         onRemoved: chromeEvent<[number]>(),
       },
@@ -150,6 +152,9 @@ describe('tool-driven session checkpoints', () => {
         onRemoved: chromeEvent<[number]>(),
       },
     } as unknown as typeof chrome)
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      wsUrl: 'ws://127.0.0.1:39001/ext/bridge',
+    }), { status: 200 })))
     vi.stubGlobal('WebSocket', FakeWebSocket)
     await import('../src/background/index.ts')
 
@@ -172,7 +177,7 @@ describe('tool-driven session checkpoints', () => {
         t: 'tool.call',
         id,
         name,
-        args: name === 'browser_navigate' ? { url: 'https://example.com/target' } : {},
+        args: name === 'browser_navigate' ? { url: 'https://example.com/target' } : name === 'browser_press' ? { key: 'Enter' } : {},
         expiresAt: Date.now() + 10_000,
         sessionId: 'session-live',
       })
@@ -225,5 +230,92 @@ describe('tool-driven session checkpoints', () => {
     }
     await call('success', 'browser_navigate')
     await vi.waitFor(() => { expect(storedUrlKey(sessionData)).toBe('https://example.com/success') })
+
+    let writesStarted = 0
+    let finishFirst!: () => void
+    action = async (name) => {
+      if (name !== 'browser_navigate') return { ok: true, result: { text: 'snapshot' } }
+      writesStarted += 1
+      if (writesStarted === 1) await new Promise<void>(resolve => { finishFirst = resolve })
+      return { ok: true, result: { text: 'navigated' } }
+    }
+    const send = (id: string, name: string): void => {
+      socket.receive({ t: 'tool.call', id, name,
+        args: name === 'browser_navigate' ? { url: 'https://example.com/target' } : name === 'browser_press' ? { key: 'Enter' } : {},
+        expiresAt: Date.now() + 10_000, sessionId: 'session-live' })
+    }
+    send('serial-first', 'browser_navigate')
+    await vi.waitFor(() => { expect(writesStarted).toBe(1) })
+    send('serial-cancelled', 'browser_navigate')
+    send('parallel-read', 'browser_snapshot')
+    await vi.waitFor(() => { expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'parallel-read', ok: true })) })
+    expect(writesStarted).toBe(1)
+    socket.receive({ t: 'tool.cancel', id: 'serial-cancelled' })
+    await vi.waitFor(() => { expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'serial-cancelled', ok: false })) })
+    send('serial-next', 'browser_navigate')
+    expect(writesStarted).toBe(1)
+    finishFirst()
+    await vi.waitFor(() => { expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'serial-next', ok: true })) })
+    expect(writesStarted).toBe(2)
+
+    const settingsPanel = panelPort()
+    onConnect.emit(settingsPanel.port)
+    let finishPrivacyFirst!: () => void
+    const privacyMessages: Array<{ includePageDelta?: boolean }> = []
+    action = async (name, message) => {
+      if (name === 'browser_press') {
+        privacyMessages.push(message as { includePageDelta?: boolean })
+        if (privacyMessages.length === 1) await new Promise<void>(resolve => { finishPrivacyFirst = resolve })
+      }
+      return { ok: true, result: { text: 'ok' } }
+    }
+    send('privacy-first', 'browser_press')
+    await vi.waitFor(() => { expect(finishPrivacyFirst).toBeTypeOf('function') })
+    send('privacy-next', 'browser_press')
+    settingsPanel.onMessage.emit({ type: 'settings', id: 'privacy-off', settings: { sharePageContent: 'off' } })
+    await vi.waitFor(() => { expect(settingsPanel.port.postMessage).toHaveBeenCalledWith({ type: 'settings.result', id: 'privacy-off', ok: true }) })
+    finishPrivacyFirst()
+    await vi.waitFor(() => { expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'privacy-next', ok: true })) })
+    expect(privacyMessages).toHaveLength(2)
+    expect(privacyMessages[1]!.includePageDelta).not.toBe(true)
+
+    settingsPanel.onMessage.emit({ type: 'settings', id: 'privacy-auto', settings: { sharePageContent: 'auto' } })
+    await vi.waitFor(() => { expect(settingsPanel.port.postMessage).toHaveBeenCalledWith({ type: 'settings.result', id: 'privacy-auto', ok: true }) })
+    let finishSnapshot!: () => void
+    action = async (name) => {
+      if (name === 'browser_snapshot') await new Promise<void>(resolve => { finishSnapshot = resolve })
+      return { ok: true, result: { text: 'private-page-content' } }
+    }
+    send('privacy-inflight', 'browser_snapshot')
+    await vi.waitFor(() => { expect(finishSnapshot).toBeTypeOf('function') })
+    settingsPanel.onMessage.emit({ type: 'settings', id: 'privacy-off-again', settings: { sharePageContent: 'off' } })
+    await vi.waitFor(() => { expect(settingsPanel.port.postMessage).toHaveBeenCalledWith({ type: 'settings.result', id: 'privacy-off-again', ok: true }) })
+    finishSnapshot()
+    await vi.waitFor(() => { expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'privacy-inflight', ok: false })) })
+    const protectedResult = socket.sent.find(value => (value as { id?: string }).id === 'privacy-inflight')
+    expect(JSON.stringify(protectedResult)).not.toContain('private-page-content')
+
+    settingsPanel.onMessage.emit({ type: 'settings', id: 'privacy-auto-again', settings: { sharePageContent: 'auto' } })
+    await vi.waitFor(() => { expect(settingsPanel.port.postMessage).toHaveBeenCalledWith({ type: 'settings.result', id: 'privacy-auto-again', ok: true }) })
+    let finishDelta!: () => void
+    let deltaRequested = false
+    action = async (name, message) => {
+      if (name === 'browser_press') {
+        deltaRequested = (message as { includePageDelta?: boolean }).includePageDelta === true
+        await new Promise<void>(resolve => { finishDelta = resolve })
+      }
+      return { ok: true, result: { text: 'Action returned', pageContent: 'private-page-delta' } }
+    }
+    send('privacy-delta', 'browser_press')
+    await vi.waitFor(() => { expect(finishDelta).toBeTypeOf('function') })
+    expect(deltaRequested).toBe(true)
+    settingsPanel.onMessage.emit({ type: 'settings', id: 'privacy-off-final', settings: { sharePageContent: 'off' } })
+    await vi.waitFor(() => { expect(settingsPanel.port.postMessage).toHaveBeenCalledWith({ type: 'settings.result', id: 'privacy-off-final', ok: true }) })
+    finishDelta()
+    await vi.waitFor(() => { expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'privacy-delta', ok: true })) })
+    const protectedDelta = socket.sent.find(value => (value as { id?: string }).id === 'privacy-delta')
+    expect(JSON.stringify(protectedDelta)).not.toContain('private-page-delta')
+    expect(JSON.stringify(protectedDelta)).toContain('withheld')
+    settingsPanel.onDisconnect.emit()
   })
 })

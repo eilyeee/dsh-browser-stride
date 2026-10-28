@@ -12,7 +12,7 @@ import type { ElementIds } from '../src/content/ids.ts'
 const BUDGET = { maxItems: 20, maxForms: 10, maxChars: 2_000 }
 
 function idsFor(element: Element): ElementIds {
-  return { elementByIndex: vi.fn(() => element) } as unknown as ElementIds
+  return { elementByIndex: vi.fn(() => element), resolveReference: (ref: string) => Number(ref.split(':')[1]) } as unknown as ElementIds
 }
 
 function host(html = ''): HTMLElement {
@@ -65,7 +65,7 @@ describe('typing into rich-text editors', () => {
     const el = host()
     const spy = stubEditingPipeline()
 
-    await runAction('browser_type', { index: 3, text: 'hello world' }, { ids: idsFor(el), budget: BUDGET })
+    await runAction('browser_type', { elementRef: 'obs_test:3', text: 'hello world' }, { ids: idsFor(el), budget: BUDGET })
 
     expect(spy).toHaveBeenCalledTimes(1)
     expect(spy).toHaveBeenCalledWith('insertText', false, 'hello world')
@@ -80,7 +80,7 @@ describe('typing into rich-text editors', () => {
     el.addEventListener('input', () => seen.push('input'))
     stubEditingPipeline()
 
-    await runAction('browser_type', { index: 3, text: 'hi' }, { ids: idsFor(el), budget: BUDGET })
+    await runAction('browser_type', { elementRef: 'obs_test:3', text: 'hi' }, { ids: idsFor(el), budget: BUDGET })
 
     expect(seen).toEqual(['beforeinput', 'input'])
   })
@@ -97,7 +97,7 @@ describe('typing into rich-text editors', () => {
     })
     Object.defineProperty(document, 'execCommand', { configurable: true, writable: true, value: spy })
 
-    await runAction('browser_type', { index: 3, text: 'hi' }, { ids: idsFor(el), budget: BUDGET })
+    await runAction('browser_type', { elementRef: 'obs_test:3', text: 'hi' }, { ids: idsFor(el), budget: BUDGET })
 
     expect(anchorInside).toBe(true)
   })
@@ -111,7 +111,7 @@ describe('typing into rich-text editors', () => {
     })
     Object.defineProperty(document, 'execCommand', { configurable: true, writable: true, value: spy })
 
-    await runAction('browser_type', { index: 3, text: 'fresh', replace: true }, { ids: idsFor(el), budget: BUDGET })
+    await runAction('browser_type', { elementRef: 'obs_test:3', text: 'fresh', replace: true }, { ids: idsFor(el), budget: BUDGET })
 
     expect(selectedText).toBe('previous draft')
   })
@@ -125,7 +125,7 @@ describe('typing into rich-text editors', () => {
     })
     Object.defineProperty(document, 'execCommand', { configurable: true, writable: true, value: spy })
 
-    await runAction('browser_type', { index: 3, text: ' more' }, { ids: idsFor(el), budget: BUDGET })
+    await runAction('browser_type', { elementRef: 'obs_test:3', text: ' more' }, { ids: idsFor(el), budget: BUDGET })
 
     expect(selectedText).toBe('')
   })
@@ -136,7 +136,7 @@ describe('typing into rich-text editors', () => {
     expect(inner).not.toBeNull()
     stubEditingPipeline()
 
-    await runAction('browser_type', { index: 5, text: 'y' }, { ids: idsFor(inner!), budget: BUDGET })
+    await runAction('browser_type', { elementRef: 'obs_test:5', text: 'y' }, { ids: idsFor(inner!), budget: BUDGET })
 
     // The text belongs to the outer host, not to the addressed span.
     expect(el.textContent).toBe('xy')
@@ -149,7 +149,7 @@ describe('typing into rich-text editors', () => {
     const spy = stubEditingPipeline()
 
     await expect(
-      runAction('browser_type', { index: 9, text: 'x' }, { ids: idsFor(chip!), budget: BUDGET }),
+      runAction('browser_type', { elementRef: 'obs_test:9', text: 'x' }, { ids: idsFor(chip!), budget: BUDGET }),
     ).rejects.toMatchObject({ message: 'Element [9] is not editable (span).' })
 
     // The island is not editable, and the surrounding composer must not be used.
@@ -161,7 +161,7 @@ describe('typing into rich-text editors', () => {
     const el = host()
     Reflect.deleteProperty(document, 'execCommand')
 
-    await runAction('browser_type', { index: 3, text: 'plain' }, { ids: idsFor(el), budget: BUDGET })
+    await runAction('browser_type', { elementRef: 'obs_test:3', text: 'plain' }, { ids: idsFor(el), budget: BUDGET })
 
     expect(el.textContent).toBe('plain')
   })
@@ -170,7 +170,7 @@ describe('typing into rich-text editors', () => {
     const el = host()
     stubEditingPipeline(false)
 
-    await runAction('browser_type', { index: 3, text: 'plain' }, { ids: idsFor(el), budget: BUDGET })
+    await runAction('browser_type', { elementRef: 'obs_test:3', text: 'plain' }, { ids: idsFor(el), budget: BUDGET })
 
     expect(el.textContent).toBe('plain')
   })
@@ -182,7 +182,7 @@ describe('typing into plain inputs is unchanged', () => {
     document.body.append(input)
     const spy = stubEditingPipeline()
 
-    await runAction('browser_type', { index: 1, text: 'search term' }, { ids: idsFor(input), budget: BUDGET })
+    await runAction('browser_type', { elementRef: 'obs_test:1', text: 'search term' }, { ids: idsFor(input), budget: BUDGET })
 
     expect(input.value).toBe('search term')
     expect(spy).not.toHaveBeenCalled()
@@ -193,7 +193,7 @@ describe('typing into plain inputs is unchanged', () => {
     input.value = 'old'
     document.body.append(input)
 
-    await runAction('browser_type', { index: 1, text: 'new', replace: true }, { ids: idsFor(input), budget: BUDGET })
+    await runAction('browser_type', { elementRef: 'obs_test:1', text: 'new', replace: true }, { ids: idsFor(input), budget: BUDGET })
 
     expect(input.value).toBe('new')
   })

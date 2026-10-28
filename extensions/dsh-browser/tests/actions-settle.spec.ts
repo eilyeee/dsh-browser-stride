@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { runAction, waitForPageSettled, type PageSettlePolicy } from '../src/content/actions.ts'
-import type { ElementIds } from '../src/content/ids.ts'
+import { ElementIds } from '../src/content/ids.ts'
+import { observedRef } from './observed-ref.ts'
 
 const POLICY: PageSettlePolicy = {
   minimumMs: 20,
@@ -13,6 +14,7 @@ const POLICY: PageSettlePolicy = {
 afterEach(() => {
   vi.useRealTimers()
   vi.restoreAllMocks()
+  document.body.replaceChildren()
 })
 
 describe('waitForPageSettled', () => {
@@ -60,7 +62,30 @@ describe('waitForPageSettled', () => {
     await vi.advanceTimersByTimeAsync(60)
     clearInterval(mutations)
     await vi.advanceTimersByTimeAsync(1)
-    await expect(pending).resolves.toBe(true)
+    await expect(pending).resolves.toBe(false)
+  })
+
+  it('reports an unsettled page when mutations continue through the explicit wait cap', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(document, 'readyState', 'get').mockReturnValue('complete')
+    document.body.innerHTML = '<button>Continue</button>'
+    const button = document.querySelector('button')!
+    const ids = new ElementIds()
+    const budget = { maxItems: 20, maxForms: 10, maxChars: 2_000 }
+    const snapshot = await runAction('browser_snapshot', {}, { ids, budget })
+    const ref = observedRef(snapshot, ids, button)
+    let tick = 0
+    const mutations = setInterval(() => { document.body.setAttribute('data-tick', String(++tick)) }, 20)
+    const pending = runAction('browser_wait', { ms: 50 }, {
+      ids, budget, includePageDelta: true,
+    })
+    await vi.advanceTimersByTimeAsync(1_050)
+    clearInterval(mutations)
+    const result = await pending
+    expect(result.text).toContain('did not become quiet')
+    expect(result.text).not.toContain('was quiet')
+    expect(result.pageContent).toBeUndefined()
+    await expect(runAction('browser_click', { elementRef: ref }, { ids, budget })).rejects.toThrow('stale')
   })
 })
 
@@ -71,16 +96,19 @@ describe('navigation action responses', () => {
     link.href = 'https://example.com/next'
     link.scrollIntoView = vi.fn()
     const dispatch = vi.spyOn(link, 'dispatchEvent').mockReturnValue(true)
-    const ids = { elementByIndex: vi.fn(() => link) } as unknown as ElementIds
+    const ids = { elementByIndex: vi.fn(() => link), resolveReference: vi.fn(() => 1) } as unknown as ElementIds
 
-    await expect(runAction('browser_click', { index: 1 }, {
+    await expect(runAction('browser_click', { elementRef: 'obs_test:1' }, {
       ids,
       budget: { maxItems: 20, maxForms: 10, maxChars: 2_000 },
     })).resolves.toMatchObject({
-      text: expect.stringContaining('Clicked link [1]'),
+      text: expect.stringContaining('Click was sent to link [1]'),
       navigationPending: true,
     })
     expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: 'click' }))
+    // The browser owns the default link navigation; no second URL assignment
+    // may be queued after the click was dispatched.
+    expect(vi.getTimerCount()).toBe(0)
   })
 
   it('does not wait for a replacement document when a link opens a new tab', async () => {
@@ -90,9 +118,9 @@ describe('navigation action responses', () => {
     link.target = '_blank'
     link.scrollIntoView = vi.fn()
     link.click = vi.fn()
-    const ids = { elementByIndex: vi.fn(() => link) } as unknown as ElementIds
+    const ids = { elementByIndex: vi.fn(() => link), resolveReference: vi.fn(() => 1) } as unknown as ElementIds
 
-    await expect(runAction('browser_click', { index: 1 }, {
+    await expect(runAction('browser_click', { elementRef: 'obs_test:1' }, {
       ids,
       budget: { maxItems: 20, maxForms: 10, maxChars: 2_000 },
     })).resolves.toEqual({ text: expect.stringContaining('outside the controlled frame') })
@@ -108,9 +136,9 @@ describe('navigation action responses', () => {
     link.rel = 'noreferrer'
     link.scrollIntoView = vi.fn()
     link.click = vi.fn()
-    const ids = { elementByIndex: vi.fn(() => link) } as unknown as ElementIds
+    const ids = { elementByIndex: vi.fn(() => link), resolveReference: vi.fn(() => 1) } as unknown as ElementIds
 
-    const result = await runAction('browser_click', { index: 1 }, {
+    const result = await runAction('browser_click', { elementRef: 'obs_test:1' }, {
       ids,
       budget: { maxItems: 20, maxForms: 10, maxChars: 2_000 },
     })
@@ -130,9 +158,9 @@ describe('navigation action responses', () => {
     link.scrollIntoView = vi.fn()
     link.click = vi.fn()
     const dispatch = vi.spyOn(link, 'dispatchEvent')
-    const ids = { elementByIndex: vi.fn(() => link) } as unknown as ElementIds
+    const ids = { elementByIndex: vi.fn(() => link), resolveReference: vi.fn(() => 1) } as unknown as ElementIds
 
-    const result = await runAction('browser_click', { index: 1 }, {
+    const result = await runAction('browser_click', { elementRef: 'obs_test:1' }, {
       ids,
       budget: { maxItems: 20, maxForms: 10, maxChars: 2_000 },
     })

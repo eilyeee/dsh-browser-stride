@@ -41,12 +41,15 @@ const legacyLog = [
 // The JSONL container requires its header in a separate Zstandard frame.
 const legacyBytes = Buffer.concat(legacyLog.trimEnd().split('\n').map(line => zstdCompressSync(Buffer.from(line + '\n'))))
 const token = randomUUID()
+const installationId = `smoke-${randomUUID()}`
+let browserCredential
 const env = { ...process.env, DSH_HOME: home, DSH_TELEMETRY_DISABLED: '1' }
 // Do not inherit bridge settings or credentials from the developer's shell.
 delete env.DSH_EXT_TOKEN
 delete env.DSH_BROWSER_SESSION_WORKSPACE
 let host
 let socket
+let bridgeBase
 let hostLog = ''
 let succeeded = false
 
@@ -72,6 +75,21 @@ async function command(args) {
   try {
     const [code] = await once(child, 'exit')
     assert.equal(code, 0, output)
+  } finally { clearTimeout(timeout) }
+}
+
+async function pairCommand(base, ...args) {
+  const child = spawn(process.execPath, [join(root, 'scripts/pair-browser.mjs'), ...args, '--url', base], {
+    cwd: root, env: { ...env, DSH_BRIDGE_ADMIN_TOKEN: token }, stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let output = ''
+  child.stdout.on('data', data => { output += data })
+  child.stderr.on('data', data => { output += data })
+  const timeout = setTimeout(() => child.kill('SIGKILL'), 15_000)
+  try {
+    const [code] = await once(child, 'exit')
+    assert.equal(code, 0, 'pairing CLI failed')
+    return output
   } finally { clearTimeout(timeout) }
 }
 
@@ -108,11 +126,17 @@ async function start(reopen) {
     if (spawnError) throw spawnError
     return hostLog.match(/dsh web: (http:\/\/127\.0\.0\.1:\d+)/)?.[1]
   }, 'host readiness')
+  bridgeBase = base
   const response = await fetch(`${base}/ext/bridge-config`, { signal: AbortSignal.timeout(10_000) })
   assert.equal(response.status, 200)
   const config = await response.json()
   assert.equal(config.wsUrl, base.replace('http:', 'ws:') + '/ext/bridge')
-  // Firefox-style origin requires a valid token even on loopback.
+  if (browserCredential === undefined) {
+    const issued = await pairCommand(base, 'issue')
+    browserCredential = issued.match(/One-time pairing code: ([a-f0-9]{32})/)?.[1]
+    assert.ok(browserCredential, 'pairing CLI did not issue a code')
+  }
+  // Firefox-style origin still needs an installation-specific credential.
   socket = new WebSocket(config.wsUrl, { origin: 'moz-extension://runtime-smoke', handshakeTimeout: 10_000 })
   const frames = []
   let socketError
@@ -124,11 +148,12 @@ async function start(reopen) {
       if (socketError) throw socketError
       const found = frames.find(predicate)
       if (found) return found
-      if (socket.readyState === WebSocket.CLOSED) throw new Error(`Bridge closed: ${JSON.stringify(frames)}`)
+      if (socket.readyState === WebSocket.CLOSED) throw new Error(`Bridge closed: ${JSON.stringify(frames.map(({ credential, ...frame }) => frame))}`)
     }, 'bridge response', 15_000)
   }
-  socket.send(JSON.stringify({ t: 'hello', token, caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } }))
-  await frame(value => value.t === 'hello.ok')
+  socket.send(JSON.stringify({ t: 'hello', token: browserCredential, installationId, caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } }))
+  const accepted = await frame(value => value.t === 'hello.ok')
+  if (accepted.credential !== undefined) browserCredential = accepted.credential
   return async (method, payload) => {
     const id = randomUUID()
     socket.send(JSON.stringify({ t: 'rpc', id, method, payload }))
@@ -207,10 +232,15 @@ try {
   // append seed/permission metadata. The migrated history prefix stays exact.
   assert.deepEqual(reopenedLegacy.events.slice(0, migrated.events.length), migrated.events)
   assert.deepEqual(await readFile(legacyFile), legacyBytes)
-  console.log('Real DSH smoke passed: discovery, token authentication, create/list/history, Session model selection, V2 migration, V4 browser snapshots, and prepared projections after restart')
+  assert.ok((await pairCommand(bridgeBase, 'list')).includes(installationId))
+  const closed = once(socket, 'close')
+  assert.match(await pairCommand(bridgeBase, 'revoke', installationId), /Installation revoked/)
+  assert.equal((await closed)[0], 4000)
+  console.log('Real DSH smoke passed: discovery, CLI pairing, restart authentication and revocation, create/list/history, Session model selection, V2 migration, V4 browser snapshots, and prepared projections after restart')
   succeeded = true
 } catch (error) {
-  console.error(hostLog)
+  // The Host may print an ephemeral launch URL; never publish its credential.
+  console.error(hostLog.replace(/([?&](?:token|access_token|api_key)=)[^\s&'"<>]+/gi, '$1[redacted]'))
   console.error(`Smoke artifacts retained at ${temp}`)
   throw error
 } finally {

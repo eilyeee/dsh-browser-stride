@@ -1,7 +1,17 @@
 node_modules/
+.pnpm-store/
+.stride-private/
+/docs/stride/*
+!/docs/stride/baseline/
+/docs/stride/baseline/*
+!/docs/stride/baseline/publication-base.txt
+!/docs/stride/baseline/upstream-commit.txt
+/packages/browser/bridge-browser/src/contracts/README.md
 **/node_modules/
 **/lib/
 !benchmark/lib/
 !benchmark/lib/**
 **/dist/
 **/dist-firefox/
+coverage/
+.DS_Store

@@ -45,6 +45,7 @@ try {
     repoRoot,
     benchmarkRoot,
     bridgeUrl: 'ws://127.0.0.1:3091/ext/bridge',
+    pairingCode: await extension.issuePairingCode(),
     trustedOrigin: site.origin,
   })
   console.log(JSON.stringify({

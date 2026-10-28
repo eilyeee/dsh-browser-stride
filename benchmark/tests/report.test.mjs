@@ -6,7 +6,7 @@ function record(backend, completionMs, success = true) {
   return {
     schemaVersion: 1,
     benchmarkId: 'test-benchmark',
-    benchmarkSuiteVersion: 2,
+    benchmarkSuiteVersion: 4,
     pairId: 'contact_form:seed-1:trial-1',
     trial: 1,
     backend,
@@ -72,11 +72,11 @@ test('report skips duplicate backend records instead of silently cross-pairing t
 })
 
 test('report rejects records from incompatible benchmark suite versions', () => {
-  const legacy = { ...record('playwright', 800), benchmarkSuiteVersion: 1 }
+  const legacy = { ...record('playwright', 800), benchmarkSuiteVersion: 3 }
   const current = record('extension', 400)
 
   assert.throws(
     () => renderReport([legacy, current]),
-    /不能汇总多个评测套件版本：1、2/u,
+    /不能汇总多个评测套件版本：3、4/u,
   )
 })

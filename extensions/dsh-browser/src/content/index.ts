@@ -11,7 +11,7 @@
  */
 
 import { DEFAULT_SNAPSHOT_MAX_CHARS } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
-import { runAction, ActionError } from './actions.ts'
+import { runAction, ActionError, resetDeltaState } from './actions.ts'
 import { ElementIds } from './ids.ts'
 import { SelectionWatcher } from './selection.ts'
 import type { SnapshotBudget } from './snapshot.ts'
@@ -27,6 +27,7 @@ const selectionWatcher = new SelectionWatcher((selection) => {
 
 const CONTENT_SCRIPT_LISTENER = '__dshBrowserContentScriptListener__'
 const CONTENT_SELECTION_WATCHER = '__dshBrowserSelectionWatcher__'
+const CONTENT_LIFECYCLE_LISTENER = '__dshBrowserLifecycleListener__'
 type ContentListener = typeof onMessage
 
 /** A tool-call result for the bridge. */
@@ -92,6 +93,7 @@ function onMessage(message: unknown, _sender: chrome.runtime.MessageSender, send
 const contentGlobal = globalThis as typeof globalThis & {
   [CONTENT_SCRIPT_LISTENER]?: ContentListener
   [CONTENT_SELECTION_WATCHER]?: { dispose: () => void }
+  [CONTENT_LIFECYCLE_LISTENER]?: () => void
 }
 const previousListener = contentGlobal[CONTENT_SCRIPT_LISTENER]
 if (previousListener !== undefined) {
@@ -100,6 +102,13 @@ if (previousListener !== undefined) {
 // A replaced content script keeps its page listeners until this instance
 // releases them: `selectionchange` is a document listener, not an extension one.
 contentGlobal[CONTENT_SELECTION_WATCHER]?.dispose()
+const previousLifecycle = contentGlobal[CONTENT_LIFECYCLE_LISTENER]
+if (previousLifecycle !== undefined) {
+  for (const event of ['pagehide', 'pageshow', 'popstate', 'hashchange']) window.removeEventListener(event, previousLifecycle)
+}
+const clearReferences = (): void => { resetDeltaState(ids) }
+for (const event of ['pagehide', 'pageshow', 'popstate', 'hashchange']) window.addEventListener(event, clearReferences)
+contentGlobal[CONTENT_LIFECYCLE_LISTENER] = clearReferences
 contentGlobal[CONTENT_SCRIPT_LISTENER] = onMessage
 contentGlobal[CONTENT_SELECTION_WATCHER] = selectionWatcher
 chrome.runtime.onMessage.addListener(onMessage)

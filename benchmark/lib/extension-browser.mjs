@@ -2,7 +2,10 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { chromium, findChromiumExecutable } from './chromium.mjs'
 
-export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl, trustedOrigin, connectTimeoutMs = 30_000, actionTimeoutMs = 8_000 }) {
+export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl, pairingCode, trustedOrigin, connectTimeoutMs = 30_000, actionTimeoutMs = 8_000 }) {
+  if (typeof pairingCode !== 'string' || !/^[a-f0-9]{32}$/u.test(pairingCode)) {
+    throw new Error('a fresh extension pairing code is required')
+  }
   const extensionDir = resolve(repoRoot, 'extensions/dsh-browser/dist')
   const executablePath = await findChromiumExecutable(undefined, { requireExtensions: true })
   if (executablePath === undefined) throw new Error('no Chromium executable found; set PLAYWRIGHT_CHROMIUM_PATH')
@@ -40,7 +43,7 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
     await panel.goto(`chrome-extension://${extensionId}/panel/index.html`)
     await panel.waitForSelector('header.topbar', { timeout: 15_000 })
     stage = 'configuring extension bridge'
-    await panel.evaluate(async ({ configuredBridgeUrl, configuredOrigin, timeoutMs }) => {
+    await panel.evaluate(async ({ configuredBridgeUrl, configuredPairingCode, configuredOrigin, timeoutMs }) => {
       await new Promise((resolveConnection, rejectConnection) => {
         const port = chrome.runtime.connect({ name: 'dsh-panel' })
         window.__dshBenchmarkPort = port
@@ -61,7 +64,7 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
           type: 'settings',
           settings: {
             bridgeUrl: configuredBridgeUrl,
-            token: 'dsh-browser-benchmark-local-token',
+            token: configuredPairingCode,
             sharePageContent: 'auto',
             trustedActionOrigins: [configuredOrigin],
             approvalNotifications: false,
@@ -69,7 +72,7 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
           },
         })
       })
-    }, { configuredBridgeUrl: bridgeUrl, configuredOrigin: trustedOrigin, timeoutMs: connectTimeoutMs })
+    }, { configuredBridgeUrl: bridgeUrl, configuredPairingCode: pairingCode, configuredOrigin: trustedOrigin, timeoutMs: connectTimeoutMs })
     stage = 'waiting for extension bridge connection'
     try {
       await panel.locator('.connection .dot.connected').waitFor({ state: 'visible', timeout: connectTimeoutMs })
@@ -98,6 +101,30 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
         await target.goto(url, { waitUntil: 'domcontentloaded' })
         await target.bringToFront()
         await target.waitForTimeout(200)
+      },
+      async bindSession(sessionId) {
+        await target.bringToFront()
+        await panel.evaluate(({ session, timeoutMs }) => new Promise((resolveBinding, rejectBinding) => {
+          const port = window.__dshBenchmarkPort
+          if (port === undefined) { rejectBinding(new Error('benchmark panel port is unavailable')); return }
+          const id = crypto.randomUUID()
+          const finish = (error) => {
+            clearTimeout(timer)
+            port.onMessage.removeListener(onMessage)
+            port.onDisconnect.removeListener(onDisconnect)
+            if (error) rejectBinding(error)
+            else resolveBinding()
+          }
+          const onMessage = (message) => {
+            if (message?.type !== 'tab-affinity.rebind.result' || message.id !== id) return
+            finish(message.ok ? undefined : new Error(message.error?.message ?? 'session binding failed'))
+          }
+          const onDisconnect = () => finish(new Error('benchmark panel port disconnected'))
+          const timer = setTimeout(() => finish(new Error('session binding timed out')), timeoutMs)
+          port.onMessage.addListener(onMessage)
+          port.onDisconnect.addListener(onDisconnect)
+          port.postMessage({ type: 'tab-affinity.rebind', id, sessionId: session })
+        }), { session: sessionId, timeoutMs: actionTimeoutMs })
       },
       async close() {
         await context.close()

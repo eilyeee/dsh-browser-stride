@@ -114,7 +114,10 @@ describe('panel session transitions', () => {
         open: async () => { throw new Error('unexpected stream') },
         failure: (error) => ({ code: 'internal', message: String(error), details: {} }),
       },
-    }, { createSharedFetchHandler: () => ({ fetch: async () => { throw new Error('unexpected fetch') } }) })
+    }, {
+      createPeer: () => ({ signal: new AbortController().signal, dispose: async () => {} }),
+      createSharedFetchHandler: () => ({ fetch: async () => { throw new Error('unexpected fetch') } }),
+    })
     const original = rpc.getMockImplementation()!
     rpc.mockImplementation(async (method, payload) => {
       if (method !== 'session.models' && method !== 'session.selectModel') return original(method, payload)

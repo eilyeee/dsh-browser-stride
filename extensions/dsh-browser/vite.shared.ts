@@ -1,6 +1,5 @@
 import { copyFileSync, cpSync, mkdirSync } from 'node:fs'
 import { resolve } from 'node:path'
-import tsconfigPaths from 'vite-tsconfig-paths'
 import { defineConfig } from 'vite'
 
 /**
@@ -30,9 +29,8 @@ export const copyManifest = {
   },
 }
 
-/** Shared plugins for every target: tsconfig paths (plugin protocol source,
- * SDK-like source consumption) plus the manifest copy. */
-export const sharedPlugins = [tsconfigPaths({ projects: ['./tsconfig.json'] }), copyManifest]
+/** Shared plugin for copying static extension assets. */
+export const sharedPlugins = [copyManifest]
 
 /** Shared build options for the non-panel targets. */
 export function targetBuild(entry: string, format: 'es' | 'iife', entryFileNames: string, emptyOutDir: boolean) {

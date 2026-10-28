@@ -1,20 +1,17 @@
 ﻿<#
 .SYNOPSIS
-dsh-browser 一键安装（Windows）：支持远程托管安装和本地 checkout 安装。
-dsh-browser one-command install (Windows): supports both managed remote installs and local checkout installs.
+dsh-browser 安装（Windows）：从本地 checkout 构建并安装。
+dsh-browser installer (Windows): build and install from a local checkout.
 
 .DESCRIPTION
-之后无需任何配置：扩展自动探测本机 dsh 并连接（回环免 token）。
-No further configuration is required: the extension discovers local dsh automatically and loopback connections require no token.
+扩展可自动发现本机地址；启动 Host 后在仓库运行 pnpm run pair:browser 获取一次性配对码。
+The local address is discovered automatically; run pnpm run pair:browser after starting the Host.
 
-这是 scripts/install.sh 的 Windows 对应版本，两者共享同一套托管目录与 install-info.json 约定。
-This is the Windows counterpart of scripts/install.sh; both share one managed-root and install-info.json contract.
+这是 scripts/install.sh 的 Windows 对应版本。
+This is the Windows counterpart of scripts/install.sh.
 #>
 # This file is UTF-8 with a BOM on purpose: Windows PowerShell 5.1 decodes a BOM-less script
-# with the machine's ANSI codepage and turns every Chinese line into mojibake. The BOM is also
-# why the documented one-liner downloads this file and runs it instead of piping it into
-# Invoke-Expression, which chokes on a leading BOM. No param() block, for the same reason: it
-# keeps the script runnable even when someone pipes it in anyway.
+# with the machine's ANSI codepage and turns every Chinese line into mojibake.
 $ErrorActionPreference = 'Stop'
 # Invoke-WebRequest is an order of magnitude slower in Windows PowerShell while it draws a progress bar.
 $ProgressPreference = 'SilentlyContinue'
@@ -23,13 +20,7 @@ $ProgressPreference = 'SilentlyContinue'
 # message into question marks on a non-Chinese install.
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { }
 
-$Repository = 'Lum1104/dsh-browser'
-$RemoteRef = 'main'
 $DshHomeDir = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $HOME '.dsh' }
-$ManagedRoot = Join-Path $DshHomeDir 'dsh-browser'
-# Same marker filename as scripts/install.sh: one managed root, one definition of "managed".
-$ManagedMarker = Join-Path $ManagedRoot '.managed-by-install-sh'
-$ArchiveUrl = "https://github.com/$Repository/archive/refs/heads/$RemoteRef.zip"
 $LegacyPlugin = '@deepseek-ai/dsh-bridge-browser'
 $BridgePlugin = '@yuxianglin/dsh-bridge-browser'
 
@@ -70,8 +61,7 @@ function Test-Workspace {
 }
 
 function Get-WorkspaceRoot {
-  # $PSScriptRoot is empty when the script arrives through `irm ... | iex`, which is exactly
-  # the case that has to fall through to the managed install.
+  # A complete local checkout is required.
   if (-not $PSScriptRoot) { return $null }
   $candidate = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).ProviderPath
   if (Test-Workspace $candidate) { return $candidate }
@@ -316,68 +306,12 @@ function Invoke-Quiet {
   }
 }
 
-function Install-RemoteWorkspace {
-  Assert-Command 'Expand-Archive' "当前 PowerShell 缺少 Expand-Archive；请升级到 PowerShell 5.1 或更高版本。" "This PowerShell has no Expand-Archive; upgrade to PowerShell 5.1 or newer."
-
-  if ((Test-Path -LiteralPath $ManagedRoot -PathType Container) -and
-      -not (Test-Path -LiteralPath $ManagedMarker -PathType Leaf) -and
-      @(Get-ChildItem -LiteralPath $ManagedRoot -Force).Count -gt 0) {
-    Stop-Install `
-      "$ManagedRoot 已存在且不是脚本托管的安装目录；为避免覆盖，请移动该目录或在其中运行 .\scripts\install.ps1。" `
-      "$ManagedRoot already exists and is not managed by this installer; move it or run .\scripts\install.ps1 inside it to avoid overwriting it."
-  }
-
-  Write-Pair "未检测到完整的本地 checkout，切换到免 clone 安装。" "No complete local checkout was detected; switching to the clone-free install."
-  Write-Pair "正在从 $Repository 的 $RemoteRef 分支下载安装文件……" "Downloading installation files from $Repository at $RemoteRef…"
-
-  # Windows PowerShell defaults to protocols GitHub no longer accepts.
-  try {
-    [Net.ServicePointManager]::SecurityProtocol =
-      [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-  } catch { }
-
-  $tempBase = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
-  $bootstrap = Join-Path $tempBase ('dsh-browser-install-' + [System.Guid]::NewGuid().ToString('N').Substring(0, 8))
-  New-Item -ItemType Directory -Path $bootstrap -Force | Out-Null
-
-  try {
-    $archive = Join-Path $bootstrap 'source.zip'
-    $expanded = Join-Path $bootstrap 'source'
-    Invoke-WebRequest -Uri $ArchiveUrl -OutFile $archive -UseBasicParsing
-    Expand-Archive -LiteralPath $archive -DestinationPath $expanded -Force
-
-    $extracted = @(Get-ChildItem -LiteralPath $expanded -Directory)
-    if ($extracted.Count -ne 1 -or -not (Test-Workspace $extracted[0].FullName)) {
-      Stop-Install "下载内容不完整，未修改现有安装。" "The download is incomplete; the existing installation was not changed."
-    }
-
-    New-Item -ItemType Directory -Path $ManagedRoot -Force | Out-Null
-    New-Item -ItemType File -Path $ManagedMarker -Force | Out-Null
-    Sync-Directory -Source $extracted[0].FullName -Destination $ManagedRoot `
-      -ExcludeName @('node_modules', '.managed-by-install-sh')
-  } finally {
-    Remove-Item -LiteralPath $bootstrap -Recurse -Force -ErrorAction SilentlyContinue
-  }
-
-  Write-Pair "安装文件已同步到 $ManagedRoot。" "Installation files are ready in $ManagedRoot."
-
-  # Hand over to the version that was just downloaded, the way the Unix installer re-execs.
-  # -ExecutionPolicy Bypass keeps a restricted machine from rejecting the freshly written file.
-  $hostExe = if ($PSVersionTable.PSEdition -eq 'Core') {
-    Join-Path $PSHOME 'pwsh.exe'
-  } else {
-    Join-Path $PSHOME 'powershell.exe'
-  }
-  & $hostExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $ManagedRoot 'scripts\install.ps1')
-  exit $LASTEXITCODE
-}
-
 if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
   Stop-Install "install.ps1 仅用于 Windows；macOS 与 Linux 请运行 scripts/install.sh。" "install.ps1 is for Windows only; run scripts/install.sh on macOS and Linux."
 }
 
 $Root = Get-WorkspaceRoot
-if (-not $Root) { Install-RemoteWorkspace }
+if (-not $Root) { Stop-Install "请从 DSH Stride 的完整源码目录运行 scripts/install.ps1。" "Run scripts/install.ps1 from a complete DSH Stride checkout." }
 
 $Ext = Join-Path $Root 'extensions\dsh-browser'
 $Plugin = Join-Path $Root 'packages\browser\bridge-browser'
@@ -454,16 +388,6 @@ $IsUpdate = Test-Path -LiteralPath (Join-Path $DistDir 'manifest.json') -PathTyp
 New-Item -ItemType Directory -Path $DistDir -Force | Out-Null
 Sync-Directory -Source (Join-Path $Ext 'dist') -Destination $DistDir
 
-$InstallMode = if (Test-Path -LiteralPath (Join-Path $Root '.managed-by-install-sh') -PathType Leaf) { 'managed' } else { 'checkout' }
-$InstallInfo = [ordered]@{ schemaVersion = 1; mode = $InstallMode }
-if ($InstallMode -eq 'checkout') { $InstallInfo['sourceRoot'] = $Root }
-# ConvertTo-Json escapes the backslashes in a Windows path; hand-built JSON would not.
-$InstallInfoJson = ($InstallInfo | ConvertTo-Json -Depth 3) + "`n"
-[System.IO.File]::WriteAllText(
-  (Join-Path $DistDir 'install-info.json'),
-  $InstallInfoJson,
-  (New-Object System.Text.UTF8Encoding $false))
-
 $ClipboardReady = Set-ClipboardText $DistDir
 $ChromeOpened = Start-ExtensionsPage (Get-BrowserPath)
 
@@ -509,10 +433,8 @@ if ($IsUpdate) {
 Write-Host ''
 Write-Pair "加载完成后：" "After loading the extension:"
 Write-Pair "• 点击工具栏中的 DeepSeek 鲸鱼图标，打开侧边栏" "Click the DeepSeek whale icon in the toolbar to open the side panel"
-Write-Pair "• 扩展会自动发现本机 dsh，无需填写地址或 token" "The extension discovers local dsh automatically; no address or token is required"
+Write-Pair "• 启动 Host 后，在仓库根目录运行 pnpm run pair:browser，将一次性配对码填入侧栏设置" "After starting the Host, run pnpm run pair:browser from the repository and enter the one-time code in side-panel settings"
 $QuotedRoot = "'" + $Root.Replace("'", "''") + "'"
 Write-Host ("• 启动固定版本：cd {0}; pnpm start" -f $QuotedRoot)
 Write-Host ("   Start the pinned version: cd {0}; pnpm start" -f $QuotedRoot)
-Write-Pair "• 或直接启动固定版本：npx @deepseek-ai/dsh@0.2.0-rc.2 web" "Or start the pinned version directly: npx @deepseek-ai/dsh@0.2.0-rc.2 web"
 Write-Host ''
-Write-Pair "如果用得顺手，欢迎在 GitHub 点个 Star 支持我们：https://github.com/Lum1104/dsh-browser" "If dsh-browser is useful to you, we'd appreciate a Star on GitHub: https://github.com/Lum1104/dsh-browser"

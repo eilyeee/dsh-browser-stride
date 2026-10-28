@@ -192,6 +192,7 @@ export async function runBenchmark(options) {
         repoRoot,
         benchmarkRoot,
         bridgeUrl: `ws://127.0.0.1:${options.extensionPort}/ext/bridge`,
+        pairingCode: await backends.get('extension').issuePairingCode(),
         trustedOrigin: site.origin,
       })
     }

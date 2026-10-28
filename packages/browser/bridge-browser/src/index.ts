@@ -26,8 +26,9 @@ import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
-import { BridgeServer } from './server.ts'
+import { BridgeServer, isLoopbackAddress, isLoopbackHost } from './server.ts'
 import { BrowserContextInjector } from './browser-context.ts'
+import { BROWSER_SYSTEM_PROMPT } from './browser-policy.ts'
 import { registerBrowserTools } from './tools.ts'
 import {
   BRIDGE_CONFIG_PATH,
@@ -39,6 +40,8 @@ import { withSessionDeferral } from './session-deferral.ts'
 import { withSessionWorkspace } from './session-workspace.ts'
 import { purgeSessionFiles, type SessionPurgeDeps } from './session-purge.ts'
 import { resolveToken } from './token.ts'
+import { PairingStore } from './pairing.ts'
+import { createPairingRoute } from './pairing-http.ts'
 import {
   createRemoteHostApi,
   type HostConnectionLike,
@@ -71,6 +74,10 @@ const DEFAULT_DEFER_SESSION_CREATE = true
 export interface Config {
   /** Fixed bearer token. When absent, a token is generated on first boot and persisted under the dsh home (0600). */
   token?: string
+  /** Separately authorize browser access to Host settings, credentials and local paths. */
+  allowHostManagement?: boolean
+  /** Explicit profile namespace for installation credentials. */
+  pairingProfile?: string
   /** Per-tool-call timeout in ms. Defaults to 90000. */
   toolTimeoutMs?: number
   /** Upper bound on one snapshot's rendered characters. Defaults to 32000; minimum 500. */
@@ -85,6 +92,8 @@ export interface Config {
 
 export const Config: z<Config> = z.object({
   token: z.string(),
+  allowHostManagement: z.boolean().default(false),
+  pairingProfile: z.string().default('web'),
   toolTimeoutMs: z.number().step(1).min(1).default(DEFAULT_TOOL_TIMEOUT_MS),
   snapshotMaxChars: z.number().step(1).min(MIN_SNAPSHOT_MAX_CHARS).default(DEFAULT_SNAPSHOT_MAX_CHARS),
   maxInteractiveItems: z.number().step(1).min(1).default(DEFAULT_MAX_INTERACTIVE_ITEMS),
@@ -110,6 +119,8 @@ export function assertPositiveInteger(name: string, value: number): void {
 export function resolveConfig(config: Config): ResolvedConfig {
   const resolved: ResolvedConfig = {
     ...(config.token === undefined ? {} : { token: config.token }),
+    allowHostManagement: config.allowHostManagement ?? false,
+    pairingProfile: config.pairingProfile ?? 'web',
     toolTimeoutMs: config.toolTimeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS,
     snapshotMaxChars: config.snapshotMaxChars ?? DEFAULT_SNAPSHOT_MAX_CHARS,
     maxInteractiveItems: config.maxInteractiveItems ?? DEFAULT_MAX_INTERACTIVE_ITEMS,
@@ -122,6 +133,9 @@ export function resolveConfig(config: Config): ResolvedConfig {
     throw new Error(`bridge-browser: snapshotMaxChars must be at least ${MIN_SNAPSHOT_MAX_CHARS}`)
   }
   assertPositiveInteger('maxInteractiveItems', resolved.maxInteractiveItems)
+  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(resolved.pairingProfile)) {
+    throw new Error('bridge-browser: pairingProfile must contain 1–64 letters, digits, underscores or hyphens')
+  }
   return resolved
 }
 
@@ -138,9 +152,11 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const gateway = ctx.get('typertGateway') as unknown as GatewayCandidate | undefined
   const connection = ctx.get('connection') as unknown as HostConnectionLike | undefined
   if (gateway === undefined || !hasRemoteWireStream(gateway)) {
-    throw new Error('bridge-browser: dsh 0.2.0-rc.1 or a compatible newer runtime is required (Gateway wireStream unavailable)')
+    throw new Error('bridge-browser: dsh 0.2.1-rc.2 or a compatible newer runtime is required (Gateway wireStream unavailable)')
   }
-  if (connection === undefined) throw new Error('bridge-browser: dsh connection service is required')
+  if (connection === undefined || typeof connection.createPeer !== 'function') {
+    throw new Error('bridge-browser: dsh 0.2.1-rc.2 connection service with createPeer is required')
+  }
   const tokenRes = await resolveToken(resolved.token)
   mountBridge(ctx, resolved, tokenRes, createRemoteHostApi(gateway, connection))
 }
@@ -214,8 +230,11 @@ function mountBridge(
     await purgeSessionFiles(deps, sessionId)
   }
 
+  const pairing = new PairingStore(dshHomePath('browser-bridge-pairings', `${resolved.pairingProfile}.json`))
   const server = new BridgeServer({
     token: tokenRes.token,
+    pairing,
+    allowHostManagement: resolved.allowHostManagement,
     api,
     toolTimeoutMs: resolved.toolTimeoutMs,
     caps: {
@@ -232,17 +251,20 @@ function mountBridge(
     handler: (req, socket, head) => { server.handleUpgrade(req, socket, head) },
   }
   ctx.effect(() => ctx.webServer.registerUpgrade(route), 'bridge-browser: /ext/bridge upgrade route')
+  ctx.effect(() => ctx.webServer.register(createPairingRoute(pairing, server, tokenRes.token)), 'bridge-browser: pairing administration')
   // 异步 disposer：HMR/卸载时先等桥完全关闭（socket/泵/acceptor 静默）再继续。
   ctx.effect(() => () => server.close(), 'bridge-browser: bridge server')
 
-  // Zero-config discovery endpoint: the extension fetches this to learn the
-  // bridge WebSocket URL without any manual configuration. The URL carries no
-  // secret (loopback connections skip the token); non-loopback deployments
-  // keep requiring the token on the WS itself.
+  // Discovery contains no secret and is only exposed to local clients.
   const configRoute: WebRoute = {
     kind: 'exact',
     path: BRIDGE_CONFIG_PATH,
-    handler: (_req, res) => {
+    handler: (req, res) => {
+      if (!isLoopbackAddress(req.socket.remoteAddress) || !isLoopbackHost(req.headers.host)) {
+        res.writeHead(403)
+        res.end()
+        return
+      }
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ wsUrl: `ws://127.0.0.1:${ctx.webServer.port}${BRIDGE_PATH}` }))
     },
@@ -258,23 +280,20 @@ function mountBridge(
     return () => { for (const dispose of disposers.values()) dispose() }
   }, 'bridge-browser: browser tools')
 
-  // Optional system-prompt contribution: a one-line hint only — the model is
-  // told to fetch snapshots on demand instead of hoarding page text.
+  // Optional model guidance complements, but cannot replace, runtime guards.
   const systemPrompt = ctx.get('systemPrompt')
   if (systemPrompt !== undefined) {
     ctx.effect(() => systemPrompt.section({
       name: 'tool:bridge-browser',
       order: 107,
-      text: 'A browser bridge may be connected. To read or operate the user\'s active browser page, call browser_snapshot '
-        + '(text-only; numbered items are the click/type targets), unless the current turn already includes a plugin-provided '
-        + 'followed-page browser_snapshot. Reuse that injected snapshot and its indices directly. Never assume page content you have not snapshotted.',
+      text: BROWSER_SYSTEM_PROMPT,
     }), 'bridge-browser: system prompt section')
   }
 
   ctx.logger.info(
     tokenRes.generated
-      ? `browser bridge: new token generated and persisted at ${tokenRes.file} (chmod 0600); connect the extension and paste it in its settings`
-      : `browser bridge: using token from ${tokenRes.file}`,
+      ? `browser bridge: administrator token generated at ${tokenRes.file} (chmod 0600); use the pairing command to connect an extension`
+      : `browser bridge: administrator token configured; use the pairing command to connect an extension`,
   )
   ctx.logger.info(`browser bridge: listening on ${BRIDGE_PATH}`)
 }
