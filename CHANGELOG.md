@@ -16,6 +16,12 @@ no release version has been assigned yet.
 
 ### Added
 
+- Received page calls pin their browser target before receipt/approval/queue
+  waits. Navigation, history changes, rebinding, tab lifecycle changes and new
+  connections fence old pending work. Expired reads are withheld, and cancelled
+  waiters cannot release later writes before a dispatched action settles. These
+  worker-local fences do not establish full run/account/tenant authority.
+
 - The side panel displays bounded metadata for existing Host-owned browser runs,
   with version-checked pause/stop controls and explicit stopping acknowledgement.
   Synthetic clicks, foreign-session controls and queued controls from replaced

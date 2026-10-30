@@ -58,6 +58,8 @@ Build the Bridge and extension from the same checkout: click, type and select no
 
 Connections require wire protocol version 2, including Host-issued action ids and command digests on tool calls and replies. Missing or incompatible versions are rejected; the side panel identifies which component needs updating and stops automatic retries. Rebuild and restart the Host Bridge and reload the extension together, then reopen the panel. Snapshot budgets use the smaller limit offered by the two components. The extension commits a persistent execution fence before dispatch and refuses repeated ids across worker restart. This does not establish a complete task runtime or automatic recovery.
 
+For tool calls received by the extension that operate on a page, the selected tab, window and URL are captured before receipt storage, approval or write-queue waits. Navigation/history events, explicit rebinding and tab replacement/moves revoke pending calls; an old call cannot follow a newly selected target. An already dispatched operation still settles before the next write. These worker-local fences do not provide complete run/account/tenant binding or recovery.
+
 ## Development
 
 Trusted Host plugins can persist run state and action facts through `ctx.browserRuns` and bind browser calls to a run/control revision using `withExecution`. Pause, stop and control changes revoke old contexts; the ledger records the owning run and transport receipts. The side panel can show, pause and request stopping existing Host-owned runs; task creation and resume are still Host-only. Business-result verification, full receiver run/target binding and automatic recovery remain unimplemented. See the [Bridge documentation](packages/browser/bridge-browser/README.md).

@@ -90,6 +90,11 @@ afterEach(() => {
 describe('tool-driven session checkpoints', () => {
   it('updates only after a successful navigation candidate', async () => {
     let currentTab = browserTab('https://example.com/start')
+    const onUpdated = chromeEvent<[number, { url: string }, chrome.tabs.Tab]>()
+    const updatePage = (url: string): void => {
+      currentTab = browserTab(url)
+      onUpdated.emit(1, { url }, currentTab)
+    }
     let action: (name: string, message?: unknown) => Promise<unknown> = async () => ({ ok: true, result: { text: 'snapshot' } })
     const onConnect = chromeEvent<[chrome.runtime.Port]>()
     const sessionData: Record<string, unknown> = {}
@@ -133,7 +138,7 @@ describe('tool-driven session checkpoints', () => {
         query: vi.fn(async () => [currentTab]),
         sendMessage,
         onActivated: chromeEvent<[{ tabId: number; windowId: number }]>(),
-        onUpdated: chromeEvent<[number, Parameters<Parameters<typeof chrome.tabs.onUpdated.addListener>[0]>[1], chrome.tabs.Tab]>(),
+        onUpdated,
         onReplaced: chromeEvent<[number, number]>(),
         onRemoved: chromeEvent<[number]>(),
       },
@@ -190,7 +195,7 @@ describe('tool-driven session checkpoints', () => {
 
     action = async (name) => {
       if (name === 'browser_navigate') {
-        currentTab = browserTab('https://example.com/failed')
+        updatePage('https://example.com/failed')
         return { ok: false, error: { code: 'action-failed', message: 'navigation failed' } }
       }
       return { ok: true, result: { text: 'snapshot' } }
@@ -199,10 +204,11 @@ describe('tool-driven session checkpoints', () => {
     expect(storedUrlKey(sessionData)).toBe('https://example.com/start')
 
     action = async () => {
-      currentTab = browserTab('https://example.com/non-navigation')
+      updatePage('https://example.com/non-navigation')
       return { ok: true, result: { text: 'snapshot' } }
     }
     await call('snapshot', 'browser_snapshot')
+    expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'snapshot', ok: false }))
     expect(storedUrlKey(sessionData)).toBe('https://example.com/start')
 
     let finishCommitted!: () => void
@@ -218,7 +224,7 @@ describe('tool-driven session checkpoints', () => {
       sessionId: 'session-live',
     })
     await vi.waitFor(() => { expect(finishCommitted).toBeTypeOf('function') })
-    currentTab = browserTab('https://example.com/committed')
+    updatePage('https://example.com/committed')
     socket.receive({ t: 'tool.cancel', id: 'committed' })
     finishCommitted()
     await vi.waitFor(() => {
@@ -227,7 +233,7 @@ describe('tool-driven session checkpoints', () => {
     await vi.waitFor(() => { expect(storedUrlKey(sessionData)).toBe('https://example.com/committed') })
 
     action = async () => {
-      currentTab = browserTab('https://example.com/success?step=2#done')
+      updatePage('https://example.com/success?step=2#done')
       return { ok: true, result: { text: 'navigated' } }
     }
     await call('success', 'browser_navigate')

@@ -47,6 +47,7 @@ import { executeRecordedTool } from './execution-receipts.ts'
 import { localBridgeUrl } from './bridge-address.ts'
 import { requestBrowserPairing, type BrowserPairingStatus } from './pairing-client.ts'
 import { createRpc, BridgeRpcError } from './rpc.ts'
+import { TargetLeaseRegistry, type ToolTargetLease, type ToolTargetIdentity } from './target-leases.ts'
 import {
   dispatchOpenTab,
   dispatchToolCall,
@@ -184,6 +185,7 @@ let bridgeStartRevision = 0
 const interactionResponses = new InteractionResponseRouter()
 const transientEvents = new TransientEventCache()
 const tabAffinity = new TabAffinityController()
+const targetLeases = new TargetLeaseRegistry()
 const focusedWindow = new FocusedWindowTracker()
 const selections = new SelectionTracker()
 const pageSessionContexts = new PageSessionContextTracker({
@@ -197,6 +199,7 @@ void chrome.storage.session.remove(LEGACY_RECENT_SESSION_STORAGE_KEY).catch(() =
 const sessionTrustedActionOrigins = new Set<string>()
 /** Tool calls that are either withdrawable or completing an already-dispatched action. */
 interface ActiveToolCall {
+  targetLease?: ToolTargetLease
   controller: AbortController
   unrestrictedAccess: boolean
   committed: boolean
@@ -590,6 +593,72 @@ function cancelPendingApprovals(sessionId?: string): void {
   approvals.cancelAll(sessionId)
 }
 
+function revokeStaleTargetCalls(): void {
+  for (const call of activeToolCalls.values()) {
+    if (!call.committed && call.targetLease?.current() === false) call.controller.abort()
+  }
+}
+
+function invalidateSessionTarget(sessionId?: string): void {
+  targetLeases.invalidateSession(sessionId)
+  // An explicit session handoff also changes the global, unattributed target.
+  if (sessionId !== undefined) targetLeases.invalidateSession()
+  revokeStaleTargetCalls()
+}
+
+function invalidateDocumentTarget(tabId: number): void {
+  targetLeases.invalidateDocument(tabId)
+  revokeStaleTargetCalls()
+}
+
+function forgetTarget(tabId: number): void {
+  targetLeases.forgetTab(tabId)
+  revokeStaleTargetCalls()
+}
+
+function selectedTargetIdentity(sessionId?: string): ToolTargetIdentity | undefined {
+  const selected = tabAffinity.resolveTarget(sessionId)
+  const tab = selected.kind === 'target' ? selected.tab
+    : selected.kind === 'initial' ? tabAffinity.snapshot().active : null
+  return tab === null ? undefined : { tabId: tab.tabId, windowId: tab.windowId, url: tab.url }
+}
+
+const staleTarget = (): ToolAnswer => ({ ok: false, error: { code: 'action-failed',
+  message: 'The browser target changed after this request arrived. Its result cannot be used; observe the selected page before a new action.' } })
+
+/** Pin before receipt storage, approvals or the write queue can await anything. */
+function captureToolTarget(sessionId?: string): ToolTargetLease | ToolAnswer {
+  const selected = tabAffinity.resolveTarget(sessionId)
+  if (selected.kind === 'handoff' || selected.kind === 'lost') return affinityFailure(selected.kind)
+  const target = selectedTargetIdentity(sessionId)
+  return target === undefined ? affinityFailure('missing') : targetLeases.capture(sessionId, target, () => selectedTargetIdentity(sessionId))
+}
+
+async function prepareToolTarget(lease: ToolTargetLease, sessionId: string | undefined, signal: AbortSignal): Promise<Pick<chrome.tabs.Tab, 'id' | 'url' | 'title' | 'windowId'> | ToolAnswer> {
+  if (signal.aborted || !lease.current()) return staleTarget()
+  let tab: chrome.tabs.Tab
+  try { tab = await chrome.tabs.get(lease.target.tabId) } catch { return affinityFailure('lost') }
+  if (signal.aborted || !lease.current() || tab.id !== lease.target.tabId) return staleTarget()
+  if (tab.windowId !== lease.target.windowId || (tab.url ?? '') !== lease.target.url) {
+    // Refresh native metadata for a future request, never retarget this one.
+    if (tab.windowId !== lease.target.windowId) forgetTarget(lease.target.tabId)
+    else invalidateDocumentTarget(lease.target.tabId)
+    const summary = summarizeTab(tab)
+    if (summary !== null && tabAffinity.observeTab(summary)) broadcastTabAffinity()
+    return staleTarget()
+  }
+  if (tab.status === 'loading' || tab.pendingUrl !== undefined) return staleTarget()
+  // An initial, unattributed call may establish only the target it received.
+  // Duplicates never reach here because execution admission happens first.
+  if (tabAffinity.resolveTarget(sessionId).kind === 'initial') {
+    const summary = summarizeTab(tab)
+    if (summary === null || !tabAffinity.bindInitial(summary, sessionId)) return staleTarget()
+    persistTabAffinity()
+    broadcastTabAffinity()
+  }
+  return lease.current() && tabAffinity.allowsTarget(lease.target.tabId, sessionId) ? tab : staleTarget()
+}
+
 function summarizeTab(tab: chrome.tabs.Tab): AffinityTab | null {
   if (tab.id === undefined) return null
   return {
@@ -638,8 +707,10 @@ function persistTabAffinity(): void {
 function observeActiveSummary(summary: AffinityTab): void {
   const previousStatus = tabAffinity.snapshot().status
   if (!tabAffinity.observeActive(summary)) return
+  revokeStaleTargetCalls()
   if (previousStatus !== 'handoff' && tabAffinity.snapshot().status === 'handoff') {
     const focused = tabAffinity.focusedSession()
+    invalidateSessionTarget(focused ?? undefined)
     if (focused !== null) {
       activeFollowRefreshes.get(focused)?.controller.abort()
       cancelPendingApprovals(focused)
@@ -904,6 +975,7 @@ function bindOpenedTab(
   const summary = summarizeTab(tab)
   if (summary === null) return false
   const sid = sessionId?.trim()
+  invalidateSessionTarget(sid)
   bindOpenedTabAffinity(tabAffinity, summary, {
     active: options.active,
     sessionId: sid,
@@ -1018,6 +1090,7 @@ async function resolveTabAffinityResponse(response: {
     : null
   if (controlled !== null) resetTabSnapshot(controlled.tabId)
   if (accepted) {
+    invalidateSessionTarget(sid)
     persistTabAffinity()
     if (controlled !== null && sid !== undefined) {
       await pageSessionContexts.ready
@@ -1051,6 +1124,7 @@ function commitTabAffinityRebind(
   sessionId?: string,
   mode: 'active' | 'background' = 'active',
 ): void {
+  invalidateSessionTarget(sessionId)
   const previousControlledTabId = tabAffinity.snapshot().controlled?.tabId
   if (sessionId !== undefined) {
     activeFollowRefreshes.get(sessionId)?.controller.abort()
@@ -1114,7 +1188,14 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
   }
   activeToolCalls.set(call.id, activeCall)
   unsettledToolCalls.add(activeCall)
-  const commitAction = (): void => { activeCall.committed = true }
+  const target = isTabManagementTool(call.name) || call.name === 'browser_open_tab' ? undefined : captureToolTarget(call.sessionId)
+  if (target !== undefined && !('ok' in target)) activeCall.targetLease = target
+  const targetAllowed = (): boolean => activeCall.targetLease === undefined
+    || (activeCall.committed ? activeCall.targetLease.sameBinding() : activeCall.targetLease.current())
+  const commitAction = (): void => {
+    if (!targetAllowed()) throw new Error('Browser target lease expired before dispatch')
+    activeCall.committed = true
+  }
   const rollbackActionCommit = (): void => {
     activeCall.committed = false
     if (activeCall.revocationRequested) controller.abort()
@@ -1176,22 +1257,24 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
           (tabId) => tabAffinity.allowsTarget(tabId, call.sessionId),
           commitAction,
         ))
-    : resolveToolTab(call.sessionId).then((target) => 'ok' in target
-      ? target
+    : (target === undefined || 'ok' in target ? Promise.resolve(target ?? affinityFailure('missing'))
+      : prepareToolTarget(target, call.sessionId, controller.signal)).then((prepared) => 'ok' in prepared
+      ? prepared
       : dispatchToolCall(
           call,
           sharePageContent(),
           budget,
-          (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, call.sessionId, unrestrictedAccess),
+          (prompt) => authorizeToolCall(prompt, controller.signal, prepared.windowId, call.sessionId, unrestrictedAccess),
           controller.signal,
-          target,
-          () => target.id !== undefined && tabAffinity.allowsTarget(target.id, call.sessionId),
+          prepared,
+          () => targetAllowed() && prepared.id !== undefined && tabAffinity.allowsTarget(prepared.id, call.sessionId),
           { unrestrictedAccess, commitAction, rollbackActionCommit },
         ))
   )
   const dispatchAndCheckpoint = async (): Promise<ToolAnswer> => {
     const sharingAtDispatch = pageSharingRevision
     let answer = await dispatch()
+    if (!targetAllowed()) return staleTarget()
     if (answer.ok && isNavigationCandidateTool(call.name) && activeToolCalls.get(call.id) === activeCall) {
       await checkpointSessionPage(call.sessionId)
     }
@@ -1211,6 +1294,7 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
   void result.then(
     async (answer) => {
       if (activeToolCalls.get(call.id) !== activeCall) return
+      if (!targetAllowed()) answer = staleTarget()
       // A committed browser_open_tab already rebound affinity; prefer that
       // factual success over a generic cancel that would leave the model wrong.
       if (controller.signal.aborted && !(call.name === 'browser_open_tab' && answer.ok)) {
@@ -1283,6 +1367,7 @@ async function revokeUnrestrictedAccess(): Promise<void> {
 }
 
 function cancelAllToolCalls(): void {
+  targetLeases.revokeAll()
   for (const call of activeToolCalls.values()) {
     if (!call.committed) call.controller.abort()
   }
@@ -1292,6 +1377,7 @@ function cancelAllToolCalls(): void {
 /** (Re)start the bridge with the current settings; address discovery contains no credential. */
 async function startBridge(): Promise<void> {
   const revision = ++bridgeStartRevision
+  await affinityReady
   if (panelPorts.size === 0) return
   let url = settings.bridgeUrl
   if (url === '') {
@@ -1616,7 +1702,10 @@ chrome.runtime.onConnect.addListener((port) => {
               const tab = await syncActiveTab()
               const summary = tab === undefined ? null : summarizeTab(tab)
               if (summary === null) throw new Error('No active tab is available to bind this session')
-              if (tabAffinity.getSessionTab(sid) === undefined) tabAffinity.bindNewSession(sid, summary)
+              if (tabAffinity.getSessionTab(sid) === undefined) {
+                invalidateSessionTarget(sid)
+                tabAffinity.bindNewSession(sid, summary)
+              }
               pageSessionContexts.bind(sid, { id: summary.tabId, ...summary })
               resetTabSnapshot(summary.tabId)
               persistTabAffinity()
@@ -1628,6 +1717,7 @@ chrome.runtime.onConnect.addListener((port) => {
               if (sessionSnapshotRefreshes.get(sid) === bind) sessionSnapshotRefreshes.delete(sid)
             })
           } else if (tabAffinity.focusSession(sid)) {
+            invalidateSessionTarget()
             persistTabAffinity()
             broadcastTabAffinity()
           }
@@ -1766,22 +1856,30 @@ chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
     if (activationRevision === null) return
     // Mark the switch before awaiting metadata so an already-running trusted
     // action cannot slip through the handoff boundary.
-    observeActiveSummary({ tabId, windowId, title: '', url: '' })
+    const state = tabAffinity.snapshot()
+    const known = state.controlled?.tabId === tabId ? state.controlled : state.active?.tabId === tabId ? state.active : null
+    observeActiveSummary({ tabId, windowId, title: known?.title ?? '', url: known?.url ?? '' })
     return chrome.tabs.get(tabId).then((tab) => {
       if (focusedWindow.isCurrent(activationRevision)) observeActiveTab(tab)
     }).catch(() => {})
   })
 })
 
-chrome.tabs.onUpdated.addListener((tabId, _changeInfo, tab) => {
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === 'loading' || changeInfo.url !== undefined) invalidateDocumentTarget(tabId)
   void affinityReady.then(() => {
     if (!tabAffinity.tracks(tabId)) return
     const summary = summarizeTab(tab)
-    if (summary !== null && tabAffinity.observeTab(summary)) broadcastTabAffinity()
+    if (summary !== null && tabAffinity.observeTab(summary)) {
+      revokeStaleTargetCalls()
+      broadcastTabAffinity()
+    }
   })
 })
 
 chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
+  forgetTarget(removedTabId)
+  forgetTarget(addedTabId)
   // The old document is gone even though Chrome transfers the tab identity.
   forgetTabSnapshot(removedTabId)
   resetTabSnapshot(addedTabId)
@@ -1809,6 +1907,7 @@ chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
 })
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  forgetTarget(tabId)
   forgetTabSnapshot(tabId)
   broadcastSelections(selections.clearTab(tabId))
   void pageSessionContexts.ready.then(() => {
@@ -1831,6 +1930,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 // Matching the exact frame keeps an iframe's navigation from invalidating a
 // quote taken from its parent page, and vice versa.
 chrome.webNavigation.onCommitted.addListener(({ tabId, frameId }) => {
+  invalidateDocumentTarget(tabId)
   resetTabSnapshot(tabId)
   broadcastSelections(selections.clearTab(tabId, frameId))
 })
@@ -1838,8 +1938,19 @@ chrome.webNavigation.onCommitted.addListener(({ tabId, frameId }) => {
 // The document and even its URL can remain unchanged after SPA history
 // transitions. Invalidate every frame's pre-transition snapshot while keeping
 // the user's visible text selection intact.
-chrome.webNavigation.onHistoryStateUpdated?.addListener(({ tabId }) => { resetTabSnapshot(tabId) })
-chrome.webNavigation.onReferenceFragmentUpdated?.addListener(({ tabId }) => { resetTabSnapshot(tabId) })
+chrome.webNavigation.onHistoryStateUpdated?.addListener(({ tabId }) => { invalidateDocumentTarget(tabId); resetTabSnapshot(tabId) })
+chrome.webNavigation.onReferenceFragmentUpdated?.addListener(({ tabId }) => { invalidateDocumentTarget(tabId); resetTabSnapshot(tabId) })
+chrome.webNavigation.onBeforeNavigate?.addListener(({ tabId }) => { invalidateDocumentTarget(tabId) })
+chrome.tabs.onDetached?.addListener((tabId) => { forgetTarget(tabId) })
+chrome.tabs.onAttached?.addListener((tabId) => {
+  forgetTarget(tabId)
+  void affinityReady.then(async () => {
+    if (!tabAffinity.tracks(tabId)) return
+    const tab = await chrome.tabs.get(tabId)
+    const summary = summarizeTab(tab)
+    if (summary !== null && tabAffinity.observeTab(summary)) broadcastTabAffinity()
+  }).catch(() => {})
+})
 
 // Ports are cleaned up by their own disconnect; only the window's quote is
 // left behind when the whole window goes away.

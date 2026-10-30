@@ -26,3 +26,9 @@ Chrome output is `extensions/dsh-browser/dist/`; Firefox output is `extensions/d
 The extension requests access to HTTP(S) pages and browser tab/navigation APIs. Page content is untrusted, and state-changing actions require user approval unless the user has explicitly enabled a broader policy. Click, type and select require an element reference from the latest observation; these references are not yet bound to a task run, account or tenant.
 
 The side panel shows metadata for Host-created browser runs in the current conversation, with explicit Pause and Stop controls. A stop request remains Stopping until its executor confirms. Ordinary chat does not automatically create runs; task creation and resume remain Host-only, and automatic reconciliation is not implemented. Controls require real user input, carry the displayed record version and are never automatically retried.
+
+## Pending page calls
+
+For received page-tool requests, the background captures the selected tab/window and URL before waiting for IndexedDB admission, approval or a write turn. Native navigation/history events invalidate the captured document generation, including same-URL reloads; explicit rebinds, tab replacement/moves and connection replacement invalidate the old binding. A rejected call does not retry itself against a new page. Expired reads are withheld. Already dispatched operations are awaited before later writes; they are not undone or replayed. A committed action may observe its own navigation while its original binding remains valid.
+
+The fences live only in the worker. Existing persistent action identities prevent replay across worker restarts. Browser-level tab creation/management and internal handoff refreshes keep their existing approval paths. Full receiver run/control authority, account/tenant binding and automatic reconciliation are still unavailable.

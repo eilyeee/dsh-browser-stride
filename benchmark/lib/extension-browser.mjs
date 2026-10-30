@@ -109,8 +109,8 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
         await target.bringToFront()
         await target.waitForTimeout(200)
       },
-      async bindSession(sessionId) {
-        await target.bringToFront()
+      async bindSession(sessionId, targetPage = target) {
+        await targetPage.bringToFront()
         await panel.evaluate(({ session, timeoutMs }) => new Promise((resolveBinding, rejectBinding) => {
           const port = window.__dshBenchmarkPort
           if (port === undefined) { rejectBinding(new Error('benchmark panel port is unavailable')); return }

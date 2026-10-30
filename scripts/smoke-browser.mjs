@@ -172,7 +172,7 @@ async function verifyPersistentExecutionFence() {
   const countNavigation = request => { if (request.isNavigationRequest() && request.url() === destination) navigations += 1 }
   browser.target.on('request', countNavigation)
   async function connectPanel() {
-    await browser.panel.evaluate(bridgeUrl => new Promise((resolveStatus, reject) => {
+    await browser.panel.evaluate(({ bridgeUrl, trustedOrigin }) => new Promise((resolveStatus, reject) => {
       const port = window.__dshBenchmarkPort ??= chrome.runtime.connect({ name: 'dsh-panel' })
       const timer = setTimeout(() => { port.onMessage.removeListener(onMessage); reject(new Error('synthetic Host connection timed out')) }, 10000)
       const onMessage = message => {
@@ -182,8 +182,8 @@ async function verifyPersistentExecutionFence() {
         resolveStatus()
       }
       port.onMessage.addListener(onMessage)
-      port.postMessage({ type: 'settings', settings: { bridgeUrl, token: 'synthetic-execution-token' } })
-    }), url)
+      port.postMessage({ type: 'settings', settings: { bridgeUrl, token: 'synthetic-execution-token', trustedActionOrigins: [trustedOrigin] } })
+    }), { bridgeUrl: url, trustedOrigin: site.origin })
   }
   const actionId = 'act_synthetic_persistent_execution'
   async function command(id, args) {
@@ -201,7 +201,8 @@ async function verifyPersistentExecutionFence() {
     url = `ws://127.0.0.1:${server.address().port}/ext/bridge`
     await connectPanel()
     const args = { url: destination }
-    assert.equal((await command('synthetic-first-attempt', args)).ok, true)
+    const first = await command('synthetic-first-attempt', args)
+    assert.equal(first.ok, true, JSON.stringify(first.error))
     assert.equal(navigations, 1)
     assert.equal((await command('synthetic-retransmission', args)).error?.code, 'action-duplicate')
     assert.equal((await command('synthetic-conflict', { url: `${site.origin}/health?changed=synthetic` })).error?.code, 'action-conflict')
@@ -260,6 +261,132 @@ async function verifyPersistentExecutionFence() {
     assert.equal(navigations, 1, 'worker restart must not replay a recorded navigation')
   } finally {
     browser.target.off('request', countNavigation)
+    for (const socket of sockets.clients) socket.terminate()
+    await new Promise(resolveClose => sockets.close(resolveClose))
+    await new Promise(resolveClose => server.close(resolveClose))
+  }
+}
+
+async function verifyQueuedTargetFence() {
+  const counts = { a: 0, b: 0 }
+  const replies = new Map()
+  let activeSocket
+  let other
+  let wsUrl
+  const sessionId = 'session-synthetic-target-fence'
+  const server = createHttpServer((req, res) => {
+    const path = new URL(req.url, 'http://localhost').pathname
+    if (path === '/ext/bridge-config') {
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ wsUrl }))
+      return
+    }
+    const event = path.match(/^\/event\/([ab])$/u)?.[1]
+    if (event) {
+      counts[event] += 1
+      res.writeHead(204).end()
+      return
+    }
+    const page = path === '/b' ? 'b' : 'a'
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    res.end(`<!doctype html><title>Synthetic target ${page}</title><input autofocus aria-label="Probe"><script>document.addEventListener('keydown',e=>{if(e.key==='Enter')fetch('/event/${page}',{method:'POST'})})</script>`)
+  })
+  const sockets = new WebSocketServer({ server })
+  sockets.on('connection', socket => {
+    activeSocket = socket
+    socket.on('message', bytes => {
+      const frame = JSON.parse(bytes.toString())
+      if (frame.t === 'hello') socket.send(JSON.stringify({ t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps: frame.caps }))
+      if (frame.t === 'tool.result') replies.set(frame.id, frame)
+    })
+  })
+  const wait = async (check, label) => {
+    const deadline = Date.now() + 15_000
+    while (Date.now() < deadline) {
+      if (await check()) return
+      await delay(50)
+    }
+    throw new Error(`Queued target smoke timed out: ${label}`)
+  }
+  const actionFor = async id => {
+    const actionId = `act_${id}`
+    const name = 'browser_press'
+    const args = { key: 'Enter' }
+    const action = { actionId, requestDigest: await computeToolCommandDigest({ actionId, name, args, sessionId }) }
+    return { t: 'tool.call', id, action, name, args, sessionId, expiresAt: Date.now() + 15_000 }
+  }
+  const admitted = async actionId => await browser.worker.evaluate(id => new Promise((resolveAdmission, reject) => {
+    const request = indexedDB.open('dsh-browser-execution', 1)
+    request.onerror = () => reject(new Error('receipt read failed'))
+    request.onsuccess = () => {
+      const db = request.result
+      const transaction = db.transaction('receipts', 'readonly')
+      const read = transaction.objectStore('receipts').get(id)
+      read.onsuccess = () => resolveAdmission(read.result !== undefined)
+      transaction.oncomplete = () => db.close()
+    }
+  }), actionId)
+  try {
+    await new Promise((resolveListen, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolveListen) })
+    const origin = `http://127.0.0.1:${server.address().port}`
+    wsUrl = `ws://127.0.0.1:${server.address().port}/ext/bridge`
+    await browser.panel.evaluate(bridgeUrl => new Promise((resolveConnection, reject) => {
+      const port = window.__dshBenchmarkPort
+      const timer = setTimeout(() => { port.onMessage.removeListener(onMessage); reject(new Error('target-fence Host did not connect')) }, 10000)
+      const onMessage = message => {
+        if (message?.type !== 'status' || message.state !== 'connected') return
+        clearTimeout(timer); port.onMessage.removeListener(onMessage); resolveConnection()
+      }
+      port.onMessage.addListener(onMessage)
+      port.postMessage({ type: 'settings', settings: { bridgeUrl, token: 'synthetic-target-fence-token', trustedActionOrigins: [new URL(bridgeUrl.replace('ws:', 'http:')).origin] } })
+    }), wsUrl)
+    await browser.prepare(`${origin}/a`)
+    await browser.bindSession(sessionId)
+    await browser.worker.evaluate(() => {
+      const original = chrome.tabs.sendMessage.bind(chrome.tabs)
+      let release
+      const gate = new Promise(resolveGate => { release = resolveGate })
+      const state = { started: false, sends: [], release, restore: () => { chrome.tabs.sendMessage = original } }
+      globalThis.__strideTargetFence = state
+      chrome.tabs.sendMessage = async (...args) => {
+        const message = args[1]
+        const first = message?.type === 'DSH_ACTION' && message.action === 'browser_press' && state.sends.length === 0
+        if (message?.type === 'DSH_ACTION' && message.action === 'browser_press') state.sends.push(args[0])
+        const answer = await original(...args)
+        if (first) { state.started = true; await gate }
+        return answer
+      }
+    })
+    const first = await actionFor('synthetic-target-first')
+    activeSocket.send(JSON.stringify(first))
+    await wait(() => browser.worker.evaluate(() => globalThis.__strideTargetFence.started), 'first write committed')
+    await wait(() => counts.a === 1, 'first page keyboard effect')
+    const queued = await actionFor('synthetic-target-queued')
+    activeSocket.send(JSON.stringify(queued))
+    await wait(() => admitted(queued.action.actionId), 'queued write admitted')
+    other = await browser.context.newPage()
+    await other.goto(`${origin}/b`, { waitUntil: 'domcontentloaded' })
+    await browser.bindSession(sessionId, other)
+    await wait(() => replies.has(queued.id), 'old queued request withdrawn')
+    assert.equal(replies.get(queued.id).ok, false)
+    const fresh = await actionFor('synthetic-target-fresh')
+    activeSocket.send(JSON.stringify(fresh))
+    await wait(() => admitted(fresh.action.actionId), 'fresh write admitted')
+    await delay(150)
+    assert.equal(counts.b, 0, 'cancelling a waiter must not release the next write before the committed action settles')
+    assert.equal(replies.has(fresh.id), false)
+    await browser.worker.evaluate(() => globalThis.__strideTargetFence.release())
+    await wait(() => replies.has(first.id) && replies.has(fresh.id), 'committed and fresh requests settle')
+    assert.equal(replies.get(fresh.id).ok, true)
+    await wait(() => counts.b === 1, 'new page keyboard effect')
+    assert.deepEqual(counts, { a: 1, b: 1 }, 'the obsolete request must not write to either page')
+    const sends = await browser.worker.evaluate(() => globalThis.__strideTargetFence.sends)
+    assert.equal(sends.length, 2, 'only the committed old write and the explicitly fresh write reach content scripts')
+    console.log('Queued target fence passed: one committed old-page effect, no obsolete queued effect, one fresh new-page effect, no write overtaking')
+  } finally {
+    await browser.worker.evaluate(() => { globalThis.__strideTargetFence?.release(); globalThis.__strideTargetFence?.restore(); delete globalThis.__strideTargetFence }).catch(() => {})
+    await other?.close().catch(() => {})
+    await browser.prepare(`${site.origin}/health`).catch(() => {})
+    await browser.bindSession('session-synthetic-target-restored').catch(() => {})
     for (const socket of sockets.clients) socket.terminate()
     await new Promise(resolveClose => sockets.close(resolveClose))
     await new Promise(resolveClose => server.close(resolveClose))
@@ -397,11 +524,12 @@ try {
   assert.equal(await host.revokeInstallation(installations[0].installationId), true)
   assert.equal((await host.listInstallations()).length, 0)
   await browser.panel.locator('.connection .dot.connected').waitFor({ state: 'hidden', timeout: 15_000 })
+  await verifyQueuedTargetFence()
   await verifyPersistentExecutionFence()
   await verifyIncompatibleHost(undefined, 'update-host')
   await verifyIncompatibleHost(BRIDGE_PROTOCOL_VERSION - 1, 'update-host')
   await verifyIncompatibleHost(BRIDGE_PROTOCOL_VERSION + 1, 'update-extension')
-  console.log('Browser smoke passed: owner-confirmed pairing UI, authentication fence, reconnect after reload, real DSH tools, panel pause/stop and executor acknowledgement, run/revision dispatch metadata, revoked old contexts, durable v2 identities, persistent replay/conflict rejection across worker restart, origin isolation, revocation and independent site state (no model)')
+  console.log('Browser smoke passed: owner-confirmed pairing UI, authentication fence, reconnect after reload, real DSH tools, panel pause/stop and executor acknowledgement, run/revision dispatch metadata, revoked old contexts, queued-target revocation without write overtaking, durable v2 identities, persistent replay/conflict rejection across worker restart, origin isolation, revocation and independent site state (no model)')
 } finally {
   await browser?.close().catch(() => {})
   await host?.close().catch(() => {})
