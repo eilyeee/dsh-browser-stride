@@ -9,6 +9,7 @@ import { BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, BRIDGE_SESSION_PURGE_METHOD, typ
 import { SessionPurgeError } from '../src/session-purge.ts'
 import type { BrowserHostApi, HostEventFrame } from '../src/host-api.ts'
 import { createRunStorage } from './helpers/run-storage.ts'
+import { asSessionId } from '../src/contracts/ids.ts'
 
 const TOKEN = 'deadbeefdeadbeefdeadbeefdeadbeef'
 
@@ -106,11 +107,11 @@ afterEach(async () => {
   for (const fixture of storageFixtures.splice(0)) await fixture.close()
 })
 
-async function connectedLedger() {
+async function connectedLedger(scoped = false) {
   const storage = await createRunStorage()
   storageFixtures.push(storage)
   const ledger = storage.store.dispatches
-  const h = await startBridge({ dispatches: ledger, toolTimeoutMs: 2_000 })
+  const h = await startBridge({ dispatches: ledger, toolTimeoutMs: 2_000, ...(scoped ? { runs: storage.store } : {}) })
   harnesses.push(h)
   const client = await connect(h.url)
   send(client.ws, { t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: TOKEN, caps: CAPS })
@@ -119,6 +120,76 @@ async function connectedLedger() {
 }
 
 describe('recorded tool dispatch', () => {
+  it('refuses an unscoped call if a managed run takes over while its ledger write is pending', async () => {
+    const h = await connectedLedger(true)
+    const sessionId = asSessionId('managed-session')
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const original = h.ledger.prepare.bind(h.ledger)
+    vi.spyOn(h.ledger, 'prepare').mockImplementationOnce(async input => { const row = await original(input); await gate; return row })
+    const pending = h.bridge.requestTool('browser_snapshot', {}, new AbortController().signal, 1000, sessionId).catch(error => error)
+    try {
+      await waitFor(() => h.ledger.list().length === 1)
+      const queued = await h.storage.store.create({ sessionId, requiredCriteriaIds: ['saved'] })
+      await h.storage.store.transition(queued.runId, queued.version, 'running')
+    } finally { release() }
+    expect(await pending).toMatchObject({ code: 'action-failed' })
+    expect(h.ledger.list()[0].state).toBe('not_sent')
+    expect(h.frames.some(frame => frame.t === 'tool.call')).toBe(false)
+  })
+
+  it('does not accept model arguments in place of a trusted run execution scope', async () => {
+    const h = await connectedLedger(true)
+    const queued = await h.storage.store.create({ sessionId: asSessionId('managed-session'), requiredCriteriaIds: ['saved'] })
+    const run = await h.storage.store.transition(queued.runId, queued.version, 'running')
+    expect(() => h.bridge.requestTool('browser_click', { runId: run.runId, controlRevision: 0 }, new AbortController().signal, 1000, run.sessionId)).toThrow(BridgeToolError)
+    expect(h.ledger.list()).toEqual([])
+  })
+
+  it('cancels an in-flight managed action on pause and records its late receipt without resuming', async () => {
+    const h = await connectedLedger(true)
+    const store = h.storage.store
+    const queued = await store.create({ sessionId: asSessionId('managed-session'), requiredCriteriaIds: ['saved'] })
+    const run = await store.transition(queued.runId, queued.version, 'running')
+    await store.withExecution(run.runId, run.controlRevision, async () => {
+      const pending = h.bridge.requestTool('browser_click', {}, new AbortController().signal).catch(error => error)
+      await waitFor(() => h.frames.some(frame => frame.t === 'tool.call'))
+      const call = h.frames.find(frame => frame.t === 'tool.call')! as Extract<BridgeFrame, { t: 'tool.call' }>
+      expect(call.sessionId).toBe(run.sessionId)
+      await store.control(run.runId, run.version, 'pause')
+      expect(await pending).toMatchObject({ code: 'bridge-closed' })
+      await waitFor(() => h.frames.some(frame => frame.t === 'tool.cancel' && frame.id === call.id))
+      expect(h.ledger.get(call.id)).toMatchObject({ state: 'unresolved', runId: run.runId, controlRevision: 0 })
+      send(h.ws, { t: 'tool.result', id: call.id, action: call.action, ok: true, result: { text: 'late' } })
+      await waitFor(() => h.ledger.get(call.id)?.state === 'returned')
+      expect(store.get(run.runId)).toMatchObject({ state: 'paused', controlRevision: 1, facts: [] })
+      expect(h.ledger.get(call.id)).toMatchObject({ runId: run.runId, controlRevision: 0, interruption: { reason: 'cancelled' } })
+    })
+  })
+
+  it.each(['prepare', 'markSent'] as const)('fences a stop committed while %s is pending', async method => {
+    const h = await connectedLedger(true)
+    const store = h.storage.store
+    const queued = await store.create({ sessionId: asSessionId('managed-session'), requiredCriteriaIds: ['saved'] })
+    const run = await store.transition(queued.runId, queued.version, 'running')
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const original = h.ledger[method].bind(h.ledger) as (...args: any[]) => Promise<any>
+    vi.spyOn(h.ledger, method).mockImplementationOnce(async (...args: any[]) => { const row = await original(...args); await gate; return row })
+    await store.withExecution(run.runId, 0, async () => {
+      const caller = new AbortController()
+      const pending = h.bridge.requestTool('browser_click', {}, caller.signal).catch(error => error)
+      try {
+        await waitFor(() => h.ledger.list()[0]?.state === (method === 'prepare' ? 'prepared' : 'sent_unconfirmed'))
+        await store.control(run.runId, run.version, 'stop')
+      } finally { release() }
+      expect(await pending).toMatchObject({ code: 'bridge-closed' })
+      expect(caller.signal.aborted).toBe(false)
+      expect(h.ledger.list()[0]).toMatchObject({ state: 'not_sent', runId: run.runId, controlRevision: 0 })
+      expect(h.frames.some(frame => frame.t === 'tool.call')).toBe(false)
+    })
+  })
+
   it.each(['actionId', 'requestDigest'] as const)('ignores a receipt with the wrong %s', async field => {
     const h = await connectedLedger()
     let delivered = false

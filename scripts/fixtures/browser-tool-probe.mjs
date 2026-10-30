@@ -1,6 +1,6 @@
 // Loaded only by smoke-browser.mjs into a disposable DSH Host. It executes the
 // registered browser tools through the real Host tool runtime, without a model.
-import { access, writeFile } from 'node:fs/promises'
+import { access, readFile, writeFile } from 'node:fs/promises'
 import assert from 'node:assert/strict'
 
 export const name = 'stride-browser-smoke-probe'
@@ -10,6 +10,7 @@ export function apply(ctx, config) {
   const controller = new AbortController()
   let started = false
   let callNumber = 0
+  let blocked = 0
 
   async function tool(name, args = {}) {
     const result = await ctx.tools.execute({
@@ -32,12 +33,30 @@ export function apply(ctx, config) {
 
   async function run() {
     try {
-      const initial = await tool('browser_snapshot')
-      const checkbox = reference(initial, '邮件通知')
-      await tool('browser_click', { elementRef: checkbox })
-      const updated = await tool('browser_snapshot')
-      const save = reference(updated, '保存设置')
-      await tool('browser_click', { elementRef: save })
+      const { sessionId } = JSON.parse(await readFile(config.trigger, 'utf8'))
+      assert.equal(typeof sessionId, 'string')
+      const queued = await ctx.browserRuns.create({ sessionId, requiredCriteriaIds: ['saved'] })
+      const active = await ctx.browserRuns.transition(queued.runId, queued.version, 'running')
+      const denied = async () => {
+        const result = await ctx.tools.execute({ callId: `stride-blocked-${++blocked}`, name: 'browser_snapshot', arguments: {}, signal: controller.signal })
+        assert.equal(result.isError, true, 'old execution context must not dispatch')
+      }
+      await ctx.browserRuns.withExecution(active.runId, 0, async () => {
+        const initial = await tool('browser_snapshot')
+        const checkbox = reference(initial, '邮件通知')
+        await tool('browser_click', { elementRef: checkbox })
+        const paused = await ctx.browserRuns.control(active.runId, active.version, 'pause')
+        await denied()
+        const resumed = await ctx.browserRuns.control(active.runId, paused.version, 'resume')
+        await denied()
+        await ctx.browserRuns.withExecution(active.runId, resumed.controlRevision, async () => {
+          const updated = await tool('browser_snapshot')
+          const save = reference(updated, '保存设置')
+          await tool('browser_click', { elementRef: save })
+        })
+        const stopping = await ctx.browserRuns.control(active.runId, resumed.version, 'stop')
+        await ctx.browserRuns.transition(active.runId, stopping.version, 'stopped')
+      })
       const records = ctx.browserRuns.dispatches.list()
       assert.equal(records.length, 4)
       assert.equal(records.filter(row => row.effect === 'read').length, 2)
@@ -46,11 +65,18 @@ export function apply(ctx, config) {
         assert.equal(row.state, 'returned')
         assert.equal(row.receipt.ok, true)
         assert.match(row.requestDigest, /^[a-f0-9]{64}$/)
+        assert.equal(row.runId, active.runId)
+        assert.equal(row.sessionId, sessionId)
+        assert.ok(row.controlRevision === 0 || row.controlRevision === 2)
         assert.equal(Object.hasOwn(row, 'args'), false)
         assert.equal(Object.hasOwn(row, 'result'), false)
       }
       assert.equal(new Set(records.map(row => row.actionId)).size, 4)
-      await writeFile(config.result, JSON.stringify({ ok: true, calls: callNumber, recorded: records.length }), { mode: 0o600 })
+      assert.equal(records.filter(row => row.controlRevision === 0).length, 2)
+      assert.equal(records.filter(row => row.controlRevision === 2).length, 2)
+      assert.equal(ctx.browserRuns.get(active.runId).state, 'stopped')
+      assert.equal(ctx.browserRuns.get(active.runId).facts.length, 0, 'transport success must not become business verification')
+      await writeFile(config.result, JSON.stringify({ ok: true, calls: callNumber, recorded: records.length, blocked }), { mode: 0o600 })
     } catch (error) {
       await writeFile(config.result, JSON.stringify({ ok: false, error: String(error) }), { mode: 0o600 })
     }

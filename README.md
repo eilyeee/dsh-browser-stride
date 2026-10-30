@@ -56,7 +56,7 @@ Connections require wire protocol version 2, including Host-issued action ids an
 
 ## Development
 
-Trusted Host plugins can persist run state and action facts through `ctx.browserRuns`, with version-checked controls and restart fencing. Browser tools now record request digests and transport receipts through its dispatch ledger; task lifecycle controls, business-result verification and automatic recovery are not yet connected to the tool path or side panel. See the [Bridge documentation](packages/browser/bridge-browser/README.md).
+Trusted Host plugins can persist run state and action facts through `ctx.browserRuns` and bind browser calls to a run/control revision using `withExecution`. Pause, stop and control changes revoke old contexts; the ledger records the owning run and transport receipts. Task creation/controls are not connected to the side panel. Business-result verification, full receiver run/target binding and automatic recovery remain unimplemented. See the [Bridge documentation](packages/browser/bridge-browser/README.md).
 
 ```sh
 pnpm run typecheck

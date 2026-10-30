@@ -43,6 +43,7 @@ import {
 import { SessionPurgeError } from './session-purge.ts'
 import { verifyToken } from './token.ts'
 import type { PairingStore } from './pairing.ts'
+import type { BrowserRunStore, BrowserRunExecution } from './run-store.ts'
 
 /**
  * Host management methods that must not be granted by browser pairing alone.
@@ -111,6 +112,8 @@ export interface BridgeServerDeps {
   purgeSession: (sessionId: string) => Promise<void>
   /** Production always provides the durable ledger; optional for transport-only unit fixtures. */
   dispatches?: Pick<BrowserDispatchLedger, 'prepare' | 'markSent' | 'settle' | 'get'>
+  /** Trusted Host async execution scopes; never caller/model-supplied ids. */
+  runs?: Pick<BrowserRunStore, 'executionFor'>
   /**
    * Test seam: force the remote address seen by the privilege gate. The
    * sandbox cannot bind arbitrary loopback literals, so the non-loopback
@@ -210,6 +213,14 @@ export class BridgeServer {
     timeoutMs: number = this.deps.toolTimeoutMs,
     sessionId?: string,
   ): Promise<unknown> {
+    let execution: BrowserRunExecution | undefined
+    try { execution = this.deps.runs?.executionFor(sessionId) }
+    catch { throw new BridgeToolError('action-failed', 'Browser run execution context is missing, expired or not permitted to dispatch. Re-establish the run context before further actions.') }
+    if (execution !== undefined) {
+      if (this.deps.dispatches === undefined) throw new BridgeToolError('internal', 'Run-scoped browser dispatch requires a durable ledger')
+      sessionId = execution.sessionId
+      signal = AbortSignal.any([signal, execution.signal])
+    }
     const conn = this.current
     if (conn === null) {
       throw new BridgeToolError('bridge-closed', 'no browser extension is connected to the bridge')
@@ -231,19 +242,20 @@ export class BridgeServer {
         ...(sessionId === undefined ? {} : { sessionId }) })).digest('hex')
       return this.sendTool(conn, id, name, copied, signal, expiresAt, { actionId, requestDigest }, sessionId)
     }
-    return this.track(this.recordAndSend(conn, id, name, copied, signal, expiresAt, sessionId))
+    return this.track(this.recordAndSend(conn, id, name, copied, signal, expiresAt, sessionId, execution))
   }
 
-  private async recordAndSend(conn: ReadyConnection, id: string, name: string, args: Record<string, unknown>, signal: AbortSignal, expiresAt: number, sessionId?: string): Promise<unknown> {
+  private async recordAndSend(conn: ReadyConnection, id: string, name: string, args: Record<string, unknown>, signal: AbortSignal, expiresAt: number, sessionId?: string, execution?: BrowserRunExecution): Promise<unknown> {
     const ledger = this.deps.dispatches!
     let action: ToolActionIdentity
     try {
       const prepared = await ledger.prepare({ requestId: id, connectionId: conn.connectionId,
         name, args, expiresAt, ...(sessionId === undefined ? {} : { sessionId }),
+        ...(execution === undefined ? {} : { runId: execution.runId, controlRevision: execution.controlRevision }),
         ...(conn.installationId === undefined ? {} : { installationId: conn.installationId }) })
       if (prepared.state !== 'prepared' || prepared.identityVersion !== 2) throw new Error('request already consumed or incompatible')
       action = { actionId: prepared.actionId, requestDigest: prepared.requestDigest }
-      let stopped = this.beforeDispatch(conn, signal, expiresAt)
+      let stopped = this.beforeDispatch(conn, signal, expiresAt, sessionId, execution)
       if (stopped !== undefined) {
         await ledger.settle(id, { state: 'not_sent', reason: stopped.reason })
         throw stopped.error
@@ -251,7 +263,7 @@ export class BridgeServer {
       // Conservative crash boundary: persistence commits before socket.send.
       // A crash between these two operations is unresolved, never safe to retry.
       await ledger.markSent(id)
-      stopped = this.beforeDispatch(conn, signal, expiresAt)
+      stopped = this.beforeDispatch(conn, signal, expiresAt, sessionId, execution)
       if (stopped !== undefined) {
         await ledger.settle(id, { state: 'not_sent', reason: stopped.reason })
         throw stopped.error
@@ -263,10 +275,15 @@ export class BridgeServer {
     return this.sendTool(conn, id, name, args, signal, expiresAt, action, sessionId)
   }
 
-  private beforeDispatch(conn: ReadyConnection, signal: AbortSignal, expiresAt: number): { reason: 'cancelled' | 'expired' | 'connection-closed'; error: BridgeToolError } | undefined {
+  private beforeDispatch(conn: ReadyConnection, signal: AbortSignal, expiresAt: number, sessionId?: string, execution?: BrowserRunExecution): { reason: 'cancelled' | 'expired' | 'connection-closed'; error: BridgeToolError } | undefined {
     if (signal.aborted) return { reason: 'cancelled', error: new BridgeToolError('bridge-closed', 'tool call cancelled before dispatch') }
     if (this.closed || this.current !== conn || conn.ws.readyState !== WebSocket.OPEN) return { reason: 'connection-closed', error: new BridgeToolError('bridge-closed', 'extension connection changed before dispatch') }
     if (Date.now() >= expiresAt) return { reason: 'expired', error: new BridgeToolError('timeout', 'browser action expired before dispatch') }
+    try {
+      if (this.deps.runs?.executionFor(sessionId) !== execution) throw new Error('execution context changed')
+    } catch {
+      return { reason: 'cancelled', error: new BridgeToolError('action-failed', 'Browser execution authority changed or a previous write requires reconciliation; no action was sent') }
+    }
     return undefined
   }
 

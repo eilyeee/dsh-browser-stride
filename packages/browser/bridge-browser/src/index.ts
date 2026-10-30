@@ -38,7 +38,7 @@ import {
 } from './protocol.ts'
 import { withSessionDeferral } from './session-deferral.ts'
 import { withSessionWorkspace } from './session-workspace.ts'
-import { purgeSessionFiles, type SessionPurgeDeps } from './session-purge.ts'
+import { purgeSessionFiles, SessionPurgeError, type SessionPurgeDeps } from './session-purge.ts'
 import { resolveToken } from './token.ts'
 import { PairingStore } from './pairing.ts'
 import { createPairingRoute, createPairingRequestRoute, createPairingOwnerRoute } from './pairing-http.ts'
@@ -49,7 +49,8 @@ import {
   type TypertGatewayLike,
 } from './remote-host-api.ts'
 import { isRecord, type BrowserHostApi } from './host-api.ts'
-import { BrowserRunStore } from './run-store.ts'
+import { BrowserRunStore, BrowserRunStoreError } from './run-store.ts'
+import { DispatchLedgerError } from './dispatch-ledger.ts'
 export { computeToolCommandDigest } from './tool-identity.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -244,7 +245,13 @@ function mountBridge(
         if (!archived.ok) throw new Error(archived.error.message)
       },
     }
-    await runs.dispatches.purgeSession(sessionId, () => purgeSessionFiles(deps, sessionId))
+    try { await runs.purgeSession(sessionId, () => purgeSessionFiles(deps, sessionId)) }
+    catch (error) {
+      if ((error instanceof BrowserRunStoreError || error instanceof DispatchLedgerError) && error.code === 'session-busy') {
+        throw new SessionPurgeError('running', 'refusing to purge a session with unfinished browser work; stop it first')
+      }
+      throw error
+    }
   }
 
   const pairing = new PairingStore(dshHomePath('browser-bridge-pairings', `${resolved.pairingProfile}.json`))
@@ -262,6 +269,7 @@ function mountBridge(
     injectBrowserSnapshot: (sessionId, snapshot) => { browserContext.inject(sessionId, snapshot) },
     purgeSession,
     dispatches: runs.dispatches,
+    runs,
   })
   lifetime.server = server
 

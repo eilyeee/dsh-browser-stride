@@ -30,7 +30,7 @@ export async function apply(ctx, config) {
     assert.equal(dispatches.get('synthetic-returned').state, 'returned')
   } else {
     for (const requestId of ['synthetic-prepared', 'synthetic-sent', 'synthetic-returned']) {
-      await dispatches.prepare({ requestId, connectionId: 'synthetic-connection', sessionId: config.sessionId,
+      await dispatches.prepare({ requestId, connectionId: 'synthetic-connection', sessionId: `${config.sessionId}-dispatch-fixture`,
         name: 'browser_click', args: { elementRef: 'synthetic-ref:1' }, expiresAt: Date.now() + 60_000 })
       if (requestId !== 'synthetic-prepared') await dispatches.markSent(requestId)
       if (requestId === 'synthetic-returned') await dispatches.settle(requestId, { state: 'returned', receipt: { ok: true } })

@@ -9,6 +9,13 @@ no release version has been assigned yet.
 
 ### Added
 
+- Trusted Host `withExecution` contexts bind real browser dispatch to a run and
+  control revision. Controls and storage faults revoke old contexts; detached
+  work and unscoped managed-session calls fail closed. Dispatch records retain
+  the run/revision without treating transport receipts as business evidence.
+  Pending or uncertain writes fence new execution; unfinished runs block session purge.
+  Task UI and receiver run/target authority are not part of this increment.
+
 - Owner-confirmed browser pairing: the extension requests a short-lived matching
   verification code, an authenticated DSH settings user approves, and only the
   requesting extension may claim its installation credential. Requests are

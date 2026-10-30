@@ -19,7 +19,8 @@
  *
  * Observation and element-reference helpers are used by the extension, and
  * run ids/revisions by the Host record service. Wire v2 carries tool-command
- * identities/digests; full run control and live-target binding remain unwired.
+ * identities/digests. Host execution scopes bind run/control metadata; receiver
+ * run authority and full live-target binding remain unwired.
  *
  * @module
  */

@@ -15,6 +15,15 @@ const input = (requestId = 'synthetic-request') => ({ requestId, connectionId: '
   args: { elementRef: 'synthetic-observation:1', text: 'synthetic-private-field-value' }, expiresAt: Date.now() + 60_000 })
 
 describe('durable browser dispatch ledger', () => {
+  it('binds trusted run metadata into the immutable transport record without adding it to the wire digest', async () => {
+    const { ledger } = await setup()
+    const request = { ...input(), runId: 'synthetic-run', controlRevision: 2 }
+    const row = await ledger.prepare(request)
+    expect(row).toMatchObject({ runId: request.runId, controlRevision: 2, sessionId: request.sessionId })
+    await expect(ledger.prepare({ ...request, controlRevision: 3 })).rejects.toMatchObject({ code: 'request-conflict' })
+    await expect(ledger.prepare({ ...input('partial-scope'), runId: 'synthetic-run' })).rejects.toThrow()
+    await expect(ledger.prepare({ ...input('missing-session'), sessionId: undefined, runId: 'synthetic-run', controlRevision: 0 })).rejects.toThrow()
+  })
   it('stores immutable identities and a digest without arguments or page results', async () => {
     const { ledger, dispatchFile } = await setup()
     const material = input()

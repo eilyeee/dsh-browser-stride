@@ -1,16 +1,17 @@
 /**
  * Durable browser-run records for trusted Host plugins. This service does not
- * dispatch tools or expose an RPC. Browser tools use its child dispatch ledger;
- * task lifecycle and business-success facts remain separate from that path.
+ * dispatch tools or expose an RPC. Trusted Host execution scopes gate browser
+ * dispatch against these records; business-success facts remain independent.
  * A storage root has one Host owner, as required by the DSH JSON domain backend.
  */
 import { randomUUID } from 'node:crypto'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { defineDomain, domainTable, type Domain, type DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import { z } from 'zod'
 import { canonicalize, asActionId, asObservationId, asControlRevision, asRunId, asSessionId, type RequestDigest, type RunId, type SessionId } from './contracts/ids.ts'
 import { BROWSER_ERROR_CODES } from './contracts/errors.ts'
 import { validateActionFact, summarizeActionFacts, type ActionFact } from './contracts/outcome.ts'
-import { assertTransition, decideCompletion, isTerminal, nextControlRevision, requestPause, requestResume, requestStop } from './contracts/run.ts'
+import { assertTransition, decideCompletion, dispatchGate, isTerminal, nextControlRevision, requestPause, requestResume, requestStop } from './contracts/run.ts'
 import { BrowserDispatchLedger } from './dispatch-ledger.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -69,6 +70,27 @@ const runSchema = z.strictObject({
 /** Version is a compare-and-swap record version; controlRevision is authority. */
 export type BrowserRunRecord = z.infer<typeof runSchema>
 
+/** Host-owned metadata; never accepted from a page, model argument or RPC. */
+export interface BrowserRunExecution {
+  readonly runId: RunId
+  readonly sessionId: SessionId
+  readonly controlRevision: number
+  readonly signal: AbortSignal
+}
+interface ExecutionContext {
+  owner: BrowserRunStore
+  execution: BrowserRunExecution
+  controller: AbortController
+  active: boolean
+}
+// Keep the async boundary across plugin reloads. A callback from a disposed
+// owner must be rejected by its successor, never fall back to legacy dispatch.
+const executionKey = Symbol.for('dsh-stride.browser-run-execution.v1')
+const hostGlobals = globalThis as typeof globalThis & { [key: symbol]: unknown }
+if (hostGlobals[executionKey] === undefined) Object.defineProperty(hostGlobals, executionKey, { value: new AsyncLocalStorage<ExecutionContext>() })
+if (!(hostGlobals[executionKey] instanceof AsyncLocalStorage)) throw new TypeError('invalid browser execution context owner')
+const executionContext = hostGlobals[executionKey] as AsyncLocalStorage<ExecutionContext>
+
 function specFor(profile: string) {
   if (!/^[a-zA-Z0-9_-]{1,64}$/.test(profile)) throw new TypeError('invalid browser run profile')
   // Encode instead of lowercasing/replacing: distinct profile names must not
@@ -79,7 +101,8 @@ type RunDomain = Domain<ReturnType<typeof specFor>>
 
 /** Stable failures contain no page content, arguments or credentials. */
 export class BrowserRunStoreError extends Error {
-  constructor(readonly code: 'not-found' | 'stale-version' | 'session-busy' | 'reconciliation-required' | 'action-conflict' | 'invalid-state' | 'storage-unavailable' | 'closed') {
+  constructor(readonly code: 'not-found' | 'stale-version' | 'session-busy' | 'reconciliation-required' | 'action-conflict' | 'invalid-state' | 'storage-unavailable' | 'closed'
+    | 'execution-context-required' | 'execution-context-expired' | 'execution-session-mismatch' | 'not-dispatching' | 'stale-control-revision') {
     super(`browser run store: ${code}`)
     this.name = 'BrowserRunStoreError'
   }
@@ -87,12 +110,13 @@ export class BrowserRunStoreError extends Error {
 
 function snapshot<T>(value: T): T { return structuredClone(value) }
 
-/** Serialized, durable lifecycle and immutable facts; never an execution permit. */
+/** Durable lifecycle/facts plus explicit Host scopes; stored state alone grants no dispatch. */
 export class BrowserRunStore {
   private tail: Promise<void> = Promise.resolve()
   private closing = false
   private writeFaulted = false
   private disposal: Promise<void> | undefined
+  private readonly executions = new Set<ExecutionContext>()
   private constructor(private readonly domain: RunDomain, readonly dispatches: BrowserDispatchLedger) {}
 
   static async open(facility: Pick<DomainFacility, 'open'>, profile: string): Promise<BrowserRunStore> {
@@ -135,6 +159,61 @@ export class BrowserRunStore {
     this.assertOpen()
     return [...this.domain.table('runs').entries()].map(([, run]) => run)
       .filter(run => sessionId === undefined || run.sessionId === sessionId).map(snapshot)
+  }
+
+  /** Await all work inside this trusted scope; detached children lose authority. */
+  async withExecution<T>(runId: RunId, controlRevision: number, work: () => T | Promise<T>): Promise<T> {
+    const run = this.executionRun(runId, controlRevision, 'all')
+    const controller = new AbortController()
+    const context: ExecutionContext = { owner: this, controller, active: true,
+      execution: Object.freeze({ runId: run.runId, sessionId: run.sessionId, controlRevision, signal: controller.signal }) }
+    this.executions.add(context)
+    try { return await executionContext.run(context, work) }
+    finally {
+      context.active = false
+      this.executions.delete(context)
+      controller.abort(new BrowserRunStoreError('execution-context-expired'))
+    }
+  }
+
+  /** Resolve the calling async chain, not the latest run belonging to a session. */
+  executionFor(sessionId?: string): BrowserRunExecution | undefined {
+    this.assertOpen()
+    if (this.writeFaulted) throw new BrowserRunStoreError('storage-unavailable')
+    const context = executionContext.getStore()
+    if (context !== undefined) {
+      if (context.owner !== this || !context.active || context.controller.signal.aborted) throw new BrowserRunStoreError('execution-context-expired')
+      const execution = context.execution
+      try { this.executionRun(execution.runId, execution.controlRevision) }
+      catch (error) { context.controller.abort(error); throw error }
+      if (sessionId !== undefined && execution.sessionId !== sessionId) throw new BrowserRunStoreError('execution-session-mismatch')
+      return execution
+    }
+    for (const [, run] of this.domain.table('runs').entries()) {
+      if (sessionId !== undefined && sessionId !== run.sessionId) continue
+      this.assertTransportReconciled(run.sessionId, 'managed')
+      if (run.recoveryRequired || summarizeActionFacts(run.facts).pendingReconciliation.length > 0) throw new BrowserRunStoreError('reconciliation-required')
+      if (!isTerminal(run.state) && run.state !== 'queued') throw new BrowserRunStoreError('execution-context-required')
+    }
+    return undefined
+  }
+
+  private executionRun(runId: RunId, controlRevision: number, pending: 'all' | 'managed' | 'none' = 'none'): BrowserRunRecord {
+    this.assertOpen()
+    if (this.writeFaulted) throw new BrowserRunStoreError('storage-unavailable')
+    const run = this.require(runId)
+    this.assertReconciled(run, pending)
+    this.assertSessionAvailable(run)
+    const decision = dispatchGate(run.state, run.controlRevision, asControlRevision(controlRevision))
+    if (decision !== 'allowed') throw new BrowserRunStoreError(decision)
+    return run
+  }
+
+  private invalidateExecutions(): void {
+    for (const context of [...this.executions]) {
+      try { this.executionRun(context.execution.runId, context.execution.controlRevision) }
+      catch (error) { context.controller.abort(error) }
+    }
   }
 
   create(input: { sessionId: SessionId; requiredCriteriaIds: readonly string[]; parentRunId?: RunId }): Promise<BrowserRunRecord> {
@@ -198,8 +277,19 @@ export class BrowserRunStore {
     })
   }
 
+  /** Serialize deletion with run controls; pausing does not release ownership. */
+  purgeSession(sessionId: string, purgeStorage: () => Promise<void>): Promise<void> {
+    return this.exclusive(async () => {
+      if ([...this.domain.table('runs').entries()].some(([, run]) => run.sessionId === sessionId && !isTerminal(run.state))) {
+        throw new BrowserRunStoreError('session-busy')
+      }
+      await this.dispatches.purgeSession(sessionId, purgeStorage)
+    })
+  }
+
   close(): Promise<void> {
     this.closing = true
+    for (const context of this.executions) context.controller.abort(new BrowserRunStoreError('closed'))
     return this.disposal ??= this.tail.then(async () => {
       try { await this.dispatches.close() } finally { await this.domain.close() }
     })
@@ -231,12 +321,20 @@ export class BrowserRunStore {
     if (others.some(other => other.recoveryRequired || summarizeActionFacts(other.facts).pendingReconciliation.length > 0)) throw new BrowserRunStoreError('reconciliation-required')
     if (others.some(other => other.state === 'running' || other.state === 'stopping')) throw new BrowserRunStoreError('session-busy')
   }
-  private assertReconciled(run: BrowserRunRecord): void {
+  private assertReconciled(run: BrowserRunRecord, pending: 'all' | 'managed' | 'none' = 'all'): void {
+    this.assertTransportReconciled(run.sessionId, pending)
     let current: BrowserRunRecord | undefined = run
     while (current !== undefined) {
       if (current.recoveryRequired || summarizeActionFacts(current.facts).pendingReconciliation.length > 0) throw new BrowserRunStoreError('reconciliation-required')
       current = current.parentRunId === undefined ? undefined : this.require(current.parentRunId)
     }
+  }
+  private assertTransportReconciled(sessionId: SessionId, pending: 'all' | 'managed' | 'none'): void {
+    const unsettled = this.dispatches.list(sessionId).some(row => row.effect === 'write' && (
+      row.state === 'unresolved' || (row.state === 'returned' && row.receipt?.ok === false)
+      || ((row.state === 'prepared' || row.state === 'sent_unconfirmed') && (pending === 'all' || (pending === 'managed' && row.runId !== undefined)))
+    ))
+    if (unsettled) throw new BrowserRunStoreError('reconciliation-required')
   }
   private async save(run: BrowserRunRecord): Promise<BrowserRunRecord> {
     const next = runSchema.parse({ ...run, version: run.version + 1, updatedAt: Math.max(Date.now(), run.updatedAt) })
@@ -244,12 +342,16 @@ export class BrowserRunStore {
     return snapshot(next)
   }
   private async persist(run: BrowserRunRecord): Promise<void> {
-    try { await this.domain.table('runs').put(run.runId, run) }
+    try {
+      await this.domain.table('runs').put(run.runId, run)
+      this.invalidateExecutions()
+    }
     catch (error) {
       // A backend error can leave the commit point unknown (e.g. rename
       // succeeded but directory fsync failed). Reopen and validate disk before
       // allowing another write; never overwrite it from a possibly stale cache.
       this.writeFaulted = true
+      this.invalidateExecutions()
       throw error
     }
   }

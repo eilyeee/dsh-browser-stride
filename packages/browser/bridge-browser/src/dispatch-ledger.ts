@@ -25,6 +25,7 @@ const recordSchema = z.strictObject({
   identityVersion: z.literal(2).optional(),
   transportDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   installationId: id.optional(), sessionId: id.optional(), name: id,
+  runId: id.optional(), controlRevision: time.optional(),
   effect: z.enum(['read', 'write']),
   state: z.enum(['prepared', 'sent_unconfirmed', 'not_sent', 'unresolved', 'returned']),
   preparedAt: time, expiresAt: time,
@@ -35,6 +36,8 @@ const recordSchema = z.strictObject({
   const marked = row.dispatchMarkedAt !== undefined
   const settled = row.settledAt !== undefined
   const valid = row.expiresAt > 0
+    && ((row.runId === undefined) === (row.controlRevision === undefined))
+    && (row.runId === undefined || (row.sessionId !== undefined && row.identityVersion === 2))
     && (row.identityVersion === 2 ? row.transportDigest !== undefined : row.transportDigest === undefined)
     && row.effect === (isReadOnlyBrowserTool(row.name) ? 'read' : 'write')
     && (row.dispatchMarkedAt === undefined || row.dispatchMarkedAt >= row.preparedAt)
@@ -112,7 +115,7 @@ export class BrowserDispatchLedger {
   }
 
   prepare(input: { requestId: string; connectionId: string; installationId?: string; sessionId?: string;
-    name: string; args: Record<string, unknown>; expiresAt: number }): Promise<DispatchRecord> {
+    name: string; args: Record<string, unknown>; expiresAt: number; runId?: string; controlRevision?: number }): Promise<DispatchRecord> {
     // Snapshot before awaiting anything. Only the digest and metadata survive
     // this method: field values, credentials and page content are not stored.
     const material = canonicalize(input)
