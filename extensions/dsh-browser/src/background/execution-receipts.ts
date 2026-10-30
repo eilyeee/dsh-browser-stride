@@ -1,5 +1,5 @@
-import { isToolActionIdentity, type ServerFrame, type ToolActionIdentity } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
-import { computeToolCommandDigest } from '@yuxianglin/dsh-bridge-browser/src/tool-identity.ts'
+import { isToolActionIdentity, type ServerFrame, type ToolActionIdentity } from '@eilyeee/dsh-stride-browser-bridge/src/protocol.ts'
+import { computeToolCommandDigest } from '@eilyeee/dsh-stride-browser-bridge/src/tool-identity.ts'
 import type { ToolAnswer } from './tools.ts'
 
 const DATABASE = 'dsh-browser-execution'

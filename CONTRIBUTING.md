@@ -45,8 +45,8 @@ pnpm run stride:baseline      # local M0 environment evidence in .stride-private
 The bridge package alone:
 
 ```sh
-pnpm --filter @yuxianglin/dsh-bridge-browser run typecheck
-pnpm --filter @yuxianglin/dsh-bridge-browser exec vitest run tests/contracts
+pnpm --filter @eilyeee/dsh-stride-browser-bridge run typecheck
+pnpm --filter @eilyeee/dsh-stride-browser-bridge exec vitest run tests/contracts
 ```
 
 ## Ground rules

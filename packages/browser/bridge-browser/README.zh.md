@@ -1,7 +1,8 @@
-# 浏览器 Bridge
+# DSH Stride 浏览器 Bridge
 
 [English](README.md) | 中文
 
+`@eilyeee/dsh-stride-browser-bridge`
 Bridge 在本机 DeepSeek Harness Host 上提供只允许回环访问、需要 token 的 WebSocket，并注册文本形式的 `browser_*` 工具；页面操作由浏览器扩展执行。安装步骤和当前限制见[仓库首页](../../../README.zh.md)。
 
 ## 配置

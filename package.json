@@ -7,10 +7,10 @@
   "private": true,
   "packageManager": "pnpm@12.15.0",
   "scripts": {
-    "build": "pnpm --filter @yuxianglin/dsh-bridge-browser run build && pnpm --filter dsh-browser-extension run build",
+    "build": "pnpm --filter @eilyeee/dsh-stride-browser-bridge run build && pnpm --filter dsh-browser-extension run build",
     "start": "dsh web",
-    "test": "pnpm --filter @yuxianglin/dsh-bridge-browser run test && pnpm --filter dsh-browser-extension run test && node --test \"scripts/tests/*.test.mjs\"",
-    "typecheck": "pnpm --filter @yuxianglin/dsh-bridge-browser run typecheck && pnpm --filter dsh-browser-extension run typecheck",
+    "test": "pnpm --filter @eilyeee/dsh-stride-browser-bridge run test && pnpm --filter dsh-browser-extension run test && node --test \"scripts/tests/*.test.mjs\"",
+    "typecheck": "pnpm --filter @eilyeee/dsh-stride-browser-bridge run typecheck && pnpm --filter dsh-browser-extension run typecheck",
     "check:runtime": "node scripts/check-runtime.mjs",
     "check:publication": "node scripts/check-publication-history.mjs",
     "test:smoke": "node scripts/smoke-runtime.mjs",

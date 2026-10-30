@@ -245,7 +245,8 @@ fi
 EXT="$ROOT/extensions/dsh-browser"
 PLUGIN="$ROOT/packages/browser/bridge-browser"
 WEB_PROFILE_MANIFEST="$DSH_HOME_DIR/profiles/web/package.json"
-LEGACY_PLUGIN="@deepseek-ai/dsh-bridge-browser"
+BRIDGE_PLUGIN="@eilyeee/dsh-stride-browser-bridge"
+LEGACY_PLUGINS=("@yuxianglin/dsh-bridge-browser" "@deepseek-ai/dsh-bridge-browser")
 
 profile_has_dependency() {
   local manifest="$1"
@@ -264,13 +265,16 @@ require_command rsync "未找到 rsync；请先安装 rsync。" "rsync was not f
 
 print_step 1 "构建浏览器桥" "Build the browser bridge"
 (cd "$ROOT" && pnpm install --frozen-lockfile >/dev/null 2>&1)
-(cd "$ROOT" && pnpm --filter @yuxianglin/dsh-bridge-browser run build >/dev/null 2>&1)
+(cd "$ROOT" && pnpm --filter @eilyeee/dsh-stride-browser-bridge run build >/dev/null 2>&1)
 
 print_step 2 "注册到本机 web profile" "Register with the local web profile"
-if profile_has_dependency "$WEB_PROFILE_MANIFEST" "$LEGACY_PLUGIN"; then
-  (cd "$ROOT" && pnpm exec dsh plugin --profile web remove "$LEGACY_PLUGIN" >/dev/null)
-fi
-(cd "$ROOT" && pnpm exec dsh plugin --profile web add -w "@yuxianglin/dsh-bridge-browser@link:$PLUGIN" >/dev/null)
+# Keep the existing registration until the new package has installed successfully.
+(cd "$ROOT" && pnpm exec dsh plugin --profile web add -w "$BRIDGE_PLUGIN@link:$PLUGIN" >/dev/null)
+for legacy_plugin in "${LEGACY_PLUGINS[@]}"; do
+  if profile_has_dependency "$WEB_PROFILE_MANIFEST" "$legacy_plugin"; then
+    (cd "$ROOT" && pnpm exec dsh plugin --profile web remove "$legacy_plugin" >/dev/null)
+  fi
+done
 
 print_step 3 "构建 Chrome 扩展" "Build the Chrome extension"
 (cd "$ROOT" && pnpm --filter dsh-browser-extension run build >/dev/null 2>&1)

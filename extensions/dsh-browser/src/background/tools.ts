@@ -8,9 +8,9 @@
  * @module
  */
 
-import { DEFAULT_SNAPSHOT_MAX_CHARS } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
-import type { ToolError } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
-import { parseElementRef } from '@yuxianglin/dsh-bridge-browser/src/contracts/ids.ts'
+import { DEFAULT_SNAPSHOT_MAX_CHARS } from '@eilyeee/dsh-stride-browser-bridge/src/protocol.ts'
+import type { ToolError } from '@eilyeee/dsh-stride-browser-bridge/src/protocol.ts'
+import { parseElementRef } from '@eilyeee/dsh-stride-browser-bridge/src/contracts/ids.ts'
 import {
   allocateFrameBudgets,
   frameDocumentKey,

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type MouseEvent } from 'react'
-import { BRIDGE_RUN_LIST_METHOD, BRIDGE_RUN_CONTROL_METHOD, type BrowserRunList, type BrowserRunSummary, type PanelRunControl } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+import { BRIDGE_RUN_LIST_METHOD, BRIDGE_RUN_CONTROL_METHOD, type BrowserRunList, type BrowserRunSummary, type PanelRunControl } from '@eilyeee/dsh-stride-browser-bridge/src/protocol.ts'
 import { PanelRpcError, type PanelApi } from './api.ts'
 import { parseBrowserRuns, type BrowserRunCopy } from './browser-runs.ts'
 

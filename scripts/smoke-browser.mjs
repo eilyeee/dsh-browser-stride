@@ -268,7 +268,7 @@ async function verifyPersistentExecutionFence() {
 
 try {
   await mkdir(home, { recursive: true })
-  await command(['plugin', '--profile', 'web', 'add', '-w', `@yuxianglin/dsh-bridge-browser@link:${join(repoRoot, 'packages/browser/bridge-browser')}`])
+  await command(['plugin', '--profile', 'web', 'add', '-w', `@eilyeee/dsh-stride-browser-bridge@link:${join(repoRoot, 'packages/browser/bridge-browser')}`])
   site = await startBenchmarkSite({ port: 0 })
   const port = await freePort()
   host = await startDshBackend({

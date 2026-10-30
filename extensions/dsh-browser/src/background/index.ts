@@ -37,9 +37,9 @@ import {
   isRespondResult,
   type BridgeCaps,
   type RespondResult,
-} from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
-import type { ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
-import { BRIDGE_CONFIG_PATH, BRIDGE_PATH } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+} from '@eilyeee/dsh-stride-browser-bridge/src/protocol.ts'
+import type { ServerFrame } from '@eilyeee/dsh-stride-browser-bridge/src/protocol.ts'
+import { BRIDGE_CONFIG_PATH, BRIDGE_PATH } from '@eilyeee/dsh-stride-browser-bridge/src/protocol.ts'
 import { BridgeClient, type BridgeState } from './bridge.ts'
 import { readBridgeCredential, writeBridgeCredential } from './credential-store.ts'
 import { needsWriteTurn, WriteQueue } from './write-queue.ts'

@@ -21,7 +21,7 @@
 
 - insert:
     - id: bridge-browser
-      name: '@yuxianglin/dsh-bridge-browser'
+      name: '@eilyeee/dsh-stride-browser-bridge'
       config:
         token: !!js process.env.DSH_EXT_TOKEN
         sessionWorkspacePath: !!js process.env.DSH_BROWSER_SESSION_WORKSPACE

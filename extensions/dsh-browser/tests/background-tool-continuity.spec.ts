@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { BRIDGE_PROTOCOL_VERSION } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+import { BRIDGE_PROTOCOL_VERSION } from '@eilyeee/dsh-stride-browser-bridge/src/protocol.ts'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { wireToolCall } from './wire-tool-call.ts'
 import { PAGE_SESSION_CONTEXT_STORAGE_KEY } from '../src/background/session-continuity.ts'

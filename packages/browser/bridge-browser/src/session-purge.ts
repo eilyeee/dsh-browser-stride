@@ -8,7 +8,7 @@
  * exact-name directories two levels below the sessions root is removed, and
  * running sessions are refused before anything touches the disk.
  *
- * @module @yuxianglin/dsh-bridge-browser/src/session-purge
+ * @module @eilyeee/dsh-stride-browser-bridge/src/session-purge
  */
 
 import { lstat, readdir, rm } from 'node:fs/promises'

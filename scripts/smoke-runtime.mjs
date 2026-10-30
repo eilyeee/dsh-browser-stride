@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -193,7 +193,21 @@ try {
   await mkdir(home, { recursive: true })
   await mkdir(legacyDirectory, { recursive: true })
   await writeFile(legacyFile, legacyBytes)
-  await command(['plugin', '--profile', 'web', 'add', '-w', `@yuxianglin/dsh-bridge-browser@link:${bridge}`])
+  // Exercise the real package-name migration with one unchanged temporary
+  // DSH home, including the saved installation credential and run domains.
+  const legacyName = '@yuxianglin/dsh-bridge-browser'
+  const currentName = '@eilyeee/dsh-stride-browser-bridge'
+  const legacyBridge = join(temp, 'legacy-bridge')
+  await mkdir(legacyBridge)
+  const manifest = JSON.parse(await readFile(join(bridge, 'package.json'), 'utf8'))
+  await writeFile(join(legacyBridge, 'package.json'), JSON.stringify({
+    name: legacyName, version: manifest.version, type: 'module', main: manifest.main,
+    exports: manifest.exports, dsh: manifest.dsh, peerDependencies: manifest.peerDependencies,
+    peerDependenciesMeta: manifest.peerDependenciesMeta,
+  }))
+  await symlink(join(bridge, 'lib'), join(legacyBridge, 'lib'), 'junction')
+  await writeFile(join(legacyBridge, 'cordis.patch.yml'), (await readFile(join(bridge, 'cordis.patch.yml'), 'utf8')).replaceAll(currentName, legacyName))
+  await command(['plugin', '--profile', 'web', 'add', '-w', `${legacyName}@link:${legacyBridge}`])
   let rpc = await start(false)
   const created = await rpc('session.create', { sessionId, cwd: temp })
   assert.equal(created.sessionId, sessionId)
@@ -214,6 +228,20 @@ try {
   assert.equal(migrated.events.find(({ event }) => event.type === 'user/message')?.event.data.content[0].text, 'Saved browser conversation')
   assert.deepEqual(await readFile(legacyFile), legacyBytes, 'migration must preserve the original V2 log')
   await stop()
+  const pairingPath = join(home, 'browser-bridge-pairings/web.json')
+  const savedPairing = await readFile(pairingPath)
+  const legacyManifestPath = join(legacyBridge, 'package.json')
+  const inPlaceManifest = JSON.parse(await readFile(legacyManifestPath, 'utf8'))
+  await writeFile(legacyManifestPath, JSON.stringify({ ...inPlaceManifest, name: currentName }))
+  await writeFile(join(legacyBridge, 'cordis.patch.yml'), await readFile(join(bridge, 'cordis.patch.yml')))
+  await command(['plugin', '--profile', 'web', 'add', '-w', `${currentName}@link:${bridge}`])
+  await command(['plugin', '--profile', 'web', 'remove', legacyName])
+  const migratedProfile = JSON.parse(await readFile(join(home, 'profiles/web/package.json'), 'utf8'))
+  assert.equal(Object.hasOwn(migratedProfile.dependencies, legacyName), false)
+  assert.ok(Object.hasOwn(migratedProfile.dependencies, currentName))
+  assert.equal(migratedProfile.dsh.profile.bundles.filter(name => name === currentName).length, 1)
+  assert.equal(migratedProfile.dsh.profile.bundles.includes(legacyName), false)
+  assert.deepEqual(await readFile(pairingPath), savedPairing, 'renaming the package must preserve the pairing record bytes')
   rpc = await start(true)
   assert.equal((await observation()).source, 'prepared')
   assert.deepEqual((await rpc('session.models', { sessionId })).current, selectedModel)
@@ -237,7 +265,7 @@ try {
   const closed = once(socket, 'close')
   assert.match(await pairCommand(bridgeBase, 'revoke', installationId), /Installation revoked/)
   assert.equal((await closed)[0], 4000)
-  console.log('Real DSH smoke passed: discovery, pairing/revocation, Session history/models/migration, snapshots, prepared projections, durable run facts and dispatch-state recovery without replay (no model)')
+  console.log('Real DSH smoke passed: package rename with saved pairing, discovery, pairing/revocation, Session history/models/migration, snapshots, prepared projections, durable run facts and dispatch-state recovery without replay (no model)')
   succeeded = true
 } catch (error) {
   // The Host may print an ephemeral launch URL; never publish its credential.

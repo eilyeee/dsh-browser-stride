@@ -6,6 +6,8 @@ DSH Stride is a community product branch of [dsh-browser](https://github.com/omd
 
 The project is in **M0: compatibility and baseline verification**. The upstream text-based browser tools and side-panel chat are available as a development baseline. Connection, installation pairing and target checks have been hardened. There is no supported release yet.
 
+The Host component is `@eilyeee/dsh-stride-browser-bridge`; its source remains in `packages/browser/bridge-browser/`. The extension is a separate component.
+
 ## Requirements
 
 - Node.js 24.15 or later in the supported Node 24 line; the exact supported range is in `package.json`.
@@ -33,6 +35,8 @@ Manual pairing remains available: run `pnpm run pair:browser` in another termina
 ### Updating
 
 For the current source installation, pull into the original checkout, install locked dependencies using the required Node/pnpm versions, and run `pnpm build`. Restart the Host, click **Reload** at `chrome://extensions/`, and refresh target pages. Keeping the original extension installation, browser profile and Host data preserves pairing. Changing the extension installation identity or clearing data requires pairing again. Reload Firefox's temporary add-on as well. Build the Bridge and extension from the same checkout; incompatible peers identify which component needs updating.
+
+For the package-name migration, run the installer once after pulling and building (`./scripts/install.sh`, or `.\scripts\install.ps1` on Windows). It registers `@eilyeee/dsh-stride-browser-bridge`, then removes the legacy `@yuxianglin/dsh-bridge-browser` and `@deepseek-ai/dsh-bridge-browser` registrations. Keep the existing DSH home and extension installation to preserve pairing and task records.
 
 DSH supports GitHub plugins, but this repository root is currently a development workspace, without a release package for direct GitHub plugin installation or a browser-store automatic-update channel. Installing a Host plugin from GitHub does not install or update the browser extension.
 

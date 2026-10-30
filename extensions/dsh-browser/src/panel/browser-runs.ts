@@ -1,4 +1,4 @@
-import { BROWSER_RUN_LIST_LIMIT, BROWSER_RUN_STATES, type BrowserRunList, type BrowserRunSummary, type PanelRunControl } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+import { BROWSER_RUN_LIST_LIMIT, BROWSER_RUN_STATES, type BrowserRunList, type BrowserRunSummary, type PanelRunControl } from '@eilyeee/dsh-stride-browser-bridge/src/protocol.ts'
 
 export interface BrowserRunCopy {
   title: string

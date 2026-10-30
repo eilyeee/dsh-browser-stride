@@ -2,6 +2,8 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 
+const BRIDGE_PACKAGES = ['@eilyeee/dsh-stride-browser-bridge', '@yuxianglin/dsh-bridge-browser', '@deepseek-ai/dsh-bridge-browser']
+
 export function profileRoot(env = process.env, home = homedir()) {
   const configured = env.DSH_HOME?.trim()
   const dshHome = !configured ? join(home, '.dsh')
@@ -22,8 +24,8 @@ export function detectProfiles(env = process.env, home = homedir()) {
       try { manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) } catch { /* no readable manifest */ }
       const dependencies = Object.keys(manifest.dependencies ?? {})
       const bundles = manifest.dsh?.profile?.bundles ?? []
-      const bridgeInstalled = dependencies.some(name => name.includes('dsh-bridge-browser'))
-        || existsSync(join(dir, 'node_modules', '@yuxianglin', 'dsh-bridge-browser'))
+      const bridgeInstalled = BRIDGE_PACKAGES.some(name => dependencies.includes(name)
+        || existsSync(join(dir, 'node_modules', ...name.split('/'))))
       return { name: entry.name, bundles, dependencies, bridgeInstalled, hasPatchLayer: existsSync(join(dir, 'cordis.patch.yml')) }
     })
 }

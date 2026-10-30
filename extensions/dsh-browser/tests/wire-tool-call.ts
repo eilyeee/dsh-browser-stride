@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { toolCommandMaterial } from '@yuxianglin/dsh-bridge-browser/src/tool-identity.ts'
+import { toolCommandMaterial } from '@eilyeee/dsh-stride-browser-bridge/src/tool-identity.ts'
 
 /** Test Host fixture: emit a valid v2 identity unless testing one explicitly. */
 export function wireToolCall(frame: unknown): unknown {

@@ -7,6 +7,13 @@ no release version has been assigned yet.
 
 ## [Unreleased]
 
+### Changed
+
+- The Host component is now `@eilyeee/dsh-stride-browser-bridge`. Workspace
+  imports, the Host settings module and installers use this name. Installers
+  migrate both legacy package registrations after installing the new package;
+  pairing namespaces, run domains and extension identity remain unchanged.
+
 ### Added
 
 - The side panel displays bounded metadata for existing Host-owned browser runs,

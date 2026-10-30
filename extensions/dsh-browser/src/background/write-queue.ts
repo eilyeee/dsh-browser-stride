@@ -1,6 +1,6 @@
 // A read does not compete for the browser's write lease. Unknown future tools
 // default to serialization until they are explicitly classified as read-only.
-import { isReadOnlyBrowserTool } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+import { isReadOnlyBrowserTool } from '@eilyeee/dsh-stride-browser-bridge/src/protocol.ts'
 
 export function needsWriteTurn(name: string): boolean {
   return !isReadOnlyBrowserTool(name)

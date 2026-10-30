@@ -1,4 +1,4 @@
-import { BRIDGE_PAIRING_REQUEST_PATH, BRIDGE_PROTOCOL_VERSION } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+import { BRIDGE_PAIRING_REQUEST_PATH, BRIDGE_PROTOCOL_VERSION } from '@eilyeee/dsh-stride-browser-bridge/src/protocol.ts'
 import { localBridgeUrl } from './bridge-address.ts'
 
 export interface BrowserPairingStatus {

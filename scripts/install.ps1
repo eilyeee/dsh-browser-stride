@@ -21,8 +21,8 @@ $ProgressPreference = 'SilentlyContinue'
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { }
 
 $DshHomeDir = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $HOME '.dsh' }
-$LegacyPlugin = '@deepseek-ai/dsh-bridge-browser'
-$BridgePlugin = '@yuxianglin/dsh-bridge-browser'
+$LegacyPlugins = @('@yuxianglin/dsh-bridge-browser', '@deepseek-ai/dsh-bridge-browser')
+$BridgePlugin = '@eilyeee/dsh-stride-browser-bridge'
 
 function Write-Step {
   param([int]$Number, [string]$Zh, [string]$En)
@@ -336,12 +336,6 @@ if (-not (Test-Path -LiteralPath $WebProfileManifest -PathType Leaf)) {
     -FailZh "初始化 web profile 失败。" -FailEn "Initializing the web profile failed."
 }
 
-if (Test-ProfileDependency -Manifest $WebProfileManifest -PackageName $LegacyPlugin) {
-  Invoke-Quiet -WorkingDirectory $WebProfileDir -Command 'pnpm' `
-    -Arguments @('remove', '-w', $LegacyPlugin) `
-    -FailZh "移除旧插件失败。" -FailEn "Removing the legacy plugin failed."
-}
-
 # A profile-local junction keeps the link spec free of absolute Windows paths.
 # This avoids cmd.exe splitting a checkout path that contains spaces.
 $ProfileSourceLink = Join-Path $WebProfileDir '.dsh-browser-source'
@@ -366,9 +360,18 @@ Invoke-Quiet -WorkingDirectory $WebProfileDir -Command 'pnpm' `
   -Arguments @('add', '-w', 'link:./.dsh-browser-source') `
   -FailZh "注册桥插件失败。" -FailEn "Registering the bridge plugin failed."
 
+foreach ($LegacyPlugin in $LegacyPlugins) {
+  if (Test-ProfileDependency -Manifest $WebProfileManifest -PackageName $LegacyPlugin) {
+    Invoke-Quiet -WorkingDirectory $WebProfileDir -Command 'pnpm' `
+      -Arguments @('remove', '-w', $LegacyPlugin) `
+      -FailZh "移除旧插件失败。" -FailEn "Removing the legacy plugin failed."
+  }
+}
+
 # The direct pnpm registration above bypasses dsh's bundle-roster update.
 $ProfileManifest = Get-Content -LiteralPath $WebProfileManifest -Raw -Encoding UTF8 | ConvertFrom-Json
-$Bundles = @($ProfileManifest.dsh.profile.bundles) | Where-Object { $_ -ne $LegacyPlugin }
+$Bundles = @($ProfileManifest.dsh.profile.bundles) | Where-Object { $_ -and $_ -ne $BridgePlugin -and $_ -notin $LegacyPlugins } | Select-Object -Unique
+$Bundles = @($Bundles)
 if ($Bundles -notcontains $BridgePlugin) { $Bundles += $BridgePlugin }
 $ProfileManifest.dsh.profile.bundles = $Bundles
 $ProfileJson = ($ProfileManifest | ConvertTo-Json -Depth 20) + "`n"

@@ -1,6 +1,6 @@
 {
-  "name": "@yuxianglin/dsh-bridge-browser",
-  "description": "Bridge plugin: token-authenticated WebSocket carrier for the browser extension plus text-only browser_* tools that drive the user's Chrome via that extension",
+  "name": "@eilyeee/dsh-stride-browser-bridge",
+  "description": "DSH Stride Host bridge: authenticated browser connection, text-only browser tools and run controls",
   "version": "0.0.7",
   "author": "Yuxiang Lin",
   "license": "MIT",

@@ -6,7 +6,7 @@ import type { PanelApi } from '../src/panel/api.ts'
 import { BrowserRuns } from '../src/panel/BrowserRuns.tsx'
 import { parseBrowserRuns } from '../src/panel/browser-runs.ts'
 import { PANEL_COPY } from '../src/panel/strings.ts'
-import { BRIDGE_RUN_LIST_METHOD, BRIDGE_RUN_CONTROL_METHOD, type BrowserRunSummary } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+import { BRIDGE_RUN_LIST_METHOD, BRIDGE_RUN_CONTROL_METHOD, type BrowserRunSummary } from '@eilyeee/dsh-stride-browser-bridge/src/protocol.ts'
 
 function item(sessionId = 'session-a', state: BrowserRunSummary['state'] = 'running'): BrowserRunSummary {
   return { runId: 'run_synthetic', sessionId, state, version: 1, controlRevision: 0, updatedAt: 1,
