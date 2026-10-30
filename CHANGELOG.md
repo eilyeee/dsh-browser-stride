@@ -9,6 +9,13 @@ no release version has been assigned yet.
 
 ### Added
 
+- The Host rejects unversioned and incompatible extension handshakes before
+  authentication, preserving its current connection and unconsumed pairing code.
+- The extension rejects incompatible Host handshakes before accepting a new
+  credential or dispatching tools, with localized upgrade guidance and no
+  automatic reconnect loop.
+- Snapshot limits are bounded by both peers' handshake offers; the extension
+  rejects an acknowledgement that exceeds its offer.
 - Execution contract skeleton in
   `packages/browser/bridge-browser/src/contracts/`: identity layers,
   observation envelopes, action facts, run lifecycle, error taxonomy and

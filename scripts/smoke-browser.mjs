@@ -5,11 +5,12 @@ import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
+import { createServer as createHttpServer } from 'node:http'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { startDshBackend } from '../benchmark/lib/dsh-process.mjs'
 import { startExtensionBrowser } from '../benchmark/lib/extension-browser.mjs'
 import { makeTaskInstance } from '../benchmark/lib/tasks.mjs'
@@ -18,6 +19,9 @@ import { startBenchmarkSite } from '../benchmark/site/server.mjs'
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const benchmarkRoot = join(repoRoot, 'benchmark')
 const require = createRequire(join(repoRoot, 'package.json'))
+const bridgeRequire = createRequire(join(repoRoot, 'packages/browser/bridge-browser/package.json'))
+const { WebSocketServer } = bridgeRequire('ws')
+const { BRIDGE_PROTOCOL_VERSION } = await import(pathToFileURL(join(repoRoot, 'packages/browser/bridge-browser/lib/protocol.js')).href)
 const cli = join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'lib/bin.js')
 const root = await mkdtemp(join(tmpdir(), 'stride-browser-smoke-'))
 const home = join(root, 'home')
@@ -71,6 +75,61 @@ async function waitForResult() {
   throw new Error('timed out waiting for the Host browser tools')
 }
 
+async function verifyIncompatibleHost(protocolVersion, expectedState) {
+  let connections = 0
+  let toolResults = 0
+  let url
+  const server = createHttpServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ wsUrl: url }))
+  })
+  const sockets = new WebSocketServer({ server })
+  sockets.on('connection', socket => {
+    connections += 1
+    socket.on('message', bytes => {
+      const frame = JSON.parse(bytes.toString())
+      if (frame.t === 'tool.result') toolResults += 1
+      if (frame.t !== 'hello') return
+      socket.send(JSON.stringify({ t: 'hello.ok', caps: frame.caps,
+        ...(protocolVersion === undefined ? {} : { protocolVersion }) }))
+      socket.send(JSON.stringify({ t: 'tool.call', id: 'rejected-navigation', name: 'browser_navigate',
+        args: { url: `${site.origin}/health` }, expiresAt: Date.now() + 10000 }))
+    })
+  })
+  try {
+    await new Promise((resolveListen, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', resolveListen)
+    })
+    url = `ws://127.0.0.1:${server.address().port}/ext/bridge`
+    const originalTarget = browser.target.url()
+    await browser.panel.evaluate(({ bridgeUrl, state }) => new Promise((resolveStatus, reject) => {
+      const port = window.__dshBenchmarkPort
+      const finish = (error) => {
+        clearTimeout(timer)
+        port.onMessage.removeListener(onMessage)
+        error ? reject(error) : resolveStatus()
+      }
+      const onMessage = message => {
+        if (message?.type === 'status' && message.state === state) finish()
+      }
+      const timer = setTimeout(() => finish(new Error('compatibility status did not arrive')), 10000)
+      port.onMessage.addListener(onMessage)
+      port.postMessage({ type: 'settings', settings: { bridgeUrl, token: 'synthetic-compatibility-token' } })
+    }), { bridgeUrl: url, state: expectedState })
+    await browser.panel.waitForFunction(() => /更新|Update/u.test(document.querySelector('.connection-label')?.textContent ?? ''))
+    assert.match(await browser.panel.locator('.connection-label').textContent(), /更新|Update/u)
+    await delay(1200)
+    assert.equal(connections, 1, 'incompatible peers must not reconnect automatically')
+    assert.equal(toolResults, 0, 'an incompatible peer must not dispatch tools')
+    assert.equal(browser.target.url(), originalTarget, 'rejected tools must not navigate the page')
+  } finally {
+    for (const socket of sockets.clients) socket.terminate()
+    await new Promise(resolveClose => sockets.close(resolveClose))
+    await new Promise(resolveClose => server.close(resolveClose))
+  }
+}
+
 try {
   await mkdir(home, { recursive: true })
   await command(['plugin', '--profile', 'web', 'add', '-w', `@yuxianglin/dsh-bridge-browser@link:${join(repoRoot, 'packages/browser/bridge-browser')}`])
@@ -103,7 +162,9 @@ try {
   assert.equal(await host.revokeInstallation(installations[0].installationId), true)
   assert.equal((await host.listInstallations()).length, 0)
   await browser.panel.locator('.connection .dot.connected').waitFor({ state: 'hidden', timeout: 15_000 })
-  console.log('Browser smoke passed: real DSH tool runtime, installation pairing and revocation, extension snapshots and writes, independently verified local site state (no model)')
+  await verifyIncompatibleHost(undefined, 'update-host')
+  await verifyIncompatibleHost(BRIDGE_PROTOCOL_VERSION + 1, 'update-extension')
+  console.log('Browser smoke passed: real DSH tool runtime, pairing/revocation, snapshots and writes, independent site state, and incompatible-host rejection without tool dispatch or reconnect (no model)')
 } finally {
   await browser?.close().catch(() => {})
   await host?.close().catch(() => {})

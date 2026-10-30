@@ -194,6 +194,9 @@ const EN: PanelCopy = {
     connecting: 'Connecting…',
     reconnecting: 'Reconnecting…',
     stopped: 'Disconnected',
+    'update-host': 'Update the DSH Bridge to connect',
+    'update-extension': 'Update this extension to connect',
+    incompatible: 'Incompatible Bridge; rebuild and update both components',
   },
   approval: {
     eyebrow: 'Security check',
@@ -402,6 +405,9 @@ const ZH: PanelCopy = {
     connecting: '连接中…',
     reconnecting: '重连中…',
     stopped: '未连接',
+    'update-host': '请更新 DSH Bridge 后重试',
+    'update-extension': '请更新浏览器扩展后重试',
+    incompatible: 'Bridge 不兼容，请重新构建并更新两端',
   },
   approval: {
     eyebrow: '安全检查',

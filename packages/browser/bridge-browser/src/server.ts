@@ -25,6 +25,8 @@ import type { BrowserHostApi } from './host-api.ts'
 import {
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
   BRIDGE_SESSION_PURGE_METHOD,
+  BRIDGE_PROTOCOL_VERSION,
+  PROTOCOL_MISMATCH_CLOSE_CODE,
   HELLO_TIMEOUT_MS,
   PING_INTERVAL_MS,
   parseBridgeFrame,
@@ -296,6 +298,7 @@ export class BridgeServer {
     }, this.deps.helloTimeoutMs ?? HELLO_TIMEOUT_MS)
 
     const onMessage = (data: Buffer | ArrayBuffer | Buffer[]): void => {
+      if (ws.readyState !== WebSocket.OPEN) return
       const text = messageToText(data)
       const frame = parseBridgeFrame(text)
       if (frame === undefined) {
@@ -312,6 +315,20 @@ export class BridgeServer {
           ws.close(1008, 'hello first')
           return
         }
+        // Check compatibility before consuming a pairing code or replacing the
+        // current connection. A rejected peer acquires no authority.
+        if (frame.protocolVersion !== BRIDGE_PROTOCOL_VERSION) {
+          const upgrade = frame.protocolVersion !== undefined && frame.protocolVersion > BRIDGE_PROTOCOL_VERSION ? 'host' : 'extension'
+          sendFrame(ws, { t: 'error', code: `protocol-upgrade-${upgrade}`,
+            message: `Incompatible browser bridge protocol. Update the ${upgrade} and build Bridge and extension from the same checkout.` })
+          ws.close(PROTOCOL_MISMATCH_CLOSE_CODE, 'incompatible protocol')
+          return
+        }
+        const caps: BridgeCaps = {
+          textOnly: true,
+          snapshotMaxChars: Math.min(this.deps.caps.snapshotMaxChars, frame.caps.snapshotMaxChars),
+          maxInteractiveItems: Math.min(this.deps.caps.maxInteractiveItems, frame.caps.maxInteractiveItems),
+        }
         authenticating = true
         // Origin headers are not credentials: a local process can forge them.
         const authentication: Promise<{ credential?: string } | undefined> = this.deps.pairing === undefined
@@ -325,7 +342,7 @@ export class BridgeServer {
           if (helloTimer === undefined || ws.readyState !== WebSocket.OPEN) return
           clearTimeout(helloTimer)
           helloTimer = undefined
-          this.promote(ws, remoteAddress, frame.installationId, result.credential)
+          this.promote(ws, remoteAddress, caps, frame.installationId, result.credential)
         }, () => { ws.close(1011, 'authentication unavailable') })
         return
       }
@@ -343,7 +360,7 @@ export class BridgeServer {
   }
 
   /** Promote an authenticated socket to the single active slot. */
-  private promote(ws: WebSocket, remoteAddress: string | undefined, installationId?: string, credential?: string): void {
+  private promote(ws: WebSocket, remoteAddress: string | undefined, caps: BridgeCaps, installationId?: string, credential?: string): void {
     this.replaceConnection()
     const abort = new AbortController()
     const ping = setInterval(() => { sendFrame(ws, { t: 'ping' }) }, this.deps.pingIntervalMs ?? PING_INTERVAL_MS)
@@ -368,7 +385,7 @@ export class BridgeServer {
     })()
     this.current = { ws, remoteAddress, abort, pump, ping, orderedSessionRpcs: new Map(),
       ...(installationId === undefined ? {} : { installationId }) }
-    sendFrame(ws, { t: 'hello.ok', caps: this.deps.caps, ...(credential === undefined ? {} : { credential }) })
+    sendFrame(ws, { t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps, ...(credential === undefined ? {} : { credential }) })
     ws.once('close', () => {
       clearInterval(ping)
       abort.abort()

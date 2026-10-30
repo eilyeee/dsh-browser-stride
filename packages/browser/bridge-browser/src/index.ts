@@ -106,7 +106,7 @@ type ResolvedConfig = Required<Omit<Config, 'token'>> & Pick<Config, 'token'>
 
 /** Configured budgets must be positive integers. Exported for validation tests. */
 export function assertPositiveInteger(name: string, value: number): void {
-  if (!Number.isInteger(value) || value < 1) {
+  if (!Number.isSafeInteger(value) || value < 1) {
     throw new Error(`bridge-browser: ${name} must be a positive integer`)
   }
 }

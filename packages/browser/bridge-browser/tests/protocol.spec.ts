@@ -2,6 +2,20 @@ import { describe, expect, it } from 'vitest'
 import { isClientFrame, isServerFrame, parseBridgeFrame } from '../src/protocol.ts'
 
 describe('parseBridgeFrame', () => {
+  it('preserves declared wire versions and rejects invalid versions and budgets', () => {
+    const caps = { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 }
+    for (const t of ['hello', 'hello.ok']) {
+      const frame = { t, token: 'test', caps, protocolVersion: 1 }
+      expect(parseBridgeFrame(JSON.stringify(frame))).toMatchObject({ t, protocolVersion: 1 })
+      for (const protocolVersion of [null, '1', 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+        expect(parseBridgeFrame(JSON.stringify({ ...frame, protocolVersion }))).toBeUndefined()
+      }
+      for (const maxInteractiveItems of [0, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+        expect(parseBridgeFrame(JSON.stringify({ ...frame, caps: { ...caps, maxInteractiveItems } }))).toBeUndefined()
+      }
+    }
+  })
+
   it('parses a valid hello frame', () => {
     const frame = parseBridgeFrame(JSON.stringify({ t: 'hello', token: 'abc123', caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } }))
     expect(frame).toEqual({ t: 'hello', token: 'abc123', caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })

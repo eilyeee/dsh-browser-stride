@@ -11,6 +11,7 @@
  * while these cases verify Remote transport and Loader topology.
  */
 
+import { BRIDGE_PROTOCOL_VERSION } from '../src/protocol.ts'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -227,7 +228,7 @@ async function connectReady(port: number): Promise<Awaited<ReturnType<typeof con
   expect(response.status).toBe(200)
   const { code } = await response.json() as { code: string }
   const client = await connect(port)
-  send(client.ws, { t: 'hello', token: code, installationId: 'composition-installation-123456', caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
+  send(client.ws, { t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: code, installationId: 'composition-installation-123456', caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
   await Promise.race([
     waitFor(() => client.frames.some((f) => f.t === 'hello.ok')),
     client.closed.then(({ code, reason }) => {
@@ -238,6 +239,26 @@ async function connectReady(port: number): Promise<Awaited<ReturnType<typeof con
 }
 
 describe('real Loader composition', () => {
+  it('rejects legacy clients before consuming a one-time pairing code', async () => {
+    const { port } = await loadComposition()
+    const response = await fetch(`http://127.0.0.1:${port}/ext/bridge-pairing`, {
+      method: 'POST', headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'issue' }),
+    })
+    const { code } = await response.json() as { code: string }
+    const hello = { t: 'hello' as const, token: code, installationId: 'compatibility-installation-123456',
+      caps: { textOnly: true as const, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } }
+    const legacy = await connect(port)
+    send(legacy.ws, hello)
+    expect((await legacy.closed).code).toBe(4003)
+    expect(legacy.frames).toContainEqual(expect.objectContaining({ t: 'error', code: 'protocol-upgrade-extension' }))
+    const compatible = await connect(port)
+    send(compatible.ws, { ...hello, protocolVersion: BRIDGE_PROTOCOL_VERSION })
+    await waitFor(() => compatible.frames.some(frame => frame.t === 'hello.ok'))
+    expect(compatible.frames.find(frame => frame.t === 'hello.ok')).toMatchObject({ credential: expect.any(String) })
+    compatible.ws.close()
+  })
+
   it('keeps administration local and separate, and disconnects a revoked installation', async () => {
     const { port } = await loadComposition()
     const endpoint = `http://127.0.0.1:${port}/ext/bridge-pairing`
@@ -247,7 +268,7 @@ describe('real Loader composition', () => {
     expect((await request({ action: 'issue' })).status).toBe(401)
     expect((await request({ action: 'issue' }, { authorization: `Bearer ${TOKEN}`, origin: 'https://example.com' })).status).toBe(403)
     const intruder = await connect(port)
-    send(intruder.ws, { t: 'hello', token: TOKEN, installationId: 'composition-installation-123456', caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
+    send(intruder.ws, { t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: TOKEN, installationId: 'composition-installation-123456', caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
     expect((await intruder.closed).code).toBe(4002)
 
     const client = await connectReady(port)
@@ -259,7 +280,7 @@ describe('real Loader composition', () => {
     expect(await revoked.json()).toEqual({ revoked: true })
     expect((await client.closed).code).toBe(4000)
     const stale = await connect(port)
-    send(stale.ws, { t: 'hello', token: hello?.t === 'hello.ok' ? hello.credential! : '', installationId: 'composition-installation-123456', caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
+    send(stale.ws, { t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: hello?.t === 'hello.ok' ? hello.credential! : '', installationId: 'composition-installation-123456', caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
     expect((await stale.closed).code).toBe(4002)
   })
 
@@ -379,7 +400,7 @@ describe('real Loader composition', () => {
     // Discovery does not supply credentials; the client authenticates separately.
     const client = await connectReady(port)
     expect(client.frames.find((f) => f.t === 'hello.ok')).toMatchObject({
-      t: 'hello.ok',
+      t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION,
       caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
     })
 

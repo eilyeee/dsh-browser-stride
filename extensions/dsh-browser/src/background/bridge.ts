@@ -12,12 +12,14 @@
 import type { BridgeCaps, ClientFrame, ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import {
   DEFAULT_SNAPSHOT_MAX_CHARS,
+  BRIDGE_PROTOCOL_VERSION,
+  PROTOCOL_MISMATCH_CLOSE_CODE,
   isServerFrame,
   parseBridgeFrame,
 } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 
 /** Coarse connection state for the UI. */
-export type BridgeState = 'connecting' | 'connected' | 'reconnecting' | 'stopped'
+export type BridgeState = 'connecting' | 'connected' | 'reconnecting' | 'stopped' | 'update-host' | 'update-extension' | 'incompatible'
 
 /** Frame/state sinks owned by the background assembly. */
 export interface BridgeSinks {
@@ -128,6 +130,10 @@ export class BridgeClient {
       // failure. Yield permanently so two open profiles cannot reconnect in a
       // tight loop and repeatedly evict one another.
       socket.addEventListener('close', (event) => {
+        if (event.code === PROTOCOL_MISMATCH_CLOSE_CODE && this.ws === socket && this.running) {
+          this.rejectCompatibility(socket, 'incompatible')
+          return
+        }
         if ((event.code !== 4000 && event.code !== 4002) || this.ws !== socket || !this.running) return
         this.running = false
         this.clearAckTimer()
@@ -152,11 +158,13 @@ export class BridgeClient {
 
       // Authenticate: hello must be accepted before any other traffic.
       const presentedToken = this.token
+      const offeredCaps: BridgeCaps = { textOnly: true, snapshotMaxChars: DEFAULT_SNAPSHOT_MAX_CHARS, maxInteractiveItems: 60 }
       socket.send(JSON.stringify({
         t: 'hello',
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
         token: presentedToken,
         ...(this.installationId === '' ? {} : { installationId: this.installationId }),
-        caps: { textOnly: true, snapshotMaxChars: DEFAULT_SNAPSHOT_MAX_CHARS, maxInteractiveItems: 60 },
+        caps: offeredCaps,
       } satisfies ClientFrame))
 
       let authed = false
@@ -168,10 +176,24 @@ export class BridgeClient {
       }
       const accepted = await new Promise<boolean>((resolve) => {
         const onMessage = (event: MessageEvent): void => {
+          if (!this.running || generation !== this.generation || this.ws !== socket) return
           const frame = parseBridgeFrame(String(event.data))
-          if (frame === undefined || !isServerFrame(frame)) return
+          if (frame === undefined || !isServerFrame(frame)) {
+            if (!authed) { this.rejectCompatibility(socket, 'incompatible'); resolve(false) }
+            return
+          }
           if (!authed) {
             if (frame.t === 'hello.ok') {
+              if (frame.protocolVersion !== BRIDGE_PROTOCOL_VERSION) {
+                this.rejectCompatibility(socket, frame.protocolVersion === undefined || frame.protocolVersion < BRIDGE_PROTOCOL_VERSION ? 'update-host' : 'update-extension')
+                resolve(false)
+                return
+              }
+              if (frame.caps.snapshotMaxChars > offeredCaps.snapshotMaxChars || frame.caps.maxInteractiveItems > offeredCaps.maxInteractiveItems) {
+                this.rejectCompatibility(socket, 'incompatible')
+                resolve(false)
+                return
+              }
               if (savingCredential) { socket.close(); resolve(false); return }
               savingCredential = true
               void Promise.resolve().then(() => this.sinks.onHelloOk(frame.caps, frame.credential, presentedToken)).then(() => {
@@ -189,6 +211,10 @@ export class BridgeClient {
               else pendingFrames.push(frame)
             } else if (frame.t === 'error') {
               this.sinks.onFrame(frame)
+              if (frame.code === 'protocol-upgrade-host' || frame.code === 'protocol-upgrade-extension') {
+                this.rejectCompatibility(socket, frame.code === 'protocol-upgrade-host' ? 'update-host' : 'update-extension')
+                resolve(false)
+              }
             }
             return
           }
@@ -238,6 +264,14 @@ export class BridgeClient {
     if (!this.retryAllowed()) return
     this.emitState('reconnecting')
     await this.waitBeforeRetry()
+  }
+
+  private rejectCompatibility(socket: WebSocket, state: 'update-host' | 'update-extension' | 'incompatible'): void {
+    this.running = false
+    this.clearAckTimer()
+    if (this.ws === socket) this.ws = null
+    socket.close(PROTOCOL_MISMATCH_CLOSE_CODE, 'incompatible protocol')
+    this.emitState(state)
   }
 
   private retryAllowed(): boolean {

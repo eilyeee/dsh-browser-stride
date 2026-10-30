@@ -44,6 +44,8 @@ Screenshots, CDP input, webpage uploads/downloads, reliable run recovery and a s
 
 Build the Bridge and extension from the same checkout: click, type and select now require an `elementRef` from the latest observation. Earlier bare-index clients are incompatible. A delta only provides references for controls it shows; take a full snapshot when a target is missing. References do not yet bind a task run, account or tenant.
 
+Connections require wire protocol version 1. Missing or incompatible versions are rejected; the side panel identifies which component needs updating and stops automatic retries. Rebuild and restart the Host Bridge and reload the extension together, then reopen the panel. Snapshot budgets use the smaller limit offered by the two components. This handshake does not establish a durable task runtime.
+
 ## Development
 
 ```sh

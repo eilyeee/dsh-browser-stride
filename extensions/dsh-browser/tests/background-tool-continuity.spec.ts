@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import { BRIDGE_PROTOCOL_VERSION } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PAGE_SESSION_CONTEXT_STORAGE_KEY } from '../src/background/session-continuity.ts'
 
@@ -165,7 +166,7 @@ describe('tool-driven session checkpoints', () => {
     socket.open()
     await vi.waitFor(() => { expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'hello' })) })
     socket.receive({
-      t: 'hello.ok',
+      t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION,
       caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
     })
     panel.onMessage.emit({ type: 'session.active', sessionId: 'session-live', isNew: true })

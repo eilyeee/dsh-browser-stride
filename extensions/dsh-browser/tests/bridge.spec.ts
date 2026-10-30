@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import { BRIDGE_PROTOCOL_VERSION } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BridgeClient, type BridgeState } from '../src/background/bridge.ts'
 
@@ -41,6 +42,61 @@ afterEach(() => {
 })
 
 describe('BridgeClient connection probe', () => {
+  it.each([
+    { frame: { t: 'hello.ok' }, state: 'update-host' },
+    { frame: { t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION + 1 }, state: 'update-extension' },
+    { frame: { t: 'hello.ok', protocolVersion: '1' }, state: 'incompatible' },
+    { frame: { t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps: { textOnly: true, snapshotMaxChars: 64000, maxInteractiveItems: 60 } }, state: 'incompatible' },
+    { frame: { t: 'error', code: 'protocol-upgrade-extension', message: 'update extension' }, state: 'update-extension' },
+    { frame: { t: 'error', code: 'protocol-upgrade-host', message: 'update host' }, state: 'update-host' },
+  ])('stops on an incompatible handshake ($state) without saving credentials or executing tools', async ({ frame, state }) => {
+    vi.useFakeTimers()
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    const save = vi.fn()
+    const onFrame = vi.fn()
+    const client = new BridgeClient({ onStateChange: () => {}, onFrame, onHelloOk: save })
+    client.start('ws://127.0.0.1:3080/ext/bridge', 'synthetic-code')
+    await vi.advanceTimersByTimeAsync(0)
+    const socket = FakeWebSocket.instances[0]!
+    socket.open()
+    await vi.advanceTimersByTimeAsync(0)
+    socket.receive({ caps: { textOnly: true, snapshotMaxChars: 32000, maxInteractiveItems: 60 }, credential: 'a'.repeat(64), ...frame })
+    socket.receive({ t: 'tool.call', id: 'must-not-run', name: 'browser_click', args: {}, expiresAt: Date.now() + 10000 })
+    await vi.advanceTimersByTimeAsync(30000)
+    expect(client.state).toBe(state)
+    expect(client.connected).toBe(false)
+    expect(save).not.toHaveBeenCalled()
+    expect(onFrame.mock.calls.some(([value]) => value.t === 'tool.call')).toBe(false)
+    expect(FakeWebSocket.instances).toHaveLength(1)
+    client.stop()
+  })
+
+  it('allows an explicit restart after an upgrade and ignores frames from the old socket', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    const save = vi.fn()
+    const client = new BridgeClient({ onStateChange: () => {}, onFrame: () => {}, onHelloOk: save })
+    client.start('ws://127.0.0.1:3080/ext/bridge', 'token')
+    await vi.advanceTimersByTimeAsync(0)
+    const old = FakeWebSocket.instances[0]!
+    old.open()
+    await vi.advanceTimersByTimeAsync(0)
+    old.receive({ t: 'hello.ok', caps: { textOnly: true, snapshotMaxChars: 32000, maxInteractiveItems: 60 } })
+    expect(client.state).toBe('update-host')
+    client.start('ws://127.0.0.1:3080/ext/bridge', 'token')
+    await vi.advanceTimersByTimeAsync(0)
+    const replacement = FakeWebSocket.instances[1]!
+    replacement.open()
+    await vi.advanceTimersByTimeAsync(0)
+    old.receive({ t: 'error', code: 'protocol-upgrade-extension', message: 'stale' })
+    replacement.receive({ t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      caps: { textOnly: true, snapshotMaxChars: 16000, maxInteractiveItems: 30 } })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(client.connected).toBe(true)
+    expect(save).toHaveBeenCalledWith({ textOnly: true, snapshotMaxChars: 16000, maxInteractiveItems: 30 }, undefined, 'token')
+    client.stop()
+  })
+
   it('waits for the installation credential to persist before dispatching frames or reporting connected', async () => {
     vi.useFakeTimers()
     vi.stubGlobal('WebSocket', FakeWebSocket)
@@ -59,7 +115,7 @@ describe('BridgeClient connection probe', () => {
     socket.open()
     await vi.advanceTimersByTimeAsync(0)
     expect(client.connected).toBe(false)
-    socket.receive({ t: 'hello.ok', credential: 'a'.repeat(64), caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
+    socket.receive({ t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, credential: 'a'.repeat(64), caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
     await vi.advanceTimersByTimeAsync(0)
     socket.receive({ t: 'event', frame: { type: 'ready' } })
     expect(client.connected).toBe(false)
@@ -82,7 +138,7 @@ describe('BridgeClient connection probe', () => {
     const socket = FakeWebSocket.instances[0]!
     socket.open()
     await vi.advanceTimersByTimeAsync(0)
-    socket.receive({ t: 'hello.ok', credential: 'a'.repeat(64), caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
+    socket.receive({ t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, credential: 'a'.repeat(64), caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
     await vi.advanceTimersByTimeAsync(5_000)
     expect(socket.readyState).toBe(FakeWebSocket.CLOSED)
     expect(client.connected).toBe(false)
@@ -100,7 +156,7 @@ describe('BridgeClient connection probe', () => {
     const socket = FakeWebSocket.instances[0]!
     socket.open()
     await vi.advanceTimersByTimeAsync(0)
-    socket.receive({ t: 'hello.ok', credential: 'a'.repeat(64), caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
+    socket.receive({ t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, credential: 'a'.repeat(64), caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
     await vi.advanceTimersByTimeAsync(0)
     expect(socket.readyState).toBe(FakeWebSocket.CLOSED)
     expect(client.connected).toBe(false)
@@ -159,7 +215,7 @@ describe('BridgeClient connection probe', () => {
     socket.open()
     await vi.advanceTimersByTimeAsync(0)
     socket.receive({
-      t: 'hello.ok',
+      t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION,
       caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
     })
     await vi.advanceTimersByTimeAsync(0)

@@ -31,7 +31,7 @@ pnpm --dir benchmark probe
 pnpm run test:smoke-browser
 ```
 
-它不调用模型，也不验证真实目标站点。先构建 bridge 和 Chrome 扩展；必要时通过 `PLAYWRIGHT_CHROMIUM_PATH` 指定支持加载扩展的 Chromium。
+它不调用模型，也不验证真实目标站点。还会检查扩展对缺少版本或版本不兼容的 Host 显示升级提示、停止重连，并拒绝该连接发来的页面操作。先构建 bridge 和 Chrome 扩展；必要时通过 `PLAYWRIGHT_CHROMIUM_PATH` 指定支持加载扩展的 Chromium。
 
 真实 smoke 会调用当前 DSH profile 配置的模型，因此会消耗模型额度：
 

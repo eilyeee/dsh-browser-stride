@@ -47,6 +47,7 @@ describe('assertPositiveInteger', () => {
     expect(() => assertPositiveInteger('x', 0)).toThrow(/must be a positive integer/)
     expect(() => assertPositiveInteger('x', -1)).toThrow(/must be a positive integer/)
     expect(() => assertPositiveInteger('x', 1.5)).toThrow(/must be a positive integer/)
+    expect(() => assertPositiveInteger('x', Number.MAX_SAFE_INTEGER + 1)).toThrow(/must be a positive integer/)
   })
 })
 

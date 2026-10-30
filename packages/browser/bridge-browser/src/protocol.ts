@@ -15,6 +15,12 @@
 /** WebSocket pathname the bridge plugin registers on the host webserver. */
 export const BRIDGE_PATH = '/ext/bridge'
 
+/** Version of the WebSocket wire format, independent of task-runtime contracts. */
+export const BRIDGE_PROTOCOL_VERSION = 1
+
+/** Terminal incompatibility: retry only after the user updates/reconfigures a peer. */
+export const PROTOCOL_MISMATCH_CLOSE_CODE = 4003
+
 /** Zero-config discovery endpoint: returns `{ wsUrl }` for the extension. */
 export const BRIDGE_CONFIG_PATH = '/ext/bridge-config'
 
@@ -76,7 +82,7 @@ export interface BridgeCaps {
 /** Frames sent by the extension to the bridge plugin. */
 export type ClientFrame =
   /** First frame, within HELLO_TIMEOUT_MS of socket open. */
-  | { t: 'hello'; token: string; caps: BridgeCaps; installationId?: string }
+  | { t: 'hello'; token: string; caps: BridgeCaps; installationId?: string; protocolVersion?: number }
   /** Unary call projected by the active dsh Host adapter. */
   | { t: 'rpc'; id: string; method: string; payload: unknown }
   /** Answer or cancel a pending Host interaction waterfall. */
@@ -90,7 +96,7 @@ export type ClientFrame =
 /** Frames sent by the bridge plugin to the extension. */
 export type ServerFrame =
   /** Accepted after a valid `hello`. */
-  | { t: 'hello.ok'; caps: BridgeCaps; credential?: string }
+  | { t: 'hello.ok'; caps: BridgeCaps; credential?: string; protocolVersion?: number }
   /** Reply to an `rpc` frame; `result` is the bridge's stable ServerResponse envelope. */
   | { t: 'rpc.result'; id: string; ok: true; result: unknown }
   | { t: 'rpc.result'; id: string; ok: false; error: { code: string; message: string } }
@@ -157,10 +163,12 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
   switch (frame.t) {
     case 'hello':
       return typeof frame.token === 'string'
+        && isOptionalProtocolVersion(frame.protocolVersion)
         && (frame.installationId === undefined || typeof frame.installationId === 'string')
         && isCaps(frame.caps)
         ? { t: 'hello', token: frame.token, caps: frame.caps,
-            ...(typeof frame.installationId === 'string' ? { installationId: frame.installationId } : {}) }
+            ...(typeof frame.installationId === 'string' ? { installationId: frame.installationId } : {}),
+            ...(typeof frame.protocolVersion === 'number' ? { protocolVersion: frame.protocolVersion } : {}) }
         : undefined
     case 'rpc':
       return typeof frame.id === 'string' && typeof frame.method === 'string'
@@ -181,9 +189,11 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
     case 'pong':
       return { t: 'pong' }
     case 'hello.ok':
-      return isCaps(frame.caps) && (frame.credential === undefined || typeof frame.credential === 'string')
+      return isOptionalProtocolVersion(frame.protocolVersion)
+        && isCaps(frame.caps) && (frame.credential === undefined || typeof frame.credential === 'string')
         ? { t: 'hello.ok', caps: frame.caps,
-            ...(typeof frame.credential === 'string' ? { credential: frame.credential } : {}) }
+            ...(typeof frame.credential === 'string' ? { credential: frame.credential } : {}),
+            ...(typeof frame.protocolVersion === 'number' ? { protocolVersion: frame.protocolVersion } : {}) }
         : undefined
     case 'rpc.result':
       if (typeof frame.id !== 'string') return undefined
@@ -233,14 +243,20 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
   }
 }
 
+// Missing versions are parsed only so the handshake can explain a legacy peer.
+// They must never be accepted as a compatible connection.
+function isOptionalProtocolVersion(value: unknown): boolean {
+  return value === undefined || (typeof value === 'number' && Number.isSafeInteger(value) && value > 0)
+}
+
 function isCaps(value: unknown): value is BridgeCaps {
   if (typeof value !== 'object' || value === null) return false
   const caps = value as Record<string, unknown>
   return caps.textOnly === true
     && typeof caps.snapshotMaxChars === 'number'
-    && Number.isInteger(caps.snapshotMaxChars)
+    && Number.isSafeInteger(caps.snapshotMaxChars)
     && caps.snapshotMaxChars >= MIN_SNAPSHOT_MAX_CHARS
-    && typeof caps.maxInteractiveItems === 'number' && caps.maxInteractiveItems > 0
+    && typeof caps.maxInteractiveItems === 'number' && Number.isSafeInteger(caps.maxInteractiveItems) && caps.maxInteractiveItems > 0
 }
 
 function isToolError(value: unknown): value is ToolError {

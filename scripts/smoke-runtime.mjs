@@ -17,7 +17,7 @@ const expectedVersion = JSON.parse(await readFile(join(root, 'package.json'), 'u
 const cli = join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'lib/bin.js')
 const bridgeRequire = createRequire(join(bridge, 'package.json'))
 const { default: WebSocket } = await import(pathToFileURL(bridgeRequire.resolve('ws')).href)
-const { BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD } = await import(pathToFileURL(join(bridge, 'lib/protocol.js')).href)
+const { BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, BRIDGE_PROTOCOL_VERSION } = await import(pathToFileURL(join(bridge, 'lib/protocol.js')).href)
 const temp = await mkdtemp(join(tmpdir(), 'dsh-runtime-smoke-'))
 const home = join(temp, 'home')
 const marker = join(temp, 'observation.json')
@@ -151,8 +151,9 @@ async function start(reopen) {
       if (socket.readyState === WebSocket.CLOSED) throw new Error(`Bridge closed: ${JSON.stringify(frames.map(({ credential, ...frame }) => frame))}`)
     }, 'bridge response', 15_000)
   }
-  socket.send(JSON.stringify({ t: 'hello', token: browserCredential, installationId, caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } }))
+  socket.send(JSON.stringify({ t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: browserCredential, installationId, caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } }))
   const accepted = await frame(value => value.t === 'hello.ok')
+  assert.equal(accepted.protocolVersion, BRIDGE_PROTOCOL_VERSION)
   if (accepted.credential !== undefined) browserCredential = accepted.credential
   return async (method, payload) => {
     const id = randomUUID()

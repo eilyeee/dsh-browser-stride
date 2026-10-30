@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import { BRIDGE_PROTOCOL_VERSION } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 class FakeWebSocket extends EventTarget {
@@ -183,11 +184,11 @@ describe('background bridge lifecycle', () => {
     const socket = FakeWebSocket.instances[0]!
     socket.open()
     await vi.waitFor(() => { expect(socket.sent).toContainEqual(expect.objectContaining({
-      t: 'hello', token: 'one-time-code', installationId: 'installation-1234567890',
+      t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: 'one-time-code', installationId: 'installation-1234567890',
     })) })
     blockSettingsWrite = true
     vi.mocked(chrome.storage.local.set).mockClear()
-    socket.receive({ t: 'hello.ok', credential, caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
+    socket.receive({ t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, credential, caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
     await vi.waitFor(() => { expect(chrome.storage.local.set).toHaveBeenCalled() })
     const savedSettings = (vi.mocked(chrome.storage.local.set).mock.calls[0]![0] as Record<string, unknown>).dshSettings as Record<string, unknown>
     expect(savedSettings).not.toHaveProperty('token')
@@ -268,7 +269,7 @@ describe('background bridge lifecycle', () => {
     socket.open()
     await Promise.resolve()
     socket.receive({
-      t: 'hello.ok',
+      t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION,
       caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
     })
     await Promise.resolve()
@@ -299,7 +300,7 @@ describe('background bridge lifecycle', () => {
     originalSocket.open()
     await Promise.resolve()
     originalSocket.receive({
-      t: 'hello.ok',
+      t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION,
       caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
     })
     await vi.waitFor(() => {
@@ -340,7 +341,7 @@ describe('background bridge lifecycle', () => {
     socket.open()
     await Promise.resolve()
     socket.receive({
-      t: 'hello.ok',
+      t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION,
       caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
     })
 
@@ -393,7 +394,7 @@ describe('background bridge lifecycle', () => {
     socket.open()
     await Promise.resolve()
     socket.receive({
-      t: 'hello.ok',
+      t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION,
       caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
     })
     panel.onMessage.emit({
@@ -508,7 +509,7 @@ describe('background bridge lifecycle', () => {
     socket.open()
     await Promise.resolve()
     socket.receive({
-      t: 'hello.ok',
+      t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION,
       caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
     })
     await Promise.resolve()
@@ -578,7 +579,7 @@ describe('background bridge lifecycle', () => {
     socket.open()
     await Promise.resolve()
     socket.receive({
-      t: 'hello.ok',
+      t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION,
       caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
     })
     await Promise.resolve()
@@ -646,7 +647,7 @@ describe('background bridge lifecycle', () => {
     socket.open()
     await Promise.resolve()
     socket.receive({
-      t: 'hello.ok',
+      t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION,
       caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
     })
     await Promise.resolve()
@@ -720,7 +721,7 @@ describe('background bridge lifecycle', () => {
     originalSocket.open()
     await Promise.resolve()
     originalSocket.receive({
-      t: 'hello.ok',
+      t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION,
       caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
     })
     await Promise.resolve()
@@ -742,7 +743,7 @@ describe('background bridge lifecycle', () => {
     replacementSocket.open()
     await Promise.resolve()
     replacementSocket.receive({
-      t: 'hello.ok',
+      t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION,
       caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
     })
     await Promise.resolve()
@@ -793,7 +794,7 @@ describe('background bridge lifecycle', () => {
     const original = FakeWebSocket.instances[0]!
     original.open()
     await Promise.resolve()
-    original.receive({ t: 'hello.ok', caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
+    original.receive({ t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
     await Promise.resolve()
     original.receive({
       t: 'tool.call', id: 'follow-before-reload', name: 'browser_follow_tab',
@@ -812,7 +813,7 @@ describe('background bridge lifecycle', () => {
     const replacement = FakeWebSocket.instances[1]!
     replacement.open()
     await Promise.resolve()
-    replacement.receive({ t: 'hello.ok', caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
+    replacement.receive({ t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
     await Promise.resolve()
     finishCheckpoint(tab)
     await new Promise((resolve) => { setTimeout(resolve, 0) })
@@ -849,7 +850,7 @@ describe('background bridge lifecycle', () => {
     socket.open()
     await Promise.resolve()
     socket.receive({
-      t: 'hello.ok',
+      t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION,
       caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
     })
     await Promise.resolve()
@@ -911,7 +912,7 @@ describe('background bridge lifecycle', () => {
     socket.open()
     await Promise.resolve()
     socket.receive({
-      t: 'hello.ok',
+      t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION,
       caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
     })
     await new Promise((resolve) => { setTimeout(resolve, 0) })
@@ -985,7 +986,7 @@ describe('background bridge lifecycle', () => {
     socket.open()
     await Promise.resolve()
     socket.receive({
-      t: 'hello.ok',
+      t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION,
       caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
     })
     await Promise.resolve()
