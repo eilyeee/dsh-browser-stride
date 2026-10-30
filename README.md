@@ -11,7 +11,7 @@ The project is in **M0: compatibility and baseline verification**. The upstream 
 - Node.js 24.15 or later in the supported Node 24 line; the exact supported range is in `package.json`.
 - The pnpm version specified by `packageManager` in `package.json`.
 - Chrome 116+ or Firefox 140+ for the existing text path. A browser version alone does not establish end-to-end support.
-- A compatible local DeepSeek Harness Host. Desktop integration and the active profile still require verification.
+- The local DeepSeek Harness Host and workspace DSH dependencies use `0.2.1-rc.5` together; updating only the global CLI causes a version mismatch. Desktop integration and the active profile still require verification.
 
 ## Run from source
 

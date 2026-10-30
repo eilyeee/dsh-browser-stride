@@ -155,10 +155,10 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const gateway = ctx.get('typertGateway') as unknown as GatewayCandidate | undefined
   const connection = ctx.get('connection') as unknown as HostConnectionLike | undefined
   if (gateway === undefined || !hasRemoteWireStream(gateway)) {
-    throw new Error('bridge-browser: dsh 0.2.1-rc.2 or a compatible newer runtime is required (Gateway wireStream unavailable)')
+    throw new Error('bridge-browser: dsh 0.2.1-rc.5 or a compatible newer runtime is required (Gateway wireStream unavailable)')
   }
   if (connection === undefined || typeof connection.createPeer !== 'function') {
-    throw new Error('bridge-browser: dsh 0.2.1-rc.2 connection service with createPeer is required')
+    throw new Error('bridge-browser: dsh 0.2.1-rc.5 connection service with createPeer is required')
   }
   const storage = ctx.get('storageDomain')
   if (storage === undefined || typeof storage.open !== 'function') {

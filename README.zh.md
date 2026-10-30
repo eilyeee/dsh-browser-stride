@@ -11,7 +11,7 @@ DSH Stride 是 [dsh-browser](https://github.com/omdsh-dev/dsh-browser) 的社区
 - Node.js 24 系列中的 24.15 或更高版本；具体支持范围见 `package.json`。
 - 使用 `package.json` 的 `packageManager` 指定的 pnpm 版本。
 - 现有文本路径需要 Chrome 116+ 或 Firefox 140+；版本满足本身不代表端到端验收通过。
-- 兼容的本机 DeepSeek Harness Host。桌面端接入及其实际 profile 仍需验证。
+- 本机 DeepSeek Harness Host 与项目 DSH 依赖统一使用 `0.2.1-rc.5`；只更新全局 CLI 会造成版本不匹配。桌面端接入及其实际 profile 仍需验证。
 
 ## 从源码运行
 

@@ -88,7 +88,7 @@ no release version has been assigned yet.
 - CI also runs on pushes to `stride/main`, not only `main`.
 - Dependencies and the Node/pnpm toolchain are pinned; the bridge is adapted
   to the DSH 0.2.1 release-candidate Host API.
-- Align the DSH Host and client peers on `0.2.1-rc.3` and allow the bridge
+- Align the DSH Host and client peers on `0.2.1-rc.5` and allow the bridge
   settings client to run with React 19.
 - Keep Node declarations on the Node 24 baseline and group React runtime and
   declaration updates together in Dependabot.
