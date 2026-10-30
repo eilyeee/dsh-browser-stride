@@ -1,9 +1,10 @@
 // Loaded only by smoke-browser.mjs into a disposable DSH Host. It executes the
 // registered browser tools through the real Host tool runtime, without a model.
 import { access, writeFile } from 'node:fs/promises'
+import assert from 'node:assert/strict'
 
 export const name = 'stride-browser-smoke-probe'
-export const inject = ['tools']
+export const inject = ['tools', 'browserRuns']
 
 export function apply(ctx, config) {
   const controller = new AbortController()
@@ -37,7 +38,19 @@ export function apply(ctx, config) {
       const updated = await tool('browser_snapshot')
       const save = reference(updated, '保存设置')
       await tool('browser_click', { elementRef: save })
-      await writeFile(config.result, JSON.stringify({ ok: true, calls: callNumber }), { mode: 0o600 })
+      const records = ctx.browserRuns.dispatches.list()
+      assert.equal(records.length, 4)
+      assert.equal(records.filter(row => row.effect === 'read').length, 2)
+      assert.equal(records.filter(row => row.effect === 'write').length, 2)
+      for (const row of records) {
+        assert.equal(row.state, 'returned')
+        assert.equal(row.receipt.ok, true)
+        assert.match(row.requestDigest, /^[a-f0-9]{64}$/)
+        assert.equal(Object.hasOwn(row, 'args'), false)
+        assert.equal(Object.hasOwn(row, 'result'), false)
+      }
+      assert.equal(new Set(records.map(row => row.actionId)).size, 4)
+      await writeFile(config.result, JSON.stringify({ ok: true, calls: callNumber, recorded: records.length }), { mode: 0o600 })
     } catch (error) {
       await writeFile(config.result, JSON.stringify({ ok: false, error: String(error) }), { mode: 0o600 })
     }

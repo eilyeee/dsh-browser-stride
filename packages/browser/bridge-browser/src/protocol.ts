@@ -48,6 +48,10 @@ export const DEFAULT_SNAPSHOT_MAX_CHARS = 32_000
 /** Smallest accepted wire budget; frame metadata may require a larger practical limit. */
 export const MIN_SNAPSHOT_MAX_CHARS = 500
 
+/** Shared ordering/recording policy; unknown tools are conservatively writes. */
+const READ_ONLY_BROWSER_TOOLS = new Set(['browser_snapshot', 'browser_get_text', 'browser_wait', 'browser_list_tabs'])
+export function isReadOnlyBrowserTool(name: string): boolean { return READ_ONLY_BROWSER_TOOLS.has(name) }
+
 /** Error codes a tool call may settle with. Open set: consumers must tolerate unknown codes. */
 export type ToolErrorCode =
   | 'no-active-tab'

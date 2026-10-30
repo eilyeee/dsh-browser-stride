@@ -1,6 +1,7 @@
 /**
  * Durable browser-run records for trusted Host plugins. This service does not
- * dispatch tools or expose an RPC: the current browser_* path is still separate.
+ * dispatch tools or expose an RPC. Browser tools use its child dispatch ledger;
+ * task lifecycle and business-success facts remain separate from that path.
  * A storage root has one Host owner, as required by the DSH JSON domain backend.
  */
 import { randomUUID } from 'node:crypto'
@@ -10,6 +11,7 @@ import { canonicalize, asActionId, asObservationId, asControlRevision, asRunId, 
 import { BROWSER_ERROR_CODES } from './contracts/errors.ts'
 import { validateActionFact, summarizeActionFacts, type ActionFact } from './contracts/outcome.ts'
 import { assertTransition, decideCompletion, isTerminal, nextControlRevision, requestPause, requestResume, requestStop } from './contracts/run.ts'
+import { BrowserDispatchLedger } from './dispatch-ledger.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context { browserRuns: BrowserRunStore }
@@ -91,12 +93,14 @@ export class BrowserRunStore {
   private closing = false
   private writeFaulted = false
   private disposal: Promise<void> | undefined
-  private constructor(private readonly domain: RunDomain) {}
+  private constructor(private readonly domain: RunDomain, readonly dispatches: BrowserDispatchLedger) {}
 
   static async open(facility: Pick<DomainFacility, 'open'>, profile: string): Promise<BrowserRunStore> {
     const domain = await facility.open(specFor(profile))
-    const store = new BrowserRunStore(domain)
+    let dispatches: BrowserDispatchLedger | undefined
     try {
+      dispatches = await BrowserDispatchLedger.open(facility, profile)
+      const store = new BrowserRunStore(domain, dispatches)
       const records = [...domain.table('runs').entries()]
       for (const [key, run] of records) {
         if (key !== run.runId) throw new TypeError('browser run key mismatch')
@@ -118,7 +122,7 @@ export class BrowserRunStore {
         }
       }
       return store
-    } catch (error) { await domain.close(); throw error }
+    } catch (error) { await dispatches?.close(); await domain.close(); throw error }
   }
 
   get(runId: RunId): BrowserRunRecord | undefined {
@@ -196,7 +200,9 @@ export class BrowserRunStore {
 
   close(): Promise<void> {
     this.closing = true
-    return this.disposal ??= this.tail.then(() => this.domain.close())
+    return this.disposal ??= this.tail.then(async () => {
+      try { await this.dispatches.close() } finally { await this.domain.close() }
+    })
   }
 
   private assertOpen(): void { if (this.closing) throw new BrowserRunStoreError('closed') }

@@ -23,6 +23,19 @@ export async function apply(ctx, config) {
     assert.ok(ctx.get(service) instanceof Provider, `${service} must use the profile's resolved provider`)
   }
   const runs = ctx.browserRuns
+  const dispatches = runs.dispatches
+  if (config.reopen) {
+    assert.equal(dispatches.get('synthetic-prepared').state, 'not_sent')
+    assert.equal(dispatches.get('synthetic-sent').state, 'unresolved')
+    assert.equal(dispatches.get('synthetic-returned').state, 'returned')
+  } else {
+    for (const requestId of ['synthetic-prepared', 'synthetic-sent', 'synthetic-returned']) {
+      await dispatches.prepare({ requestId, connectionId: 'synthetic-connection', sessionId: config.sessionId,
+        name: 'browser_click', args: { elementRef: 'synthetic-ref:1' }, expiresAt: Date.now() + 60_000 })
+      if (requestId !== 'synthetic-prepared') await dispatches.markSent(requestId)
+      if (requestId === 'synthetic-returned') await dispatches.settle(requestId, { state: 'returned', receipt: { ok: true } })
+    }
+  }
   if (config.reopen) {
     const records = runs.list(config.sessionId)
     assert.equal(records.length, 2)

@@ -48,7 +48,7 @@ Connections require wire protocol version 1. Missing or incompatible versions ar
 
 ## Development
 
-Trusted Host plugins can now persist run state and action facts through `ctx.browserRuns`, with version-checked controls and restart fencing. The existing browser tools and side panel are not connected to it; this is not automatic task recovery. See the [Bridge documentation](packages/browser/bridge-browser/README.md).
+Trusted Host plugins can persist run state and action facts through `ctx.browserRuns`, with version-checked controls and restart fencing. Browser tools now record request digests and transport receipts through its dispatch ledger; task lifecycle controls, business-result verification and automatic recovery are not yet connected to the tool path or side panel. See the [Bridge documentation](packages/browser/bridge-browser/README.md).
 
 ```sh
 pnpm run typecheck

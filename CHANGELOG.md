@@ -9,10 +9,17 @@ no release version has been assigned yet.
 
 ### Added
 
+- Real browser tool calls persist request identities/digests before dispatch
+  and transport receipt metadata before returning results. Cancellation,
+  timeout and connection loss retain uncertainty; late same-connection replies
+  can update the record without replaying the action or reviving the caller.
+- Dispatch metadata omits raw arguments, result text and peer error messages.
+  Permanent session deletion also removes its settled dispatch records and
+  refuses deletion while a recorded dispatch is still active.
 - A Host-only `browserRuns` service uses DSH storage domains for durable run
   state, version-checked controls and immutable action facts. Reopening fences
   unfinished execution contexts and refuses automatic resume. Browser tools
-  and the side panel do not yet create or consume these records.
+  and the side panel do not yet create or consume task lifecycle/fact records.
 - The Host rejects unversioned and incompatible extension handshakes before
   authentication, preserving its current connection and unconsumed pairing code.
 - The extension rejects incompatible Host handshakes before accepting a new

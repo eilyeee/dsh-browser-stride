@@ -19,8 +19,24 @@ The bridge mounts a loopback-only, token-authenticated WebSocket on the local De
 
 `/ext/bridge-config` exposes only the local WebSocket address. Pairing administration is loopback-only, requires the separate administrator token and rejects browser Origin headers. A one-time code expires after five minutes; only a hash of the resulting installation credential is persisted by the Host. See the root README for issue/list/revoke commands. Extension credentials use extension-origin IndexedDB, including on Firefox where `storage.local` access cannot be restricted.
 
-The shared [wire protocol](src/protocol.ts) is distinct from the [execution contract types](src/contracts/). The Host now provides `ctx.browserRuns` for trusted plugins: queued run creation, version-checked state changes, pause/resume/stop, immutable action facts, and completion checks against declared criteria. Facts must be supplied by trusted Host code; tool success text is not verified evidence. The existing `browser_*` tools and side panel do not yet use this service.
+The shared [wire protocol](src/protocol.ts) is distinct from the [execution contract types](src/contracts/). The Host provides `ctx.browserRuns` for trusted plugins: queued run creation, version-checked state changes, pause/resume/stop, immutable action facts, and completion checks against declared criteria. Facts must be supplied by trusted Host code; tool success text is not verified evidence. Browser tools use its child dispatch ledger; task lifecycle/fact records are not yet connected to the tools or side panel.
 
 The service requires DSH `storageDomain`, using domain `browser_runs_<UTF-8 hex of pairingProfile>` and the configured storage backend. The default JSON backend writes private files atomically; it does not coordinate multiple Host processes sharing one storage root. On reopen, unfinished execution contexts are fenced by a new control revision, running records become blocked, and stopping records remain stopping. Such records cannot resume until recovery support is implemented; no browser action is replayed. There is no run-record RPC or side-panel deletion control yet. Use the workspace checks in the root README and test real-browser behavior separately.
 
 A storage-write failure disables subsequent writes until the domain is reopened. Unreconciled effects also block another run from starting in the same session. Each run accepts up to 128 distinct required criteria and 256 immutable facts. Stored state is a record, not permission to dispatch browser actions.
+
+## Dispatch records
+
+`ctx.browserRuns.dispatches` records every production `browser_*` dispatch, including calls without an Agent session. It uses a separate `browser_dispatches_<UTF-8 hex of pairingProfile>` domain. The Host commits request metadata and a digest before sending, then commits receipt metadata before returning the tool result. Cancellation, expiry and connection ownership are rechecked after each pre-dispatch write.
+
+| State | Meaning |
+| --- | --- |
+| `prepared` | Request recorded; no dispatch marker committed. |
+| `sent_unconfirmed` | Marker committed before socket send; actual delivery is unconfirmed. |
+| `not_sent` | Host did not send, or restart found only a prepared record. |
+| `unresolved` | Delivery or result is unknown after timeout, cancellation, disconnect or restart. |
+| `returned` | Extension reply metadata recorded; this does not verify a business result. |
+
+Records contain Host action/request/connection ids, optional installation/session ids, tool name, read/write classification, a SHA-256 request digest, timestamps and fixed status/error codes. Raw arguments, input values, page results and peer error messages are omitted. Read/write classification is shared with the extension; unknown tools count as writes. A storage failure stops subsequent ledger writes and dispatches until reopen. A late reply on the same connection can update an unresolved record while preserving its interruption; it does not revive the old caller. No action is automatically retried or replayed.
+
+Permanent session purge removes its settled dispatch records after session storage deletion; active dispatches block that operation. Unscoped records have no automatic expiry. Task-state/fact records retain their separate lifecycle. The wire remains version 1, with logical action ids kept on the Host. Full run/target binding, extension-side durable deduplication and automatic reconciliation are not implemented.

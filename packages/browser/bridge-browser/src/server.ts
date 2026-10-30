@@ -22,11 +22,14 @@ import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer } from 'ws'
 import type { BrowserHostApi } from './host-api.ts'
+import { canonicalize } from './contracts/ids.ts'
+import { transportReceipt, type BrowserDispatchLedger, type DispatchSettlement } from './dispatch-ledger.ts'
 import {
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
   BRIDGE_SESSION_PURGE_METHOD,
   BRIDGE_PROTOCOL_VERSION,
   PROTOCOL_MISMATCH_CLOSE_CODE,
+  isReadOnlyBrowserTool,
   HELLO_TIMEOUT_MS,
   PING_INTERVAL_MS,
   parseBridgeFrame,
@@ -104,6 +107,8 @@ export interface BridgeServerDeps {
    * session through the gateway first; this only removes files.
    */
   purgeSession: (sessionId: string) => Promise<void>
+  /** Production always provides the durable ledger; optional for transport-only unit fixtures. */
+  dispatches?: Pick<BrowserDispatchLedger, 'prepare' | 'markSent' | 'settle' | 'get'>
   /**
    * Test seam: force the remote address seen by the privilege gate. The
    * sandbox cannot bind arbitrary loopback literals, so the non-loopback
@@ -118,13 +123,12 @@ export interface BridgeServerDeps {
 
 /** One in-flight tool call awaiting the extension's `tool.result`. */
 interface PendingTool {
-  resolve: (result: unknown) => void
-  reject: (error: BridgeToolError) => void
-  timer: NodeJS.Timeout
+  finish: (settlement: DispatchSettlement, value: unknown, error?: BridgeToolError) => void
 }
 
 /** A socket that passed authentication and owns the single active slot. */
 interface ReadyConnection {
+  connectionId: string
   ws: WebSocket
   installationId?: string
   /** Remote address captured at upgrade time (loopback gate for privileged methods). */
@@ -164,7 +168,9 @@ export class BridgeServer {
   private readonly wss = new WebSocketServer({ noServer: true })
   private current: ReadyConnection | null = null
   private readonly pendingTools = new Map<string, PendingTool>()
+  private readonly operations = new Set<Promise<unknown>>()
   private closed = false
+  private disposal: Promise<void> | undefined
 
   constructor(private readonly deps: BridgeServerDeps) {}
 
@@ -213,44 +219,99 @@ export class BridgeServer {
     }
     const id = randomUUID()
     const expiresAt = Date.now() + timeoutMs
+    if (this.deps.dispatches === undefined) return this.sendTool(conn, id, name, args, signal, expiresAt, sessionId)
+    let copied: Record<string, unknown>
+    try { copied = JSON.parse(canonicalize(args)) as Record<string, unknown> }
+    catch { throw new BridgeToolError('bad-args', 'browser arguments must be plain JSON data') }
+    return this.track(this.recordAndSend(conn, id, name, copied, signal, expiresAt, sessionId))
+  }
+
+  private async recordAndSend(conn: ReadyConnection, id: string, name: string, args: Record<string, unknown>, signal: AbortSignal, expiresAt: number, sessionId?: string): Promise<unknown> {
+    const ledger = this.deps.dispatches!
+    try {
+      const prepared = await ledger.prepare({ requestId: id, connectionId: conn.connectionId,
+        name, args, expiresAt, ...(sessionId === undefined ? {} : { sessionId }),
+        ...(conn.installationId === undefined ? {} : { installationId: conn.installationId }) })
+      if (prepared.state !== 'prepared') throw new Error('request already consumed')
+      let stopped = this.beforeDispatch(conn, signal, expiresAt)
+      if (stopped !== undefined) {
+        await ledger.settle(id, { state: 'not_sent', reason: stopped.reason })
+        throw stopped.error
+      }
+      // Conservative crash boundary: persistence commits before socket.send.
+      // A crash between these two operations is unresolved, never safe to retry.
+      await ledger.markSent(id)
+      stopped = this.beforeDispatch(conn, signal, expiresAt)
+      if (stopped !== undefined) {
+        await ledger.settle(id, { state: 'not_sent', reason: stopped.reason })
+        throw stopped.error
+      }
+    } catch (error) {
+      if (error instanceof BridgeToolError) throw error
+      throw new BridgeToolError('internal', 'browser dispatch could not be durably recorded; no action was sent')
+    }
+    return this.sendTool(conn, id, name, args, signal, expiresAt, sessionId)
+  }
+
+  private beforeDispatch(conn: ReadyConnection, signal: AbortSignal, expiresAt: number): { reason: 'cancelled' | 'expired' | 'connection-closed'; error: BridgeToolError } | undefined {
+    if (signal.aborted) return { reason: 'cancelled', error: new BridgeToolError('bridge-closed', 'tool call cancelled before dispatch') }
+    if (this.closed || this.current !== conn || conn.ws.readyState !== WebSocket.OPEN) return { reason: 'connection-closed', error: new BridgeToolError('bridge-closed', 'extension connection changed before dispatch') }
+    if (Date.now() >= expiresAt) return { reason: 'expired', error: new BridgeToolError('timeout', 'browser action expired before dispatch') }
+    return undefined
+  }
+
+  private sendTool(conn: ReadyConnection, id: string, name: string, args: Record<string, unknown>, signal: AbortSignal, expiresAt: number, sessionId?: string): Promise<unknown> {
     return new Promise<unknown>((resolve, reject) => {
       let timer: NodeJS.Timeout
-      const settle = (error: BridgeToolError): void => {
+      const pending: PendingTool = { finish: (settlement, value, error) => {
+        if (this.pendingTools.get(id) !== pending) return
         clearTimeout(timer)
         this.pendingTools.delete(id)
         signal.removeEventListener('abort', onAbort)
-        reject(error)
-      }
-      const cancel = (error: BridgeToolError): void => {
+        this.track((async () => {
+          try {
+            await this.deps.dispatches?.settle(id, settlement)
+            if (error === undefined) resolve(value)
+            else reject(error)
+          } catch {
+            reject(new BridgeToolError('internal', 'browser receipt could not be durably recorded; the action result may be unknown'))
+          }
+        })())
+      } }
+      const cancel = (reason: 'cancelled' | 'expired', error: BridgeToolError): void => {
         // The extension may be paused on a user approval after the caller has
         // stopped waiting. Withdraw that approval before settling locally so
         // a late click cannot execute an expired action.
         sendFrame(conn.ws, { t: 'tool.cancel', id })
-        settle(error)
+        const message = isReadOnlyBrowserTool(name) ? error : new BridgeToolError(error.code, `${error.message}; the action may have started, check the page before another write`)
+        pending.finish({ state: 'unresolved', reason }, undefined, message)
       }
       const onAbort = (): void => {
-        cancel(new BridgeToolError('bridge-closed', 'tool call cancelled before the extension answered'))
+        cancel('cancelled', new BridgeToolError('bridge-closed', 'tool call cancelled before the extension answered'))
       }
       timer = setTimeout(() => {
-        cancel(new BridgeToolError('timeout', `browser action "${name}" timed out after ${timeoutMs}ms`))
-      }, timeoutMs)
+        cancel('expired', new BridgeToolError('timeout', `browser action "${name}" timed out`))
+      }, Math.max(0, expiresAt - Date.now()))
       signal.addEventListener('abort', onAbort, { once: true })
-      this.pendingTools.set(id, { resolve, reject, timer })
-      conn.ws.send(JSON.stringify({
+      this.pendingTools.set(id, pending)
+      const frame = JSON.stringify({
         t: 'tool.call',
         id,
         name,
         args,
         expiresAt,
         ...(sessionId === undefined ? {} : { sessionId }),
-      } satisfies BridgeFrame), (error) => {
+      } satisfies BridgeFrame)
+      try { conn.ws.send(frame, (error) => {
         /* v8 ignore next -- teardown race: when the write fails, the socket's
         close handler settles the same call with the same code; the callback
         path is a defensive second settle, covered via the close path */
         if (error != null) {
-          settle(new BridgeToolError('bridge-closed', `bridge socket failed before delivery: ${error.message}`))
+          pending.finish({ state: 'unresolved', reason: 'send-failed' }, undefined, new BridgeToolError('bridge-closed', 'bridge socket failed; delivery may be unknown'))
         }
-      })
+      }) } catch {
+        pending.finish({ state: 'unresolved', reason: 'send-failed' }, undefined, new BridgeToolError('bridge-closed', 'bridge socket failed; delivery may be unknown'))
+      }
     })
   }
 
@@ -259,7 +320,11 @@ export class BridgeServer {
    * in-flight tool calls.
    * @returns a promise resolving after the acceptor and all pumps stop.
    */
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    return this.disposal ??= this.closeServer()
+  }
+
+  private async closeServer(): Promise<void> {
     // Idempotent: a second close must not touch the acceptor (ws throws
     // "The server is not running" when closing an already-closed server).
     if (this.closed) return
@@ -279,6 +344,7 @@ export class BridgeServer {
       })
     })
     await Promise.all(pumps)
+    while (this.operations.size > 0) await Promise.allSettled([...this.operations])
   }
 
   /** @returns whether an authenticated extension is currently connected. */
@@ -383,7 +449,7 @@ export class BridgeServer {
         }
       }
     })()
-    this.current = { ws, remoteAddress, abort, pump, ping, orderedSessionRpcs: new Map(),
+    this.current = { connectionId: randomUUID(), ws, remoteAddress, abort, pump, ping, orderedSessionRpcs: new Map(),
       ...(installationId === undefined ? {} : { installationId }) }
     sendFrame(ws, { t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps, ...(credential === undefined ? {} : { credential }) })
     ws.once('close', () => {
@@ -401,7 +467,7 @@ export class BridgeServer {
         void this.handleRespond(frame, conn)
         break
       case 'tool.result':
-        this.settleTool(frame.id, frame.ok, frame.ok ? frame.result : frame.error)
+        this.settleTool(conn, frame.id, frame.ok, frame.ok ? frame.result : frame.error)
         break
       case 'pong':
       case 'hello':
@@ -527,13 +593,26 @@ export class BridgeServer {
     }
   }
 
-  private settleTool(id: string, ok: boolean, payload: unknown): void {
+  private settleTool(conn: ReadyConnection, id: string, ok: boolean, payload: unknown): void {
+    const settlement: DispatchSettlement = { state: 'returned', receipt: transportReceipt(ok, ok ? undefined : payloadCode(payload)) }
     const pending = this.pendingTools.get(id)
-    if (pending === undefined) return
-    clearTimeout(pending.timer)
-    this.pendingTools.delete(id)
-    if (ok) pending.resolve(payload)
-    else pending.reject(new BridgeToolError(payloadCode(payload), payloadMessage(payload)))
+    if (pending !== undefined) {
+      pending.finish(settlement, payload, ok ? undefined : new BridgeToolError(payloadCode(payload), payloadMessage(payload)))
+    } else {
+      // A late result may settle transport uncertainty, but cannot resurrect
+      // the old caller or cross into a replacement connection's authority.
+      let row
+      try { row = this.deps.dispatches?.get(id) } catch { return }
+      if (row?.connectionId === conn.connectionId && row.state === 'unresolved') {
+        void this.track(this.deps.dispatches!.settle(id, settlement)).catch(() => {})
+      }
+    }
+  }
+
+  private track<T>(operation: Promise<T>): Promise<T> {
+    this.operations.add(operation)
+    void operation.then(() => this.operations.delete(operation), () => this.operations.delete(operation))
+    return operation
   }
 
   /** Close the current connection (if any) and settle its in-flight calls. */
@@ -546,10 +625,9 @@ export class BridgeServer {
     if (conn.ws.readyState === WebSocket.OPEN || conn.ws.readyState === WebSocket.CONNECTING) {
       conn.ws.close(4000, 'replaced')
     }
-    for (const [id, pending] of this.pendingTools) {
-      clearTimeout(pending.timer)
-      this.pendingTools.delete(id)
-      pending.reject(new BridgeToolError('bridge-closed', 'the extension connection was replaced'))
+    for (const pending of this.pendingTools.values()) {
+      pending.finish({ state: 'unresolved', reason: 'connection-closed' }, undefined,
+        new BridgeToolError('bridge-closed', 'the extension connection was replaced; action delivery may be unknown'))
     }
   }
 }

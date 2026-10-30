@@ -48,7 +48,7 @@ Bridge 和扩展需要从同一次检出构建：点击、输入和单选现在�
 
 ## 开发与验证
 
-可信 Host 插件现可通过 `ctx.browserRuns` 持久化运行状态与动作事实，支持带版本检查的控制和重启时的状态隔离。现有浏览器工具和侧栏尚未接入，不具备自动任务恢复能力。详见 [Bridge 文档](packages/browser/bridge-browser/README.zh.md)。
+可信 Host 插件可通过 `ctx.browserRuns` 持久化运行状态与动作事实，支持带版本检查的控制和重启时的状态隔离。浏览器工具现已通过其派发账本记录请求摘要和传输回执；任务生命周期控制、业务结果验证和自动恢复尚未接入工具链路或侧栏。详见 [Bridge 文档](packages/browser/bridge-browser/README.zh.md)。
 
 ```sh
 pnpm run typecheck

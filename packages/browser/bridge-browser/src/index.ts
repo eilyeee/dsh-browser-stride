@@ -163,10 +163,15 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     throw new Error('bridge-browser: DSH storageDomain service is required for browser run records')
   }
   const runs = await BrowserRunStore.open(storage, resolved.pairingProfile)
-  ctx.effect(() => () => runs.close(), 'bridge-browser: durable run records')
+  const lifetime: { server?: BridgeServer } = {}
+  // Cordis disposes separate effects concurrently. Keep this ordering inside
+  // one effect so receipt writes drain before their storage domain closes.
+  ctx.effect(() => async () => {
+    try { await lifetime.server?.close() } finally { await runs.close() }
+  }, 'bridge-browser: server and durable records')
   ctx.provide('browserRuns', runs)
   const tokenRes = await resolveToken(resolved.token)
-  mountBridge(ctx, resolved, tokenRes, createRemoteHostApi(gateway, connection))
+  mountBridge(ctx, resolved, tokenRes, createRemoteHostApi(gateway, connection), runs, lifetime)
 }
 
 function mountBridge(
@@ -174,6 +179,8 @@ function mountBridge(
   resolved: ResolvedConfig,
   tokenRes: Awaited<ReturnType<typeof resolveToken>>,
   hostApi: BrowserHostApi,
+  runs: BrowserRunStore,
+  lifetime: { server?: BridgeServer },
 ): void {
   // Workspace grouping wraps the gateway create; session deferral wraps the
   // result so materialization at first prompt still flows through grouping.
@@ -235,7 +242,7 @@ function mountBridge(
         if (!archived.ok) throw new Error(archived.error.message)
       },
     }
-    await purgeSessionFiles(deps, sessionId)
+    await runs.dispatches.purgeSession(sessionId, () => purgeSessionFiles(deps, sessionId))
   }
 
   const pairing = new PairingStore(dshHomePath('browser-bridge-pairings', `${resolved.pairingProfile}.json`))
@@ -252,7 +259,9 @@ function mountBridge(
     },
     injectBrowserSnapshot: (sessionId, snapshot) => { browserContext.inject(sessionId, snapshot) },
     purgeSession,
+    dispatches: runs.dispatches,
   })
+  lifetime.server = server
 
   const route: WebUpgradeRoute = {
     path: BRIDGE_PATH,
@@ -260,8 +269,6 @@ function mountBridge(
   }
   ctx.effect(() => ctx.webServer.registerUpgrade(route), 'bridge-browser: /ext/bridge upgrade route')
   ctx.effect(() => ctx.webServer.register(createPairingRoute(pairing, server, tokenRes.token)), 'bridge-browser: pairing administration')
-  // 异步 disposer：HMR/卸载时先等桥完全关闭（socket/泵/acceptor 静默）再继续。
-  ctx.effect(() => () => server.close(), 'bridge-browser: bridge server')
 
   // Discovery contains no secret and is only exposed to local clients.
   const configRoute: WebRoute = {

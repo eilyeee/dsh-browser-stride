@@ -152,6 +152,7 @@ try {
   const outcome = await waitForResult()
   assert.equal(outcome.ok, true, outcome.error)
   assert.equal(outcome.calls, 4)
+  assert.equal(outcome.recorded, 4)
   const response = await fetch(`${site.origin}/api/state?run=${encodeURIComponent(instance.runId)}`)
   assert.equal(response.ok, true)
   const state = await response.json()
@@ -164,7 +165,7 @@ try {
   await browser.panel.locator('.connection .dot.connected').waitFor({ state: 'hidden', timeout: 15_000 })
   await verifyIncompatibleHost(undefined, 'update-host')
   await verifyIncompatibleHost(BRIDGE_PROTOCOL_VERSION + 1, 'update-extension')
-  console.log('Browser smoke passed: real DSH tool runtime, pairing/revocation, snapshots and writes, independent site state, and incompatible-host rejection without tool dispatch or reconnect (no model)')
+  console.log('Browser smoke passed: real DSH tools with durable dispatch receipts, pairing/revocation, snapshots and writes, independent site state, and incompatible-host rejection (no model)')
 } finally {
   await browser?.close().catch(() => {})
   await host?.close().catch(() => {})

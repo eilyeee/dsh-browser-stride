@@ -1,9 +1,9 @@
 // A read does not compete for the browser's write lease. Unknown future tools
 // default to serialization until they are explicitly classified as read-only.
-const READ_ONLY_TOOLS = new Set(['browser_snapshot', 'browser_get_text', 'browser_wait', 'browser_list_tabs'])
+import { isReadOnlyBrowserTool } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 
 export function needsWriteTurn(name: string): boolean {
-  return !READ_ONLY_TOOLS.has(name)
+  return !isReadOnlyBrowserTool(name)
 }
 
 /** In-memory, single-browser write ordering. It is not a durable receipt ledger. */

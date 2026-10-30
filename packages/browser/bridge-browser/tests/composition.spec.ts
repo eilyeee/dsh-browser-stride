@@ -436,17 +436,29 @@ describe('real Loader composition', () => {
   })
 
   it('unregisters the browser tools when the bridge fiber disposes (HMR safety)', { timeout: 60_000 }, async () => {
-    const { ctx, configPath } = await loadComposition()
+    const { ctx, configPath, port } = await loadComposition()
     const tools = ctx.get('tools') as ToolRegistry
     expect(tools.get('browser_snapshot')).toBeDefined()
     const runs = ctx.browserRuns
     expect(runs.list()).toEqual([])
+    const client = await connectReady(port)
+    const pending = tools.execute({ callId: 'synthetic-hmr-read', name: 'browser_snapshot', arguments: {}, signal: new AbortController().signal })
+    await waitFor(() => client.frames.some(frame => frame.t === 'tool.call'))
+    const settle = runs.dispatches.settle.bind(runs.dispatches)
+    vi.spyOn(runs.dispatches, 'settle').mockImplementationOnce(async (...args) => {
+      await new Promise(resolve => setTimeout(resolve, 20))
+      return settle(...args)
+    })
 
     const bridgeEntry = [...ctx.loader.entries()].find((entry) => entry.options.name === BRIDGE)!
     await bridgeEntry.fiber!.dispose()
     expect(tools.get('browser_snapshot')).toBeUndefined()
     expect(tools.get('browser_click')).toBeUndefined()
     expect(() => runs.list()).toThrow(/closed/)
+    expect((await pending).isError).toBe(true)
+    const file = join(root!, 'storage', `browser_dispatches_${Buffer.from('web').toString('hex')}.json`)
+    const journal = JSON.parse(await readFile(file, 'utf8'))
+    expect(Object.values(journal.tables.dispatches)).toEqual([expect.objectContaining({ state: 'unresolved' })])
     // Self-disposing an include-tree entry persists `disabled: true`; await
     // that debounced write so it cannot race the temp-dir removal.
     await expect.poll(async () => (await readFile(configPath, 'utf8')).includes('disabled: true')).toBe(true)

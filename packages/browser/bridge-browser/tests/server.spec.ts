@@ -1,5 +1,6 @@
 import { BRIDGE_PROTOCOL_VERSION } from '../src/protocol.ts'
 import { createServer, type Server } from 'node:http'
+import { readFile, rename, rm, writeFile } from 'node:fs/promises'
 import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import WebSocket from 'ws'
@@ -7,6 +8,7 @@ import { BridgeServer, BridgeToolError, isLoopbackAddress, messageToText, payloa
 import { BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, BRIDGE_SESSION_PURGE_METHOD, type BridgeFrame } from '../src/protocol.ts'
 import { SessionPurgeError } from '../src/session-purge.ts'
 import type { BrowserHostApi, HostEventFrame } from '../src/host-api.ts'
+import { createRunStorage } from './helpers/run-storage.ts'
 
 const TOKEN = 'deadbeefdeadbeefdeadbeefdeadbeef'
 
@@ -95,11 +97,165 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<voi
 }
 
 const harnesses: Harness[] = []
+const storageFixtures: Awaited<ReturnType<typeof createRunStorage>>[] = []
 afterEach(async () => {
   for (const h of harnesses.splice(0)) {
     await h.bridge.close()
     await new Promise<void>((resolve) => { h.server.close(() => resolve()) })
   }
+  for (const fixture of storageFixtures.splice(0)) await fixture.close()
+})
+
+async function connectedLedger() {
+  const storage = await createRunStorage()
+  storageFixtures.push(storage)
+  const ledger = storage.store.dispatches
+  const h = await startBridge({ dispatches: ledger, toolTimeoutMs: 2_000 })
+  harnesses.push(h)
+  const client = await connect(h.url)
+  send(client.ws, { t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: TOKEN, caps: CAPS })
+  await waitFor(() => h.bridge.hasConnection())
+  return { ...h, ...client, storage, ledger }
+}
+
+describe('recorded tool dispatch', () => {
+  it('commits before sending and before returning a receipt, without storing arguments or results', async () => {
+    const h = await connectedLedger()
+    let releaseSend!: () => void
+    let releaseReceipt!: () => void
+    const sendGate = new Promise<void>(resolve => { releaseSend = resolve })
+    const receiptGate = new Promise<void>(resolve => { releaseReceipt = resolve })
+    const mark = h.ledger.markSent.bind(h.ledger)
+    vi.spyOn(h.ledger, 'markSent').mockImplementationOnce(async id => { const row = await mark(id); await sendGate; return row })
+    let settling = false
+    const settle = h.ledger.settle.bind(h.ledger)
+    vi.spyOn(h.ledger, 'settle').mockImplementationOnce(async (id, result) => { settling = true; await receiptGate; return settle(id, result) })
+    const args = { text: 'synthetic-private-input' }
+    let delivered = false
+    const pending = h.bridge.requestTool('browser_type', args, new AbortController().signal)
+    void pending.then(() => { delivered = true })
+    args.text = 'mutated-input'
+    try {
+      await waitFor(() => h.ledger.list()[0]?.state === 'sent_unconfirmed')
+      expect(h.frames.some(frame => frame.t === 'tool.call')).toBe(false)
+      expect(await readFile(h.storage.dispatchFile, 'utf8')).toContain('sent_unconfirmed')
+      releaseSend()
+      await waitFor(() => h.frames.some(frame => frame.t === 'tool.call'))
+      const call = h.frames.find(frame => frame.t === 'tool.call')! as Extract<BridgeFrame, { t: 'tool.call' }>
+      expect(call.args.text).toBe('synthetic-private-input')
+      send(h.ws, { t: 'tool.result', id: call.id, ok: true, result: { text: 'synthetic-private-page-result' } })
+      await waitFor(() => settling)
+      expect(delivered).toBe(false)
+      expect(h.ledger.get(call.id)?.state).toBe('sent_unconfirmed')
+      releaseReceipt()
+      await expect(pending).resolves.toEqual({ text: 'synthetic-private-page-result' })
+      expect(h.ledger.get(call.id)).toMatchObject({ state: 'returned', receipt: { ok: true } })
+      const disk = await readFile(h.storage.dispatchFile, 'utf8')
+      expect(disk).not.toContain('synthetic-private-input')
+      expect(disk).not.toContain('synthetic-private-page-result')
+    } finally { releaseSend(); releaseReceipt() }
+  })
+
+  it.each(['prepare', 'markSent'] as const)('does not send when %s fails', async method => {
+    const h = await connectedLedger()
+    vi.spyOn(h.ledger, method).mockRejectedValueOnce(new Error('synthetic storage failure'))
+    await expect(h.bridge.requestTool('browser_click', {}, new AbortController().signal)).rejects.toMatchObject({ code: 'internal' })
+    expect(h.frames.some(frame => frame.t === 'tool.call')).toBe(false)
+  })
+
+  it.each(['prepare', 'markSent'] as const)('rechecks cancellation after %s commits', async method => {
+    const h = await connectedLedger()
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    let entered = false
+    const original = h.ledger[method].bind(h.ledger) as (...args: any[]) => Promise<any>
+    vi.spyOn(h.ledger, method).mockImplementationOnce(async (...args: any[]) => {
+      const row = await original(...args); entered = true; await gate; return row
+    })
+    const abort = new AbortController()
+    const pending = h.bridge.requestTool('browser_click', {}, abort.signal).catch(error => error)
+    try {
+      await waitFor(() => entered)
+      abort.abort()
+      release()
+      expect(await pending).toMatchObject({ code: 'bridge-closed' })
+      expect(h.ledger.list()[0]).toMatchObject({ state: 'not_sent', interruption: { reason: 'cancelled' } })
+      expect(h.frames.some(frame => frame.t === 'tool.call')).toBe(false)
+    } finally { release() }
+  })
+
+  it('does not redirect a prepared call into a replacement connection', async () => {
+    const h = await connectedLedger()
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const mark = h.ledger.markSent.bind(h.ledger)
+    vi.spyOn(h.ledger, 'markSent').mockImplementationOnce(async id => { const row = await mark(id); await gate; return row })
+    const pending = h.bridge.requestTool('browser_click', {}, new AbortController().signal).catch(error => error)
+    try {
+      await waitFor(() => h.ledger.list()[0]?.state === 'sent_unconfirmed')
+      const replacement = await connect(h.url)
+      send(replacement.ws, { t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: TOKEN, caps: CAPS })
+      await waitFor(() => replacement.frames.some(frame => frame.t === 'hello.ok'))
+      release()
+      expect(await pending).toMatchObject({ code: 'bridge-closed' })
+      expect(h.ledger.list()[0]?.state).toBe('not_sent')
+      expect(replacement.frames.some(frame => frame.t === 'tool.call')).toBe(false)
+    } finally { release() }
+  })
+
+  it('expires a call whose persistence finishes after its deadline without sending it', async () => {
+    const h = await connectedLedger()
+    const prepare = h.ledger.prepare.bind(h.ledger)
+    vi.spyOn(h.ledger, 'prepare').mockImplementationOnce(async input => {
+      const row = await prepare(input)
+      await new Promise(resolve => setTimeout(resolve, 60))
+      return row
+    })
+    await expect(h.bridge.requestTool('browser_click', {}, new AbortController().signal, 30)).rejects.toMatchObject({ code: 'timeout' })
+    expect(h.ledger.list()[0]).toMatchObject({ state: 'not_sent', interruption: { reason: 'expired' } })
+    expect(h.frames.some(frame => frame.t === 'tool.call')).toBe(false)
+  })
+
+  it('records post-send cancellation and a late receipt without retrying the action', async () => {
+    const h = await connectedLedger()
+    const abort = new AbortController()
+    const pending = h.bridge.requestTool('browser_click', {}, abort.signal).catch(error => error)
+    await waitFor(() => h.frames.some(frame => frame.t === 'tool.call'))
+    const call = h.frames.find(frame => frame.t === 'tool.call')!
+    abort.abort()
+    expect(await pending).toMatchObject({ code: 'bridge-closed', message: expect.stringContaining('may have started') })
+    expect(h.ledger.get(call.id)?.state).toBe('unresolved')
+    send(h.ws, { t: 'tool.result', id: call.id, ok: true, result: { text: 'synthetic late result' } })
+    await waitFor(() => h.ledger.get(call.id)?.state === 'returned')
+    expect(h.ledger.get(call.id)?.interruption?.reason).toBe('cancelled')
+    expect(h.frames.filter(frame => frame.t === 'tool.call')).toHaveLength(1)
+  })
+
+  it('drains unresolved receipt writes before server shutdown completes', async () => {
+    const h = await connectedLedger()
+    const pending = h.bridge.requestTool('browser_click', {}, new AbortController().signal).catch(error => error)
+    await waitFor(() => h.frames.some(frame => frame.t === 'tool.call'))
+    await h.bridge.close()
+    expect(await pending).toMatchObject({ code: 'bridge-closed' })
+    expect(h.ledger.list()[0]?.state).toBe('unresolved')
+    expect(await readFile(h.storage.dispatchFile, 'utf8')).toContain('connection-closed')
+  })
+
+  it('refuses to deliver a result or send another action after receipt persistence fails', async () => {
+    const h = await connectedLedger()
+    const pending = h.bridge.requestTool('browser_click', {}, new AbortController().signal).catch(error => error)
+    await waitFor(() => h.frames.some(frame => frame.t === 'tool.call'))
+    const call = h.frames.find(frame => frame.t === 'tool.call')!
+    const root = h.storage.storageRoot
+    await rename(root, root + '-backup')
+    await writeFile(root, 'synthetic-obstacle')
+    try {
+      send(h.ws, { t: 'tool.result', id: call.id, ok: true, result: { text: 'synthetic result' } })
+      expect(await pending).toMatchObject({ code: 'internal', message: expect.stringContaining('may be unknown') })
+      await expect(h.bridge.requestTool('browser_click', {}, new AbortController().signal)).rejects.toMatchObject({ code: 'internal' })
+      expect(h.frames.filter(frame => frame.t === 'tool.call')).toHaveLength(1)
+    } finally { await rm(root); await rename(root + '-backup', root) }
+  })
 })
 
 describe('BridgeServer', () => {
