@@ -264,8 +264,65 @@ try {
   })
   browser = await startExtensionBrowser({
     repoRoot, benchmarkRoot, bridgeUrl: `ws://127.0.0.1:${port}/ext/bridge`,
-    pairingCode: await host.issuePairingCode(), trustedOrigin: site.origin,
+    deferPairing: true, trustedOrigin: site.origin,
   })
+  // Exercise the real extension UI, owner HTTP authentication and Host UI.
+  // The process launch URL stays inside this isolated temporary profile.
+  const owner = await browser.context.newPage()
+  await browser.panel.setViewportSize({ width: 420, height: 900 })
+  await owner.goto(host.getAuthenticatedUrl(), { waitUntil: 'domcontentloaded' }).catch(() => { throw new Error('Isolated Host browser login failed') })
+  const ownerPath = '/api/stride-browser-pairing'
+  assert.equal((await fetch(`${host.baseUrl}${ownerPath}`)).status, 401)
+  assert.equal((await fetch(`${host.baseUrl}${ownerPath}`, { method: 'POST',
+    headers: { 'content-type': 'application/json' }, body: '{}' })).status, 401)
+  assert.equal((await fetch(`${host.baseUrl}/ext/bridge-pairing-request`, { method: 'POST',
+    headers: { 'content-type': 'application/json' }, body: '{}' })).status, 400)
+  const pairingResponses = []
+  browser.context.on('response', response => {
+    const url = new URL(response.url())
+    if (url.origin === host.baseUrl && url.pathname.includes('pairing')) pairingResponses.push({ path: url.pathname, status: response.status() })
+  })
+  await browser.panel.getByRole('button', { name: '打开设置', exact: true }).click()
+  await browser.panel.locator('.settings-panel input').first().fill(`ws://127.0.0.1:${port}/ext/bridge`)
+  await browser.panel.getByRole('button', { name: '连接本机 DSH', exact: true }).click()
+  await browser.panel.locator('.pairing-code').waitFor().catch(async () => {
+    const notice = await browser.panel.locator('.pairing-section').innerText()
+    throw new Error(`Pairing UI did not enter pending state: ${notice}; HTTP ${JSON.stringify(pairingResponses)}`)
+  })
+  const verificationCode = await browser.panel.locator('.pairing-code').textContent()
+  assert.match(verificationCode, /^[A-F0-9]{8}$/)
+  const uiArtifacts = join(repoRoot, '.stride-private/validation/pairing')
+  await mkdir(uiArtifacts, { recursive: true })
+  await owner.screenshot({ path: join(uiArtifacts, 'host.png') })
+  await browser.panel.screenshot({ path: join(uiArtifacts, 'extension.png') })
+  const onboarding = owner.getByRole('button', { name: '继续', exact: true })
+  await onboarding.waitFor({ timeout: 15_000 })
+  await onboarding.click()
+  // This smoke uses no account or API key. Dismiss the optional sign-in dialog
+  // through its normal UI before opening settings.
+  await owner.getByRole('button', { name: '关闭', exact: true }).last().click()
+  await owner.getByRole('button', { name: '账号菜单', exact: true }).click({ timeout: 3_000 }).catch(async () => {
+    await owner.screenshot({ path: join(uiArtifacts, 'onboarding.png') })
+    throw new Error(`Isolated Host setup still open: ${(await owner.locator('body').innerText()).slice(-1600)}`)
+  })
+  await owner.getByText('设置', { exact: true }).click()
+  await owner.getByText(verificationCode, { exact: true }).waitFor()
+  await owner.getByText(verificationCode, { exact: true }).scrollIntoViewIfNeeded()
+  await owner.screenshot({ path: join(uiArtifacts, 'host.png') })
+  // An untrusted script click must not approve the pending request.
+  await owner.getByRole('button', { name: /确认配对|Confirm pairing/u }).evaluate(button => button.click())
+  await delay(200)
+  assert.equal((await host.listInstallations()).length, 0)
+  await owner.getByRole('button', { name: /确认配对|Confirm pairing/u }).click()
+  await browser.panel.getByText('连接已保存，以后会自动重连。', { exact: true }).waitFor({ timeout: 10_000 }).catch(async () => {
+    throw new Error(`Credential was not saved: ${await browser.panel.locator('.pairing-section').innerText()}; HTTP ${JSON.stringify(pairingResponses)}`)
+  })
+  await browser.panel.getByRole('button', { name: '返回对话', exact: true }).click()
+  await browser.panel.locator('.connection .dot.connected').waitFor({ state: 'visible', timeout: 15_000 })
+  await browser.panel.reload()
+  await browser.panel.locator('.connection .dot.connected').waitFor({ state: 'visible', timeout: 15_000 })
+  await browser.panel.evaluate(() => { window.__dshBenchmarkPort = chrome.runtime.connect({ name: 'dsh-panel' }) })
+  await owner.close()
   const instance = makeTaskInstance('notification_toggle', 1, 'stride-browser-smoke', site.origin)
   await browser.prepare(instance.url)
   const session = await host.client.rpc('session.create', { cwd: root })
@@ -289,7 +346,7 @@ try {
   await verifyIncompatibleHost(undefined, 'update-host')
   await verifyIncompatibleHost(BRIDGE_PROTOCOL_VERSION - 1, 'update-host')
   await verifyIncompatibleHost(BRIDGE_PROTOCOL_VERSION + 1, 'update-extension')
-  console.log('Browser smoke passed: real DSH tools, durable v2 identities, persistent replay/conflict rejection across worker restart, origin isolation, pairing/revocation and independent site state (no model)')
+  console.log('Browser smoke passed: owner-confirmed pairing UI, authentication fence, reconnect after reload, real DSH tools, durable v2 identities, persistent replay/conflict rejection across worker restart, origin isolation, revocation and independent site state (no model)')
 } finally {
   await browser?.close().catch(() => {})
   await host?.close().catch(() => {})

@@ -33,6 +33,23 @@ export class PairingStore {
     return { ...this.pending }
   }
 
+  /** Called only after a Host owner approves this exact installation request. */
+  enroll(installationId: string): Promise<string> {
+    return this.exclusive(async () => {
+      if (!validInstallationId(installationId)) throw new Error('invalid installation identifier')
+      const records = await this.load()
+      const existing = records[installationId]
+      const credential = randomBytes(32).toString('hex')
+      records[installationId] = { credentialHash: hashCredential(credential), createdAt: this.now() }
+      try { await this.save(records) } catch (error) {
+        if (existing === undefined) delete records[installationId]
+        else records[installationId] = existing
+        throw error
+      }
+      return credential
+    })
+  }
+
   authenticate(installationId: string, token: string): Promise<{ credential?: string } | undefined> {
     return this.exclusive(async () => {
       if (!validInstallationId(installationId)) return undefined

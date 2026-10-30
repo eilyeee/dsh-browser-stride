@@ -6,6 +6,8 @@ The bridge mounts a loopback-only, token-authenticated WebSocket on the local De
 
 ## Configuration
 
+For first connection, click **Connect to local DSH** in extension settings, then confirm the matching code in the signed-in DSH **Settings → General → Browser pairing** section. Up to eight requests stay in memory for five minutes; only a Connection-authenticated owner can approve them. Request proofs and installation credentials never enter Host pages or URLs. Credentials can be claimed once; lost responses, restart or storage failure require a fresh confirmation. Manual pairing codes remain supported. Normal source upgrades preserve pairing when the original extension installation and Host data remain; see the repository README for update steps.
+
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `token` | generated | Administrator token for pairing; if unset, the Host stores it in `DSH_HOME/ext-bridge-token` with restricted permissions. It is not a browser credential and is not logged. |

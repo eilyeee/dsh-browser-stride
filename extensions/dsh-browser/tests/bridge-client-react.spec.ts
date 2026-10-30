@@ -13,9 +13,11 @@ it('renders the bridge settings row with the extension React version', async () 
   let client: ClientModule | undefined
   let row: React.ComponentType<RowProps> | undefined
   const cleanups: Array<() => void> = []
-  const fetchBridge = vi.fn(async () => ({
+  const fetchBridge = vi.fn(async (url: string, _init?: RequestInit) => ({
     ok: true,
-    json: async () => ({ wsUrl: 'ws://127.0.0.1:1234/ext/bridge' }),
+    json: async () => url.endsWith('/api/stride-browser-pairing')
+      ? { requests: [{ requestId: 'synthetic-request', verificationCode: 'AABBCCDD', status: 'pending' }] }
+      : { wsUrl: 'ws://127.0.0.1:1234/ext/bridge' },
   }))
   const fakeWindow = {
     __ModuleLoader__: {
@@ -29,6 +31,8 @@ it('renders the bridge settings row with the extension React version', async () 
     location: window.location,
     setTimeout: window.setTimeout.bind(window),
     clearTimeout: window.clearTimeout.bind(window),
+    setInterval: window.setInterval.bind(window),
+    clearInterval: window.clearInterval.bind(window),
   }
   const source = readFileSync(resolve(process.cwd(), '../../packages/browser/bridge-browser/src/client.js'), 'utf8')
   const execute = new Function('window', 'document', 'fetch', 'navigator', 'HTMLElement', source)
@@ -57,7 +61,12 @@ it('renders the bridge settings row with the extension React version', async () 
       root.render(React.createElement(row!, { t: (key: string) => key }))
     })
     expect(container.querySelector('code')?.textContent).toBe('ws://127.0.0.1:1234/ext/bridge')
-    expect(fetchBridge).toHaveBeenCalledOnce()
+    expect(fetchBridge.mock.calls.some(([url]) => url.endsWith('/ext/bridge-config'))).toBe(true)
+    expect(fetchBridge.mock.calls.some(([url]) => url.endsWith('/api/stride-browser-pairing'))).toBe(true)
+    const approve = [...container.querySelectorAll('button')].find(button => button.textContent === 'pairing.approve')!
+    expect(approve.type).toBe('button')
+    await React.act(async () => { approve.click() })
+    expect(fetchBridge.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(0)
   } finally {
     await React.act(async () => { root.unmount() })
     for (const cleanup of cleanups) cleanup()

@@ -45,6 +45,7 @@ import { readBridgeCredential, writeBridgeCredential } from './credential-store.
 import { needsWriteTurn, WriteQueue } from './write-queue.ts'
 import { executeRecordedTool } from './execution-receipts.ts'
 import { localBridgeUrl } from './bridge-address.ts'
+import { requestBrowserPairing, type BrowserPairingStatus } from './pairing-client.ts'
 import { createRpc } from './rpc.ts'
 import {
   dispatchOpenTab,
@@ -1367,6 +1368,51 @@ async function gatewayRpc(method: string, payload: unknown): Promise<unknown> {
   return rpc.request(method, payload)
 }
 
+let pairingJob: { controller: AbortController; port: chrome.runtime.Port } | undefined
+
+function cancelBrowserPairing(port?: chrome.runtime.Port): void {
+  if (pairingJob !== undefined && (port === undefined || pairingJob.port === port)) pairingJob.controller.abort()
+}
+
+async function pairBrowser(port: chrome.runtime.Port, address: string): Promise<void> {
+  if (pairingJob !== undefined) {
+    if (pairingJob.port !== port) {
+      try { port.postMessage({ type: 'browser-pairing', status: { phase: 'failed', error: 'pairing-busy' } }) } catch { /* panel closed */ }
+    }
+    return
+  }
+  const job = { controller: new AbortController(), port }
+  pairingJob = job
+  const send = (status: BrowserPairingStatus): void => {
+    if (pairingJob !== job || !panelPorts.has(port)) return
+    try { port.postMessage({ type: 'browser-pairing', status }) } catch { /* panel closed */ }
+  }
+  send({ phase: 'requesting' })
+  try {
+    await settingsReady
+    if (bridge?.connected) throw new Error('already-connected')
+    const initial = { token: settings.token, bridgeUrl: settings.bridgeUrl }
+    const discovered = address === '' ? await discoverBridge(() => !job.controller.signal.aborted && panelPorts.has(port)) : address
+    const local = discovered === undefined ? undefined : localBridgeUrl(discovered)
+    if (local === undefined) throw new Error('host-unavailable')
+    job.controller.signal.throwIfAborted()
+    const installationId = await ensureInstallationId()
+    const credential = await requestBrowserPairing(local, installationId, job.controller.signal, send)
+    job.controller.signal.throwIfAborted()
+    if (pairingJob !== job || !panelPorts.has(port) || settings.token !== initial.token || settings.bridgeUrl !== initial.bridgeUrl) {
+      throw new Error('pairing-cancelled')
+    }
+    send({ phase: 'saving' })
+    await persistSettings({ bridgeUrl: address === '' ? '' : local, token: credential })
+    // A completed credential commit survives closing the panel, just like a
+    // manual pairing. Only a live panel may initiate its new connection.
+    if (!job.controller.signal.aborted && panelPorts.has(port)) await startBridge()
+    send({ phase: 'saved' })
+  } catch (error) {
+    send({ phase: 'failed', error: job.controller.signal.aborted ? 'pairing-cancelled' : error instanceof Error ? error.message : 'host-unavailable' })
+  } finally { if (pairingJob === job) pairingJob = undefined }
+}
+
 // ---- Content script messages ----
 
 chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
@@ -1421,6 +1467,18 @@ chrome.runtime.onConnect.addListener((port) => {
     if (typeof message !== 'object' || message === null) return
     const msg = message as { type?: string }
     switch (msg.type) {
+      case 'browser-pairing.start': {
+        const address = (message as { bridgeUrl?: unknown }).bridgeUrl
+        if (typeof address === 'string' && address.length <= 512 && (address === '' || localBridgeUrl(address) !== undefined)) {
+          void pairBrowser(port, address)
+        } else {
+          try { port.postMessage({ type: 'browser-pairing', status: { phase: 'failed', error: 'invalid-host' } }) } catch { /* panel closed */ }
+        }
+        break
+      }
+      case 'browser-pairing.cancel':
+        cancelBrowserPairing(port)
+        break
       case 'rpc': {
         const rpcMsg = message as { id: string; method: string; payload?: unknown }
         const rpcSessionId = typeof rpcMsg.payload === 'object' && rpcMsg.payload !== null
@@ -1473,6 +1531,7 @@ chrome.runtime.onConnect.addListener((port) => {
         break
       }
       case 'settings': {
+        cancelBrowserPairing()
         const settingsMsg = message as { id?: unknown; settings: Partial<Settings> }
         const requestId = typeof settingsMsg.id === 'string' ? settingsMsg.id : undefined
         void settingsReady.then(async () => {
@@ -1659,6 +1718,7 @@ chrome.runtime.onConnect.addListener((port) => {
     }
   })
   port.onDisconnect.addListener(() => {
+    cancelBrowserPairing(port)
     for (const operation of tabAffinityRebinds.values()) {
       clearTimeout(operation.timer)
       operation.controller.abort(new TabAffinityRebindError('cancelled', getUiLocale() === 'zh'

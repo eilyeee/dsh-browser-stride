@@ -26,6 +26,8 @@ export const BRIDGE_CONFIG_PATH = '/ext/bridge-config'
 
 /** Local, administrator-authenticated installation pairing endpoint. */
 export const BRIDGE_PAIRING_PATH = '/ext/bridge-pairing'
+export const BRIDGE_PAIRING_REQUEST_PATH = '/ext/bridge-pairing-request'
+export const BRIDGE_PAIRING_OWNER_PATH = '/api/stride-browser-pairing'
 
 /** Internal RPC used after an explicit tab handoff to seed the Agent's next step. */
 export const BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD = 'bridge.injectBrowserSnapshot'

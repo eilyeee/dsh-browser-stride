@@ -9,6 +9,13 @@ no release version has been assigned yet.
 
 ### Added
 
+- Owner-confirmed browser pairing: the extension requests a short-lived matching
+  verification code, an authenticated DSH settings user approves, and only the
+  requesting extension may claim its installation credential. Requests are
+  bounded, expire after five minutes, and are discarded on Host restart. Existing
+  manual codes and saved-credential reconnect remain supported. Revocation also
+  cancels outstanding requests for the installation.
+
 - Wire protocol v2 carries Host-issued logical action ids and SHA-256 command
   digests on calls and replies. The Host ignores replies with mismatched ids or
   digests, and the extension verifies the command before execution admission.

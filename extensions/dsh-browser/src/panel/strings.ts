@@ -68,6 +68,14 @@ export interface PanelCopy {
     tokenLabel: string
     tokenHelp: string
     tokenPlaceholder: string
+    pair: string
+    pairingHelp: string
+    pairingWaiting: string
+    pairingSaving: string
+    pairingSaved: string
+    pairingCancel: string
+    pairingOpenHost: string
+    pairingError: (code: string) => string
     pageSharing: string
     pageSharingHelp: string
     sharingAuto: string
@@ -279,6 +287,24 @@ const EN: PanelCopy = {
     tokenLabel: 'Pairing code',
     tokenHelp: 'Enter a one-time pairing code generated on the Host',
     tokenPlaceholder: 'Leave blank to keep the saved credential',
+    pair: 'Connect to local DSH',
+    pairingHelp: 'Confirm the matching verification code in DSH → Settings → General → Browser pairing. No code copying is needed. Keep this panel open.',
+    pairingWaiting: 'Waiting for confirmation in DSH',
+    pairingSaving: 'Saving the connection…',
+    pairingSaved: 'Connection saved. The extension reconnects automatically.',
+    pairingCancel: 'Cancel pairing',
+    pairingOpenHost: 'Open DSH',
+    pairingError: (code) => ({
+      'pairing-denied': 'Pairing was denied in DSH.',
+      'pairing-cancelled': 'Pairing cancelled.',
+      'pairing-unavailable': 'The request expired or DSH restarted. Request pairing again.',
+      'pairing-busy': 'Another request is waiting. Cancel it or wait for it to expire.',
+      'protocol-upgrade-host': 'Update the DSH Bridge before pairing.',
+      'protocol-upgrade-extension': 'Update and reload this extension before pairing.',
+      'update-host': 'Update the DSH Bridge to a version supporting pairing requests.',
+      'already-connected': 'This browser is already connected.',
+      'connection-lost': 'Background connection lost. Request pairing again.',
+    } as Record<string, string>)[code] ?? 'Pairing failed. Check the local DSH address and retry.',
     pageSharing: 'Page content sharing',
     pageSharingHelp: 'Control when the assistant can read page text',
     sharingAuto: 'Share automatically (default)',
@@ -490,6 +516,24 @@ const ZH: PanelCopy = {
     tokenLabel: '配对码',
     tokenHelp: '填写在 Host 上生成的一次性配对码',
     tokenPlaceholder: '留空以继续使用已保存的凭据',
+    pair: '连接本机 DSH',
+    pairingHelp: '在 DSH → 设置 → 通用 → 浏览器配对中核对并确认校验码，无需复制配对码。请保持此侧栏打开。',
+    pairingWaiting: '等待在 DSH 中确认',
+    pairingSaving: '正在保存连接…',
+    pairingSaved: '连接已保存，以后会自动重连。',
+    pairingCancel: '取消配对',
+    pairingOpenHost: '打开 DSH',
+    pairingError: (code) => ({
+      'pairing-denied': 'DSH 已拒绝本次配对。',
+      'pairing-cancelled': '已取消配对。',
+      'pairing-unavailable': '请求已过期或 DSH 已重启，请重新发起配对。',
+      'pairing-busy': '已有请求正在等待确认，请取消或等待其过期。',
+      'protocol-upgrade-host': '请先更新 DSH Bridge，再发起配对。',
+      'protocol-upgrade-extension': '请先更新并重新加载此扩展。',
+      'update-host': '请更新 DSH Bridge，以支持配对请求。',
+      'already-connected': '此浏览器已经连接。',
+      'connection-lost': '后台连接已断开，请重新发起配对。',
+    } as Record<string, string>)[code] ?? '配对失败，请检查本机 DSH 地址后重试。',
     pageSharing: '页面内容共享',
     pageSharingHelp: '控制助手何时可以读取页面文字',
     sharingAuto: '自动共享（默认）',

@@ -51,6 +51,9 @@ describe('panel session transitions', () => {
     })
     const unsubscribe = (): void => {}
     panelApi = {
+      startBrowserPairing: vi.fn(async () => {}),
+      cancelBrowserPairing: vi.fn(async () => {}),
+      onBrowserPairing: vi.fn(() => unsubscribe),
       rpc: async <T = unknown>(method: string, payload?: unknown): Promise<T> =>
         await rpc(method, payload) as T,
       respond: vi.fn(async () => undefined),

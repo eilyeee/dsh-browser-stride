@@ -8,6 +8,7 @@
  */
 
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { BrowserPairingStatus } from '../background/pairing-client.ts'
 import { BRIDGE_SESSION_PURGE_METHOD, DEFAULT_SNAPSHOT_MAX_CHARS } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import type { BridgeCaps } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import type { ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
@@ -627,6 +628,10 @@ export function App(): React.JSX.Element {
   const [state, setState] = useState<BridgeState>('stopped')
   const [caps, setCaps] = useState<BridgeCaps | null>(null)
   const [settings, setSettings] = useState<PanelSettings | null>(null)
+  const [pairingStatus, setPairingStatus] = useState<BrowserPairingStatus>({ phase: 'idle' })
+  const pairingBusy = ['requesting', 'pending', 'saving'].includes(pairingStatus.phase)
+  useEffect(() => api.onBrowserPairing(status => setPairingStatus(current =>
+    current.phase === 'idle' && status.error === 'connection-lost' ? current : status)), [api])
   const [rows, setRows] = useState<Row[]>([])
   const [streamRow, setStreamRow] = useState<Row | null>(null)
   const [draft, setDraft] = useState<ComposerDraft<DraftImage>>(() => emptyComposerDraft())
@@ -1950,15 +1955,32 @@ export function App(): React.JSX.Element {
             <small>{copy.settings.bridgeHelp}</small>
             <input
               value={settings?.bridgeUrl ?? ''}
+              disabled={pairingBusy}
               onChange={(e) => setSettings((prev) => prev === null ? prev : { ...prev, bridgeUrl: e.target.value })}
               placeholder={copy.settings.bridgePlaceholder}
             />
           </label>
+          <section className="pairing-section" aria-label={copy.settings.pair}>
+            <p>{copy.settings.pairingHelp}</p>
+            <button type="button" className="primary" disabled={pairingBusy || state === 'connected'} onClick={() => {
+              void api.startBrowserPairing(settings?.bridgeUrl ?? '').catch(() => setPairingStatus({ phase: 'failed', error: 'connection-lost' }))
+            }}>{copy.settings.pair}</button>
+            {pairingBusy && <button type="button" className="secondary" disabled={pairingStatus.phase === 'saving'} onClick={() => { void api.cancelBrowserPairing() }}>{copy.settings.pairingCancel}</button>}
+            {pairingStatus.phase === 'pending' && <div role="status">
+              <p>{copy.settings.pairingWaiting}</p>
+              <code className="pairing-code">{pairingStatus.verificationCode}</code>
+              <a href={pairingStatus.hostUrl} target="_blank" rel="noopener noreferrer">{copy.settings.pairingOpenHost}</a>
+            </div>}
+            {pairingStatus.phase === 'saving' && <p role="status">{copy.settings.pairingSaving}</p>}
+            {pairingStatus.phase === 'saved' && <p role="status">{copy.settings.pairingSaved}</p>}
+            {pairingStatus.phase === 'failed' && <p role="alert">{copy.settings.pairingError(pairingStatus.error ?? '')}</p>}
+          </section>
           <label>
             <span>{copy.settings.tokenLabel}</span>
             <small>{copy.settings.tokenHelp}</small>
             <input
               type="password"
+              disabled={pairingBusy}
               value={settings?.token ?? ''}
               onChange={(e) => setSettings((prev) => prev === null ? prev : { ...prev, token: e.target.value })}
               placeholder={copy.settings.tokenPlaceholder}
@@ -2148,8 +2170,11 @@ export function App(): React.JSX.Element {
           ))}
         </section>
         <div className="settings-actions">
-          <button className="primary" onClick={saveSettings}>{copy.settings.save}</button>
-          <button className="secondary" onClick={() => setShowSettings(false)}>{copy.settings.cancel}</button>
+          <button className="primary" disabled={pairingBusy} onClick={saveSettings}>{copy.settings.save}</button>
+          <button className="secondary" onClick={() => {
+            void api.cancelBrowserPairing().catch(() => {})
+            setShowSettings(false)
+          }}>{copy.settings.cancel}</button>
         </div>
         <p className="hint">{copy.settings.snapshotHint(caps?.snapshotMaxChars ?? DEFAULT_SNAPSHOT_MAX_CHARS)}</p>
       </div>{approvalDialog}</>

@@ -26,7 +26,15 @@ pnpm start
 
 安装脚本会修改本地 DSH 的 **web** profile、构建插件与 Chrome 扩展，并尝试打开 Chrome 扩展管理页；如果该 profile 中存在旧版 Bridge 包，脚本可能移除它，请先阅读脚本。Firefox 需要单独构建和临时安装，详见[扩展说明](extensions/dsh-browser/README.zh.md)。桌面端可能使用其他 profile，安装到 `web` 不等于桌面端已经接通。脚本必须从完整的 Stride 检出目录运行，不会下载上游项目代替本项目。
 
-启动 Host 后，在另一个终端的仓库根目录运行 `pnpm run pair:browser`，将得到的一次性配对码填入已加载扩展的侧栏设置。配对码五分钟后过期，使用后会换成该安装实例专用的凭据。地址可以自动发现；如果 Host 使用非默认端口，运行 `pnpm run pair:browser -- issue --url http://127.0.0.1:PORT`，并在扩展中将 Bridge 地址设为 `ws://127.0.0.1:PORT/ext/bridge`。使用 `pnpm run pair:browser -- list` 查看安装实例，使用 `pnpm run pair:browser -- revoke INSTALLATION_ID` 撤销并断开指定实例；非默认端口也需加上 `--url`。
+启动 Host 后，在扩展侧栏设置中点击「连接本机 DSH」。保持侧栏打开，在已登录的 DSH 网页「设置 → 通用 → 浏览器配对」中核对相同校验码并确认，扩展会自动保存安装级凭据并连接，以后自动重连。请求五分钟后过期；拒绝、取消或 Host 重启后需要重新发起。请求本身不授予权限，只有经过 Host 登录认证的用户才能确认；凭据只交给持有本次请求证明的扩展，不放入网页、URL 或日志。连接成功会替换当前浏览器连接，页面操作仍遵循扩展审批策略。
+
+也可在另一个终端的仓库根目录运行 `pnpm run pair:browser`，将一次性配对码填入扩展设置。配对码五分钟后过期，使用后换成安装级凭据。地址可以自动发现；非默认端口可在扩展中填写 `ws://127.0.0.1:PORT/ext/bridge`，手动配对命令加上 `-- issue --url http://127.0.0.1:PORT`。使用 `pnpm run pair:browser -- list` 查看安装实例，使用 `pnpm run pair:browser -- revoke INSTALLATION_ID` 撤销并断开指定实例，同时取消它尚未领取的配对请求；非默认端口也需加上 `--url`。
+
+### 更新
+
+当前使用源码安装：在原检出目录拉取更新，用项目要求的 Node/pnpm 安装锁定依赖并运行 `pnpm build`，重启 Host，在 `chrome://extensions/` 点击扩展的「重新加载」，再刷新需要操作的网页。保留原扩展安装、相同浏览器配置和 Host 数据即可沿用配对；更换扩展安装身份或清除数据后需要重新配对。Firefox 临时扩展需重新载入。Bridge 和扩展应来自同一检出，不兼容时会提示更新哪一端。
+
+DSH 能安装 GitHub 插件，但本仓库根目录目前是开发工作区，尚未提供可直接通过 GitHub 插件入口安装的发布包，也没有浏览器商店自动更新渠道。GitHub 安装 Host 插件不会替浏览器安装或更新扩展。
 
 Host 管理员令牌默认保存在 `$DSH_HOME/ext-bridge-token`，未设置 `DSH_HOME` 时为 `~/.dsh/ext-bridge-token`。请妥善保管，**不要把它填入扩展**。如果 Host 显式配置了令牌，通过 `DSH_BRIDGE_ADMIN_TOKEN` 环境变量传给配对命令。配对期间若保存凭据失败，需要重新生成配对码。
 
@@ -37,7 +45,7 @@ Host 管理员令牌默认保存在 `$DSH_HOME/ext-bridge-token`，未设置 `DS
 - 文本快照、绑定观察的控件引用、页面导航、标签管理和划词引用。同一 frame 的新观察会使旧引用失效。
 - 通过本机 Harness 会话 API 提供侧栏聊天；聊天图片附件依赖 Host 能力。
 - 页面写操作的用户审批、目标执行前检查、单选下拉框选择，以及输入框和复选框状态回读。控件状态回读不能证明表单已经保存。
-- 扩展 worker 运行期间的浏览器写操作内存排队；持久动作回执和重启对账仍未实现。
+- 扩展 worker 运行期间的浏览器写操作内存排队、Host 派发元数据和扩展持久执行占位；任务恢复和业务结果对账仍未实现。
 - 仅允许本机回环连接的 Bridge，支持一次性配对码和可单独撤销的安装级凭据。Host 设置、凭据和本地路径操作默认不对 Bridge 开放，只有 Host 显式启用 `allowHostManagement` 后才可使用。
 
 当前不支持网页截图、CDP 输入、网页文件上传下载、可靠任务恢复以及桌面端和侧栏共用的任务模型。点击成功或模型回复不能单独证明业务任务已经完成。

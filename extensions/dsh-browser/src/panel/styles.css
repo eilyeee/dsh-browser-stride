@@ -2846,3 +2846,12 @@ textarea:focus-visible {
   background: var(--canvas);
   color: var(--ink-strong);
 }
+.pairing-section { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 16px; border-bottom: 1px solid var(--line); }
+.pairing-section > p, .pairing-section > div { width: 100%; }
+.pairing-section p { margin: 0; color: var(--muted); font-size: calc(12px * var(--ui-scale)); line-height: 1.6; }
+.pairing-section button { min-height: 36px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; font: inherit; font-size: calc(12px * var(--ui-scale)); cursor: pointer; }
+.pairing-section button.primary { color: white; background: var(--blue); border-color: var(--blue); }
+.pairing-section button.secondary { color: var(--ink); background: var(--canvas); }
+.pairing-section button:disabled { opacity: 0.5; cursor: default; }
+.pairing-section a { color: var(--blue-ink); font-size: calc(12px * var(--ui-scale)); }
+.pairing-code { display: inline-block; margin: 8px 16px 8px 0; font-size: calc(20px * var(--ui-scale)); letter-spacing: 2px; user-select: all; }

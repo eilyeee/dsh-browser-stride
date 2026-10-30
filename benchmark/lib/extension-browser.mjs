@@ -2,8 +2,8 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { chromium, findChromiumExecutable } from './chromium.mjs'
 
-export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl, pairingCode, trustedOrigin, connectTimeoutMs = 30_000, actionTimeoutMs = 8_000 }) {
-  if (typeof pairingCode !== 'string' || !/^[a-f0-9]{32}$/u.test(pairingCode)) {
+export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl, pairingCode, deferPairing = false, trustedOrigin, connectTimeoutMs = 30_000, actionTimeoutMs = 8_000 }) {
+  if (!deferPairing && (typeof pairingCode !== 'string' || !/^[a-f0-9]{32}$/u.test(pairingCode))) {
     throw new Error('a fresh extension pairing code is required')
   }
   const extensionDir = resolve(repoRoot, 'extensions/dsh-browser/dist')
@@ -43,10 +43,11 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
     await panel.goto(`chrome-extension://${extensionId}/panel/index.html`)
     await panel.waitForSelector('header.topbar', { timeout: 15_000 })
     stage = 'configuring extension bridge'
-    await panel.evaluate(async ({ configuredBridgeUrl, configuredPairingCode, configuredOrigin, timeoutMs }) => {
+    await panel.evaluate(async ({ configuredBridgeUrl, configuredPairingCode, configuredOrigin, timeoutMs, deferred }) => {
       await new Promise((resolveConnection, rejectConnection) => {
         const port = chrome.runtime.connect({ name: 'dsh-panel' })
         window.__dshBenchmarkPort = port
+        const settingsId = crypto.randomUUID()
         const timer = setTimeout(() => {
           port.disconnect()
           rejectConnection(new Error(`extension bridge did not connect within ${timeoutMs}ms`))
@@ -56,15 +57,21 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
           rejectConnection(new Error(chrome.runtime.lastError?.message ?? 'extension benchmark port disconnected'))
         })
         port.onMessage.addListener((message) => {
+          if (deferred && message?.type === 'settings.result' && message.id === settingsId) {
+            clearTimeout(timer)
+            message.ok ? resolveConnection() : rejectConnection(new Error('extension settings failed'))
+            return
+          }
           if (message?.type !== 'status' || message.state !== 'connected') return
           clearTimeout(timer)
           resolveConnection()
         })
         port.postMessage({
           type: 'settings',
+          id: settingsId,
           settings: {
             bridgeUrl: configuredBridgeUrl,
-            token: configuredPairingCode,
+            ...(configuredPairingCode === undefined ? {} : { token: configuredPairingCode }),
             sharePageContent: 'auto',
             trustedActionOrigins: [configuredOrigin],
             approvalNotifications: false,
@@ -72,10 +79,10 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
           },
         })
       })
-    }, { configuredBridgeUrl: bridgeUrl, configuredPairingCode: pairingCode, configuredOrigin: trustedOrigin, timeoutMs: connectTimeoutMs })
+    }, { configuredBridgeUrl: bridgeUrl, configuredPairingCode: pairingCode, configuredOrigin: trustedOrigin, timeoutMs: connectTimeoutMs, deferred: deferPairing })
     stage = 'waiting for extension bridge connection'
     try {
-      await panel.locator('.connection .dot.connected').waitFor({ state: 'visible', timeout: connectTimeoutMs })
+      if (!deferPairing) await panel.locator('.connection .dot.connected').waitFor({ state: 'visible', timeout: connectTimeoutMs })
     } catch (error) {
       const status = await panel.locator('.connection').textContent().catch(() => '(status unavailable)')
       const discovery = await panel.evaluate(async (configuredBridge) => {

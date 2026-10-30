@@ -144,6 +144,8 @@ export async function startDshBackend({
     child,
     client,
     logPath,
+    // Kept in memory for isolated browser smoke login; never include it in logs.
+    getAuthenticatedUrl() { return launchUrl },
     async issuePairingCode() {
       if (backend !== 'extension') throw new Error('pairing is only available for the extension backend')
       return issuePairingCode(baseUrl, adminToken)

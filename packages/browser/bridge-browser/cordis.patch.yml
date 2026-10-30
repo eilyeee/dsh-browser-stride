@@ -5,9 +5,10 @@
 # apply this patch without an extra command-line option.
 #
 # On first boot the plugin generates a bearer token and persists it at
-# ~/.dsh/ext-bridge-token (chmod 0600). Local extensions discover the bridge
-# without manual token entry. To pin a fixed token for a remote deployment,
-# set DSH_EXT_TOKEN and reference it below.
+# ~/.dsh/ext-bridge-token (chmod 0600). This is an administrator credential,
+# never an extension credential. Extensions discover the local bridge and
+# request owner-confirmed pairing, or use a manually issued one-time code.
+# Set DSH_EXT_TOKEN to pin the local administrator credential.
 # Extension-created sessions default to the ~/.dsh/browser-sessions workspace.
 # Set DSH_BROWSER_SESSION_WORKSPACE to choose another path, or to an empty
 # string to keep those sessions Ungrouped.

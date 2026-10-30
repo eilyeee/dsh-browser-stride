@@ -106,6 +106,7 @@ const RemoteApiHost = {
       },
     }
     const connection = {
+      fetch: { register: () => async () => {} },
       createPeer: () => ({ signal: new AbortController().signal, dispose: async () => {} }),
       createSharedFetchHandler: () => ({
         fetch: async (request: Request) => {

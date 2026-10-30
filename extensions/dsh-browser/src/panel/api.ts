@@ -13,6 +13,7 @@ import type { TabAffinityDecision, TabAffinityState } from '../background/tab-af
 import type { ApprovalDecision, ApprovalRequest } from '../security/approval.ts'
 import { parsePageSelection, type PageSelection } from '../selection.ts'
 import { getUiLocale } from '../i18n.ts'
+import type { BrowserPairingStatus } from '../background/pairing-client.ts'
 
 /** Panel-side subset of the extension settings. */
 export type PanelSettings = Settings
@@ -89,7 +90,7 @@ interface SessionResumeHintMessage {
   sessionId: string | null
 }
 
-type BackgroundMessage = RpcResultMessage | RespondResultMessage | SettingsResultMessage | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | SelectionMessage | SessionResumeHintMessage
+type BackgroundMessage = RpcResultMessage | RespondResultMessage | SettingsResultMessage | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | SelectionMessage | SessionResumeHintMessage | { type: 'browser-pairing'; status: BrowserPairingStatus }
 
 /** Structured gateway failure retained for product-level error handling. */
 export class PanelRpcError extends Error {
@@ -113,6 +114,9 @@ function panelRpcError(failure: RpcFailurePayload | undefined, fallbackMessage: 
 
 /** The panel API surface. */
 export interface PanelApi {
+  startBrowserPairing(bridgeUrl: string): Promise<void>
+  cancelBrowserPairing(): Promise<void>
+  onBrowserPairing(callback: (status: BrowserPairingStatus) => void): () => void
   rpc<T = unknown>(method: string, payload?: unknown): Promise<T>
   respond(rpcId: string, result: RespondResult): Promise<unknown>
   onStatus(callback: (state: BridgeState, caps: BridgeCaps | null) => void): () => void
@@ -151,6 +155,7 @@ export function connectPanel(): PanelApi {
     reject: (error: Error) => void
   }>()
   const statusListeners = new Set<(state: BridgeState, caps: BridgeCaps | null) => void>()
+  const pairingListeners = new Set<(status: BrowserPairingStatus) => void>()
   const eventListeners = new Set<(frame: ServerFrame) => void>()
   const approvalListeners = new Set<(request: ApprovalRequest) => void>()
   const approvalResolvedListeners = new Set<(id: string) => void>()
@@ -165,6 +170,9 @@ export function connectPanel(): PanelApi {
     if (typeof message !== 'object' || message === null) return
     const msg = message as BackgroundMessage
     switch (msg.type) {
+      case 'browser-pairing':
+        for (const listener of pairingListeners) listener(msg.status)
+        break
       case 'rpc.result': {
         const entry = pending.get(msg.id)
         if (entry === undefined) return
@@ -243,6 +251,7 @@ export function connectPanel(): PanelApi {
   }
 
   function failAll(error: Error, preserve?: { kind: 'rpc' | 'respond' | 'rebind' | 'settings'; id: string }): void {
+    for (const listener of pairingListeners) listener({ phase: 'failed', error: 'connection-lost' })
     for (const [id, entry] of pending) {
       if (preserve?.kind === 'rpc' && preserve.id === id) continue
       entry.reject(error)
@@ -343,6 +352,9 @@ export function connectPanel(): PanelApi {
   }
 
   return {
+    startBrowserPairing(bridgeUrl) { return send({ type: 'browser-pairing.start', bridgeUrl }) },
+    cancelBrowserPairing() { return send({ type: 'browser-pairing.cancel' }) },
+    onBrowserPairing(callback) { pairingListeners.add(callback); return () => { pairingListeners.delete(callback) } },
     rpc<T>(method: string, payload?: unknown): Promise<T> {
       const id = crypto.randomUUID()
       return new Promise<T>((resolve, reject) => {

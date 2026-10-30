@@ -41,7 +41,8 @@ import { withSessionWorkspace } from './session-workspace.ts'
 import { purgeSessionFiles, type SessionPurgeDeps } from './session-purge.ts'
 import { resolveToken } from './token.ts'
 import { PairingStore } from './pairing.ts'
-import { createPairingRoute } from './pairing-http.ts'
+import { createPairingRoute, createPairingRequestRoute, createPairingOwnerRoute } from './pairing-http.ts'
+import { PairingRequests } from './pairing-requests.ts'
 import {
   createRemoteHostApi,
   type HostConnectionLike,
@@ -164,11 +165,11 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     throw new Error('bridge-browser: DSH storageDomain service is required for browser run records')
   }
   const runs = await BrowserRunStore.open(storage, resolved.pairingProfile)
-  const lifetime: { server?: BridgeServer } = {}
+  const lifetime: { server?: BridgeServer; requests?: PairingRequests } = {}
   // Cordis disposes separate effects concurrently. Keep this ordering inside
   // one effect so receipt writes drain before their storage domain closes.
   ctx.effect(() => async () => {
-    try { await lifetime.server?.close() } finally { await runs.close() }
+    try { await lifetime.requests?.close(); await lifetime.server?.close() } finally { await runs.close() }
   }, 'bridge-browser: server and durable records')
   ctx.provide('browserRuns', runs)
   const tokenRes = await resolveToken(resolved.token)
@@ -181,7 +182,7 @@ function mountBridge(
   tokenRes: Awaited<ReturnType<typeof resolveToken>>,
   hostApi: BrowserHostApi,
   runs: BrowserRunStore,
-  lifetime: { server?: BridgeServer },
+  lifetime: { server?: BridgeServer; requests?: PairingRequests },
 ): void {
   // Workspace grouping wraps the gateway create; session deferral wraps the
   // result so materialization at first prompt still flows through grouping.
@@ -269,7 +270,11 @@ function mountBridge(
     handler: (req, socket, head) => { server.handleUpgrade(req, socket, head) },
   }
   ctx.effect(() => ctx.webServer.registerUpgrade(route), 'bridge-browser: /ext/bridge upgrade route')
-  ctx.effect(() => ctx.webServer.register(createPairingRoute(pairing, server, tokenRes.token)), 'bridge-browser: pairing administration')
+  const requests = new PairingRequests(pairing, id => server.revokeInstallation(id))
+  lifetime.requests = requests
+  ctx.effect(() => ctx.webServer.register(createPairingRoute(pairing, server, tokenRes.token, requests)), 'bridge-browser: pairing administration')
+  ctx.effect(() => ctx.webServer.register(createPairingRequestRoute(requests)), 'bridge-browser: browser pairing requests')
+  ctx.effect(() => ctx.connection.fetch.register(createPairingOwnerRoute(requests)), 'bridge-browser: authenticated pairing approval')
 
   // Discovery contains no secret and is only exposed to local clients.
   const configRoute: WebRoute = {

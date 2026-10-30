@@ -18,11 +18,13 @@ function stubContext(): Context {
     invoke: async () => undefined,
   }
   const connection = {
+    fetch: { register: () => async () => {} },
     createPeer: () => ({ signal: new AbortController().signal, dispose: async () => {} }),
     createSharedFetchHandler: () => ({ fetch: async () => new Response('not found', { status: 404 }) }),
   }
   const storage = { open: async () => ({ table: () => ({ entries: () => [][Symbol.iterator]() }), close: async () => {} }) }
   return {
+    connection,
     webServer: { port: 0, registerUpgrade: () => () => {}, register: () => () => {} },
     tools: { register: () => () => {} },
     agents: { get: () => undefined },

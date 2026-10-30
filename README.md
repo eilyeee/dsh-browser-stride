@@ -26,7 +26,15 @@ pnpm start
 
 The installer modifies the local **web** DSH profile, builds the plugin and Chrome extension, and attempts to open Chrome's extension page. It may remove the legacy bridge package from that profile; review the script before running it. Firefox requires a separate build and temporary installation; see the [extension README](extensions/dsh-browser/README.md). Desktop may use a different profile, so installation into `web` is not proof of Desktop integration. The installer must be run from a complete Stride checkout; it does not download an upstream project.
 
-After starting the Host, run `pnpm run pair:browser` in another terminal, then enter the one-time code in the unpacked extension's side-panel settings. The code expires after five minutes and is replaced by an installation-specific credential. The address can be discovered automatically. For a nondefault port use `pnpm run pair:browser -- issue --url http://127.0.0.1:PORT` and set the bridge address to `ws://127.0.0.1:PORT/ext/bridge`. Run `pnpm run pair:browser -- list` to see installations and `pnpm run pair:browser -- revoke INSTALLATION_ID` to revoke one and disconnect it. Add the same `--url` when needed.
+After starting the Host, click **Connect to local DSH** in the extension settings. Keep the panel open, then compare and confirm the matching verification code in the signed-in DSH web UI under **Settings → General → Browser pairing**. The extension saves its installation credential and reconnects automatically thereafter. Requests expire after five minutes; rejection, cancellation or a Host restart requires a new request. Requests grant no authority by themselves: an authenticated Host owner must confirm, and only the requesting extension can claim the credential. Credentials stay out of pages, URLs and logs. Connecting replaces the current browser connection; page actions still follow extension approval settings.
+
+Manual pairing remains available: run `pnpm run pair:browser` in another terminal and enter the one-time code in extension settings. It expires after five minutes and is exchanged for an installation credential. The address is discovered automatically. For a nondefault port set `ws://127.0.0.1:PORT/ext/bridge` in the extension and add `-- issue --url http://127.0.0.1:PORT` to the manual command. Run `pnpm run pair:browser -- list` to see installations or `pnpm run pair:browser -- revoke INSTALLATION_ID` to revoke and disconnect one, including its outstanding pairing requests. Add the same `--url` when needed.
+
+### Updating
+
+For the current source installation, pull into the original checkout, install locked dependencies using the required Node/pnpm versions, and run `pnpm build`. Restart the Host, click **Reload** at `chrome://extensions/`, and refresh target pages. Keeping the original extension installation, browser profile and Host data preserves pairing. Changing the extension installation identity or clearing data requires pairing again. Reload Firefox's temporary add-on as well. Build the Bridge and extension from the same checkout; incompatible peers identify which component needs updating.
+
+DSH supports GitHub plugins, but this repository root is currently a development workspace, without a release package for direct GitHub plugin installation or a browser-store automatic-update channel. Installing a Host plugin from GitHub does not install or update the browser extension.
 
 The Host's administrator token is stored at `$DSH_HOME/ext-bridge-token`, or `~/.dsh/ext-bridge-token` when `DSH_HOME` is unset. Keep it private and do not enter it in the extension. If a Host was configured with an explicit token, provide it to the CLI via `DSH_BRIDGE_ADMIN_TOKEN`. If credential storage fails during pairing, issue a new code.
 
@@ -37,7 +45,7 @@ The token file uses restrictive permissions where supported; protect the DSH hom
 - Text snapshots, observation-bound control references, page navigation, tab management and selected-text quoting. A new observation invalidates earlier references in that frame.
 - A side-panel conversation connected to the local Harness session API; chat image attachments depend on Host support.
 - User approval for page-changing actions, target checks, single-select options, and input/checkbox readback. Control readback does not prove a form was saved.
-- In-memory ordering for browser writes while the extension worker is alive; durable action receipts and restart reconciliation are not implemented.
+- In-memory ordering for live browser writes, Host dispatch metadata and persistent extension execution fences; task recovery and business-result reconciliation are not implemented.
 - A loopback-only bridge with one-time pairing and separately revocable installation credentials. Host settings, credentials and local-path operations are disabled over the bridge unless the Host explicitly opts in with `allowHostManagement`.
 
 Screenshots, CDP input, webpage uploads/downloads, reliable run recovery and a shared Desktop/side-panel task model are not currently supported. A successful click or model response is not independent proof that a business task completed.

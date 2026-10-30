@@ -19,19 +19,33 @@ window.__ModuleLoader__.load({
     const dictionaries = {
       zh: {
         'bridgeAddress.title': '浏览器桥地址',
-        'bridgeAddress.help': '粘贴到 Chrome 扩展「桥地址」设置；本机一般无需 Token。',
+        'bridgeAddress.help': '扩展会自动发现本机地址。也可手动粘贴到扩展的「桥地址」设置。',
         'bridgeAddress.copy': '复制',
         'bridgeAddress.copied': '已复制',
         'bridgeAddress.loading': '正在读取…',
         'bridgeAddress.unavailable': '暂时无法读取桥地址',
+        'pairing.title': '浏览器配对',
+        'pairing.help': '先在扩展设置中点击「连接本机 DSH」，核对两端校验码一致后再确认。配对允许该浏览器访问当前 DSH 会话，以后自动重连。连接将替换当前浏览器连接，页面操作仍遵循扩展审批设置。',
+        'pairing.empty': '暂无配对请求',
+        'pairing.approve': '确认配对',
+        'pairing.deny': '拒绝',
+        'pairing.approved': '已确认，等待扩展领取凭据…',
+        'pairing.error': '配对请求暂时不可用，请刷新 DSH；请求可能已经过期。',
       },
       en: {
         'bridgeAddress.title': 'Browser bridge address',
-        'bridgeAddress.help': 'Paste into the Chrome extension Bridge address setting. Loopback needs no token.',
+        'bridgeAddress.help': 'The extension discovers the local address automatically. You can also paste it into its Bridge address setting.',
         'bridgeAddress.copy': 'Copy',
         'bridgeAddress.copied': 'Copied',
         'bridgeAddress.loading': 'Loading…',
         'bridgeAddress.unavailable': 'Bridge address unavailable',
+        'pairing.title': 'Browser pairing',
+        'pairing.help': 'Click “Connect to local DSH” in the extension settings first. Confirm only if both codes match. Pairing grants this browser access to current DSH sessions, with automatic reconnect. Connecting replaces the current browser connection; page actions still follow extension approval settings.',
+        'pairing.empty': 'No pairing requests',
+        'pairing.approve': 'Confirm pairing',
+        'pairing.deny': 'Deny',
+        'pairing.approved': 'Confirmed; waiting for the extension…',
+        'pairing.error': 'Pairing requests are unavailable. Refresh DSH; the request may have expired.',
       },
     }
 
@@ -86,6 +100,44 @@ window.__ModuleLoader__.load({
       const [address, setAddress] = React.useState('')
       const [status, setStatus] = React.useState('loading')
       const [copied, setCopied] = React.useState(false)
+      const [requests, setRequests] = React.useState([])
+      const [pairingError, setPairingError] = React.useState(false)
+      const [deciding, setDeciding] = React.useState(false)
+      const pairingPath = `${window.location.origin}/api/stride-browser-pairing`
+
+      React.useEffect(() => {
+        let cancelled = false
+        const refresh = async () => {
+          try {
+            const response = await fetch(pairingPath, { cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(3_000) })
+            if (!response.ok) throw new Error('unavailable')
+            const body = await response.json()
+            if (!Array.isArray(body.requests)) throw new Error('invalid response')
+            if (!cancelled) { setRequests(body.requests); setPairingError(false) }
+          } catch { if (!cancelled) setPairingError(true) }
+        }
+        void refresh()
+        const timer = window.setInterval(() => { void refresh() }, 2_000)
+        return () => { cancelled = true; window.clearInterval(timer) }
+      }, [pairingPath])
+
+      const decide = async (event, request, decision) => {
+        event.preventDefault()
+        // Page scripts and browser_* DOM clicks cannot stand in for a user.
+        if (!event.isTrusted || deciding) return
+        setDeciding(true)
+        try {
+          const response = await fetch(pairingPath, {
+            method: 'POST', redirect: 'error', cache: 'no-store',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ requestId: request.requestId, verificationCode: request.verificationCode, decision }),
+            signal: AbortSignal.timeout(5_000),
+          })
+          if (!response.ok) throw new Error('unavailable')
+          setRequests(current => current.filter(candidate => candidate.requestId !== request.requestId))
+          setPairingError(false)
+        } catch { setPairingError(true) } finally { setDeciding(false) }
+      }
 
       React.useEffect(() => {
         let cancelled = false
@@ -150,12 +202,24 @@ window.__ModuleLoader__.load({
             {
               type: 'button',
               className: 'dshBridgeAddressCopy',
+              type: 'button',
               disabled: status !== 'ready' || address === '',
               onClick: () => { void onCopy() },
             },
             copied ? t('bridgeAddress.copied') : t('bridgeAddress.copy'),
           ),
         ),
+        React.createElement('div', { className: 'dshBridgeAddressTitle' }, t('pairing.title')),
+        React.createElement('p', { className: 'dshBridgeAddressHelp' }, t('pairing.help')),
+        pairingError ? React.createElement('p', { role: 'alert' }, t('pairing.error')) : null,
+        requests.length === 0 ? React.createElement('p', { className: 'dshBridgeAddressHelp' }, t('pairing.empty')) : null,
+        ...requests.map(request => React.createElement('div', { key: request.requestId, className: 'dshBridgeAddressBody' },
+          React.createElement('code', { className: 'dshBridgeAddressValue' }, request.verificationCode),
+          request.status === 'approved' ? React.createElement('span', null, t('pairing.approved')) : React.createElement(React.Fragment, null,
+            React.createElement('button', { type: 'button', className: 'dshBridgeAddressCopy', disabled: deciding, onClick: event => { void decide(event, request, 'approve') } }, t('pairing.approve')),
+            React.createElement('button', { type: 'button', className: 'dshBridgeAddressCopy', disabled: deciding, onClick: event => { void decide(event, request, 'deny') } }, t('pairing.deny')),
+          ),
+        )),
       )
     }
 
