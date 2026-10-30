@@ -16,6 +16,11 @@ interface PendingRpc {
   timer: ReturnType<typeof setTimeout>
 }
 
+/** Preserve fixed bridge error codes across the panel port. */
+export class BridgeRpcError extends Error {
+  constructor(readonly code: string, message: string) { super(`${code}: ${message}`); this.name = 'BridgeRpcError' }
+}
+
 /**
  * Create an RPC facade over a live bridge. Wraps the bridge's frame sink so
  * other handlers keep working; settles `rpc.result` frames by correlation id.
@@ -34,7 +39,7 @@ export function createRpc(bridge: BridgeClient): { request(method: string, paylo
     pending.delete(frame.id)
     clearTimeout(entry.timer)
     if (frame.ok) entry.resolve(frame.result)
-    else entry.reject(new Error(`${frame.error.code}: ${frame.error.message}`))
+    else entry.reject(new BridgeRpcError(frame.error.code, frame.error.message))
   }
 
   return {

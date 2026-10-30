@@ -1,7 +1,9 @@
 import type { BridgeState } from '../background/bridge.ts'
 import type { UiLocale } from '../i18n.ts'
+import type { BrowserRunCopy } from './browser-runs.ts'
 
 export interface PanelCopy {
+  runs: BrowserRunCopy
   documentTitle: string
   status: Record<BridgeState, string>
   approval: {
@@ -196,6 +198,18 @@ export interface PanelCopy {
 }
 
 const EN: PanelCopy = {
+  runs: {
+    title: 'Browser tasks', task: suffix => `Task · ${suffix}`,
+    states: { queued: 'Queued', running: 'Running', blocked: 'Blocked', paused: 'Paused', stopping: 'Stopping', stopped: 'Stopped', completed: 'Completed', failed: 'Failed' },
+    pause: 'Pause task', stop: 'Stop task', refresh: 'Refresh tasks', loading: 'Reading task status…',
+    pausedHelp: 'Further dispatch is paused. This task will not resume automatically.',
+    stoppingHelp: 'Stop requested; waiting for the executor to confirm. Earlier actions may already have taken effect.',
+    reconcileHelp: 'Some results are unresolved. Check the page before continuing.',
+    truncated: (shown, total) => `Showing ${shown} of ${total} tasks, with unfinished tasks first.`,
+    error: code => code === 'stale-version' ? 'Task status changed. Review the refreshed status before trying again.'
+      : code === 'load-failed' ? 'Could not read task status. Refresh to try again.'
+      : 'The control result is unconfirmed. Review the refreshed status before submitting another request.',
+  },
   documentTitle: 'dsh Browser Assistant',
   status: {
     connected: 'Connected',
@@ -425,6 +439,18 @@ const EN: PanelCopy = {
 }
 
 const ZH: PanelCopy = {
+  runs: {
+    title: '浏览器任务', task: suffix => `任务 · ${suffix}`,
+    states: { queued: '排队中', running: '运行中', blocked: '已阻塞', paused: '已暂停', stopping: '停止中', stopped: '已停止', completed: '已完成', failed: '失败' },
+    pause: '暂停任务', stop: '停止任务', refresh: '刷新任务', loading: '正在读取任务状态…',
+    pausedHelp: '已暂停后续派发，此任务不会自动恢复。',
+    stoppingHelp: '已请求停止，等待执行器确认。此前的操作可能已产生效果。',
+    reconcileHelp: '部分操作结果尚未明确，继续前需要先核对页面。',
+    truncated: (shown, total) => `显示 ${total} 项任务中的 ${shown} 项，未结束任务优先。`,
+    error: code => code === 'stale-version' ? '任务状态已变化，请核对刷新后的状态再操作。'
+      : code === 'load-failed' ? '无法读取任务状态，请点击刷新重试。'
+      : '控制结果尚未确认，请先核对刷新后的状态再提交其他请求。',
+  },
   documentTitle: 'dsh 浏览器助手',
   status: {
     connected: '已连接',

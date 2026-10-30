@@ -102,7 +102,7 @@ type RunDomain = Domain<ReturnType<typeof specFor>>
 /** Stable failures contain no page content, arguments or credentials. */
 export class BrowserRunStoreError extends Error {
   constructor(readonly code: 'not-found' | 'stale-version' | 'session-busy' | 'reconciliation-required' | 'action-conflict' | 'invalid-state' | 'storage-unavailable' | 'closed'
-    | 'execution-context-required' | 'execution-context-expired' | 'execution-session-mismatch' | 'not-dispatching' | 'stale-control-revision') {
+    | 'execution-context-required' | 'execution-context-expired' | 'execution-session-mismatch' | 'not-dispatching' | 'stale-control-revision' | 'cancelled') {
     super(`browser run store: ${code}`)
     this.name = 'BrowserRunStoreError'
   }
@@ -249,9 +249,10 @@ export class BrowserRunStore {
     })
   }
 
-  control(runId: RunId, expectedVersion: number, control: 'pause' | 'resume' | 'stop'): Promise<BrowserRunRecord> {
+  control(runId: RunId, expectedVersion: number, control: 'pause' | 'resume' | 'stop', signal?: AbortSignal): Promise<BrowserRunRecord> {
     z.enum(['pause', 'resume', 'stop']).parse(control)
     return this.exclusive(async () => {
+      if (signal?.aborted) throw new BrowserRunStoreError('cancelled')
       const run = this.current(runId, expectedVersion)
       const state = control === 'pause' ? requestPause(run.state) : control === 'resume' ? requestResume(run.state) : requestStop(run.state)
       if (state === run.state) return snapshot(run)

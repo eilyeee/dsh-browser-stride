@@ -44,6 +44,7 @@ import { SessionPurgeError } from './session-purge.ts'
 import { verifyToken } from './token.ts'
 import type { PairingStore } from './pairing.ts'
 import type { BrowserRunStore, BrowserRunExecution } from './run-store.ts'
+import { browserRunPanelRpc, browserRunPanelFailure, type RunPanelStore } from './run-panel.ts'
 
 /**
  * Host management methods that must not be granted by browser pairing alone.
@@ -113,7 +114,7 @@ export interface BridgeServerDeps {
   /** Production always provides the durable ledger; optional for transport-only unit fixtures. */
   dispatches?: Pick<BrowserDispatchLedger, 'prepare' | 'markSent' | 'settle' | 'get'>
   /** Trusted Host async execution scopes; never caller/model-supplied ids. */
-  runs?: Pick<BrowserRunStore, 'executionFor'>
+  runs?: Pick<BrowserRunStore, 'executionFor'> & RunPanelStore
   /**
    * Test seam: force the remote address seen by the privilege gate. The
    * sandbox cannot bind arbitrary loopback literals, so the non-loopback
@@ -545,6 +546,16 @@ export class BridgeServer {
     const forbidden = management && this.deps.allowHostManagement !== true
     if (forbidden) {
       sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false, error: { code: 'forbidden', message: 'host management is not enabled in the Host configuration' } })
+      return
+    }
+    if (frame.method.startsWith('bridge.browserRuns.')) {
+      try {
+        const value = await browserRunPanelRpc(this.deps.runs, frame.method, frame.payload, conn.abort.signal)
+        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true,
+          result: { type: 'server-response', rpcId: frame.id, result: { ok: true, value } } })
+      } catch (error) {
+        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false, error: browserRunPanelFailure(error) })
+      }
       return
     }
     if (frame.method === BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD) {

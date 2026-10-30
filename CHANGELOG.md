@@ -9,12 +9,18 @@ no release version has been assigned yet.
 
 ### Added
 
+- The side panel displays bounded metadata for existing Host-owned browser runs,
+  with version-checked pause/stop controls and explicit stopping acknowledgement.
+  Synthetic clicks, foreign-session controls and queued controls from replaced
+  connections are refused. Creation, resume and facts stay Host-only; automatic
+  reconciliation remains unimplemented.
+
 - Trusted Host `withExecution` contexts bind real browser dispatch to a run and
   control revision. Controls and storage faults revoke old contexts; detached
   work and unscoped managed-session calls fail closed. Dispatch records retain
   the run/revision without treating transport receipts as business evidence.
   Pending or uncertain writes fence new execution; unfinished runs block session purge.
-  Task UI and receiver run/target authority are not part of this increment.
+  Receiver run/target authority and task orchestration remain unimplemented.
 
 - Owner-confirmed browser pairing: the extension requests a short-lived matching
   verification code, an authenticated DSH settings user approves, and only the
@@ -41,7 +47,8 @@ no release version has been assigned yet.
 - A Host-only `browserRuns` service uses DSH storage domains for durable run
   state, version-checked controls and immutable action facts. Reopening fences
   unfinished execution contexts and refuses automatic resume. Browser tools
-  and the side panel do not yet create or consume task lifecycle/fact records.
+  use explicit Host scopes; the panel reads metadata and controls existing runs.
+  Task creation, resume and action facts remain Host-only.
 - The Host rejects unversioned and incompatible extension handshakes before
   authentication, preserving its current connection and unconsumed pairing code.
 - The extension rejects incompatible Host handshakes before accepting a new

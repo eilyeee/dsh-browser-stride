@@ -2,7 +2,7 @@
  * Side panel application: chat with the local dsh agent, plus a settings
  * view. Renders conversation from session history and live session events;
  * browser actions are driven by the model through the bridge tools (the panel
- * only shows tool activity cards).
+ * shows tool activity and controls existing Host-owned runs).
  *
  * @module
  */
@@ -31,6 +31,7 @@ import {
 } from './ui-scale.ts'
 import { QuestionCard } from './QuestionCard.tsx'
 import { MessageImages } from './MessageImages.tsx'
+import { BrowserRuns } from './BrowserRuns.tsx'
 import type { QuestionAnswer } from './questions.ts'
 import {
   hasPendingQuestion,
@@ -2182,7 +2183,7 @@ export function App(): React.JSX.Element {
   }
 
   return (
-    <><div className="app">
+    <><div className="app" data-session-id={sessionRef.current ?? undefined}>
       <header className="topbar">
         <span className="connection" role="status">
           <span className={`dot ${state}`} />
@@ -2259,6 +2260,7 @@ export function App(): React.JSX.Element {
               )}
         </section>
       )}
+      <BrowserRuns api={api} sessionId={sessionRef.current} connected={state === 'connected' && !sessionChanging} copy={copy.runs} />
       <div className="messages-pane">
       <div className="messages" ref={scrollRef} onScroll={syncScrollBottom}>
         {rows.length === 0 && streamRow === null && !working && (

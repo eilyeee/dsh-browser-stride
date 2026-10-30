@@ -5,7 +5,7 @@ import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import WebSocket from 'ws'
 import { BridgeServer, BridgeToolError, isLoopbackAddress, messageToText, payloadCode, payloadMessage } from '../src/server.ts'
-import { BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, BRIDGE_SESSION_PURGE_METHOD, type BridgeFrame } from '../src/protocol.ts'
+import { BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, BRIDGE_SESSION_PURGE_METHOD, BRIDGE_RUN_LIST_METHOD, BRIDGE_RUN_CONTROL_METHOD, type BridgeFrame } from '../src/protocol.ts'
 import { SessionPurgeError } from '../src/session-purge.ts'
 import type { BrowserHostApi, HostEventFrame } from '../src/host-api.ts'
 import { createRunStorage } from './helpers/run-storage.ts'
@@ -120,6 +120,48 @@ async function connectedLedger(scoped = false) {
 }
 
 describe('recorded tool dispatch', () => {
+  it('handles run metadata internally and refuses control before authentication', async () => {
+    const h = await connectedLedger(true)
+    const store = h.storage.store
+    const queued = await store.create({ sessionId: asSessionId('managed-session'), requiredCriteriaIds: ['saved'] })
+    const unauthenticated = await connect(h.url)
+    send(unauthenticated.ws, { t: 'rpc', id: 'unauth-control', method: BRIDGE_RUN_CONTROL_METHOD,
+      payload: { sessionId: queued.sessionId, runId: queued.runId, expectedVersion: 0, control: 'stop' } })
+    await unauthenticated.done
+    expect(store.get(queued.runId)?.state).toBe('queued')
+    send(h.ws, { t: 'rpc', id: 'panel-list', method: BRIDGE_RUN_LIST_METHOD, payload: { sessionId: queued.sessionId } })
+    await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === 'panel-list'))
+    expect(h.frames).toContainEqual(expect.objectContaining({ t: 'rpc.result', id: 'panel-list', ok: true,
+      result: expect.objectContaining({ result: { ok: true, value: expect.objectContaining({ total: 1 }) } }) }))
+    expect(h.callMock).not.toHaveBeenCalled()
+  })
+
+  it('does not execute a queued control after its connection is replaced', async () => {
+    const h = await connectedLedger(true)
+    const store = h.storage.store
+    const queued = await store.create({ sessionId: asSessionId('managed-session'), requiredCriteriaIds: ['saved'] })
+    let release!: () => void
+    let entered!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const ready = new Promise<void>(resolve => { entered = resolve })
+    const holding = store.purgeSession('independent-session', async () => { entered(); await gate })
+    await ready
+    const control = vi.spyOn(store, 'control')
+    send(h.ws, { t: 'rpc', id: 'queued-control', method: BRIDGE_RUN_CONTROL_METHOD,
+      payload: { sessionId: queued.sessionId, runId: queued.runId, expectedVersion: 0, control: 'stop' } })
+    let replacement: Awaited<ReturnType<typeof connect>> | undefined
+    try {
+      await waitFor(() => control.mock.calls.length === 1)
+      replacement = await connect(h.url)
+      send(replacement.ws, { t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: TOKEN, caps: CAPS })
+      await waitFor(() => replacement!.frames.some(frame => frame.t === 'hello.ok'))
+    } finally { release() }
+    await holding
+    await expect(control.mock.results[0].value).rejects.toMatchObject({ code: 'cancelled' })
+    expect(store.get(queued.runId)?.state).toBe('queued')
+    replacement?.ws.close()
+  })
+
   it('refuses an unscoped call if a managed run takes over while its ledger write is pending', async () => {
     const h = await connectedLedger(true)
     const sessionId = asSessionId('managed-session')
@@ -156,7 +198,10 @@ describe('recorded tool dispatch', () => {
       await waitFor(() => h.frames.some(frame => frame.t === 'tool.call'))
       const call = h.frames.find(frame => frame.t === 'tool.call')! as Extract<BridgeFrame, { t: 'tool.call' }>
       expect(call.sessionId).toBe(run.sessionId)
-      await store.control(run.runId, run.version, 'pause')
+      send(h.ws, { t: 'rpc', id: 'panel-pause', method: BRIDGE_RUN_CONTROL_METHOD,
+        payload: { sessionId: run.sessionId, runId: run.runId, expectedVersion: run.version, control: 'pause' } })
+      await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === 'panel-pause'))
+      expect(h.callMock).not.toHaveBeenCalled()
       expect(await pending).toMatchObject({ code: 'bridge-closed' })
       await waitFor(() => h.frames.some(frame => frame.t === 'tool.cancel' && frame.id === call.id))
       expect(h.ledger.get(call.id)).toMatchObject({ state: 'unresolved', runId: run.runId, controlRevision: 0 })

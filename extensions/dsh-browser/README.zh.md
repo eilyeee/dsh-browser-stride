@@ -24,3 +24,5 @@ pnpm --filter dsh-browser-extension run test
 Chrome 产物位于 `extensions/dsh-browser/dist/`，Firefox 产物位于 `extensions/dsh-browser/dist-firefox/`。仓库安装脚本会配置 `web` Host profile 并准备 Chrome 扩展。使用 Firefox 时，还需执行上面的 Firefox 构建命令，在 Firefox 打开 `about:debugging`，选择“此 Firefox”→“临时载入附加组件”，然后选择 `extensions/dsh-browser/dist-firefox/manifest.json`。这是临时安装，Firefox 重启后需要重新载入；详见 [Mozilla 临时安装说明](https://extensionworkshop.com/documentation/develop/temporary-installation-in-firefox/)。按仓库首页的步骤为 Firefox 扩展单独配对。
 
 扩展申请 HTTP(S) 页面和标签、导航等权限。页面内容是不可信数据；除非用户明确开启更宽的策略，修改页面的动作需要用户审批。点击、输入和选择需要最近一次观察给出的元素引用；目前引用尚未绑定任务运行、账号或租户。
+
+侧栏显示当前会话中由 Host 创建的浏览器运行，并提供暂停和停止按钮。停止请求会保持「停止中」，直到执行器确认。普通聊天不会自动创建运行，任务创建和恢复仍由可信 Host 负责，自动对账尚未实现。控制要求真实用户操作，携带所显示的记录版本，且不自动重试。

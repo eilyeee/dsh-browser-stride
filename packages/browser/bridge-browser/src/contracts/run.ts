@@ -13,7 +13,7 @@
  * is a bug, not a judgement call.
  *
  * The Host run-record service and explicit execution scopes use these rules.
- * Task creation and controls in the UI are not yet connected to that service.
+ * The panel exposes pause/stop for existing runs; task creation stays Host-only.
  *
  * @module
  */

@@ -76,6 +76,20 @@ async function waitForResult() {
   throw new Error('timed out waiting for the Host browser tools')
 }
 
+async function waitForPhase(phase) {
+  const deadline = Date.now() + 30_000
+  while (Date.now() < deadline) {
+    try {
+      const progress = JSON.parse(await readFile(`${result}.phase`, 'utf8'))
+      if (progress.phase === phase) return progress
+    } catch (error) {
+      if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error
+    }
+    await delay(100)
+  }
+  throw new Error(`timed out waiting for browser probe phase ${phase}`)
+}
+
 async function verifyIncompatibleHost(protocolVersion, expectedState) {
   const args = { url: `${site.origin}/health` }
   const actionId = 'act_synthetic_incompatible'
@@ -325,14 +339,54 @@ try {
   await owner.close()
   const instance = makeTaskInstance('notification_toggle', 1, 'stride-browser-smoke', site.origin)
   await browser.prepare(instance.url)
-  const session = await host.client.rpc('session.create', { cwd: root })
+  // Create the test conversation through the actual panel, so its task card
+  // and tool dispatch share the same session. Only disposable storage is read.
+  const previousSession = await browser.panel.locator('.app').getAttribute('data-session-id')
+  await browser.panel.locator('.new-session-trigger').click()
+  await browser.target.bringToFront()
+  await browser.panel.waitForFunction(previous => {
+    const current = document.querySelector('.app')?.getAttribute('data-session-id')
+    return typeof current === 'string' && current !== previous
+  }, previousSession)
+  const session = { sessionId: await browser.panel.locator('.app').getAttribute('data-session-id') }
   await browser.bindSession(session.sessionId)
   await writeFile(trigger, JSON.stringify({ sessionId: session.sessionId }), { mode: 0o600 })
+  const ready = await waitForPhase('pause-ready')
+  const card = browser.panel.locator(`.browser-runs [data-run-id="${ready.runId}"]`)
+  await card.getByText('运行中', { exact: true }).waitFor().catch(async () => {
+    const metadata = await browser.panel.evaluate(sessionId => new Promise(resolveReply => {
+      const port = window.__dshBenchmarkPort
+      const id = crypto.randomUUID()
+      const timer = setTimeout(() => { port.onMessage.removeListener(onMessage); resolveReply({ timedOut: true }) }, 3000)
+      const onMessage = message => {
+        if (message?.type !== 'rpc.result' || message.id !== id) return
+        clearTimeout(timer)
+        port.onMessage.removeListener(onMessage)
+        resolveReply(message)
+      }
+      port.onMessage.addListener(onMessage)
+      port.postMessage({ type: 'rpc', id, method: 'bridge.browserRuns.list', payload: { sessionId } })
+    }), session.sessionId)
+    throw new Error(`Task card unavailable: panelSession=${await browser.panel.locator('.app').getAttribute('data-session-id')}; status=${await browser.panel.locator('.browser-runs').allTextContents()}; metadata=${JSON.stringify(metadata)}`)
+  })
+  await card.getByRole('button', { name: '暂停任务', exact: true }).evaluate(button => button.click())
+  await delay(200)
+  assert.equal(await card.getByText('运行中', { exact: true }).count(), 1, 'script-generated clicks must not pause a task')
+  await card.getByRole('button', { name: '暂停任务', exact: true }).click()
+  await card.getByText('已暂停', { exact: true }).waitFor()
+  await writeFile(`${trigger}.resume`, '', { mode: 0o600 })
+  await waitForPhase('stop-ready')
+  await card.getByText('运行中', { exact: true }).waitFor()
+  await card.getByRole('button', { name: '停止任务', exact: true }).click()
+  await card.getByText('停止中', { exact: true }).waitFor()
+  assert.equal(await card.locator('.browser-run-actions').count(), 0)
+  await writeFile(`${trigger}.ack-stop`, '', { mode: 0o600 })
   const outcome = await waitForResult()
   assert.equal(outcome.ok, true, outcome.error)
   assert.equal(outcome.calls, 4)
   assert.equal(outcome.blocked, 2)
   assert.equal(outcome.recorded, 4)
+  await card.getByText('已停止', { exact: true }).waitFor()
   const response = await fetch(`${site.origin}/api/state?run=${encodeURIComponent(instance.runId)}`)
   assert.equal(response.ok, true)
   const state = await response.json()
@@ -347,7 +401,7 @@ try {
   await verifyIncompatibleHost(undefined, 'update-host')
   await verifyIncompatibleHost(BRIDGE_PROTOCOL_VERSION - 1, 'update-host')
   await verifyIncompatibleHost(BRIDGE_PROTOCOL_VERSION + 1, 'update-extension')
-  console.log('Browser smoke passed: owner-confirmed pairing UI, authentication fence, reconnect after reload, real DSH tools, run/revision dispatch metadata, revoked old contexts, durable v2 identities, persistent replay/conflict rejection across worker restart, origin isolation, revocation and independent site state (no model)')
+  console.log('Browser smoke passed: owner-confirmed pairing UI, authentication fence, reconnect after reload, real DSH tools, panel pause/stop and executor acknowledgement, run/revision dispatch metadata, revoked old contexts, durable v2 identities, persistent replay/conflict rejection across worker restart, origin isolation, revocation and independent site state (no model)')
 } finally {
   await browser?.close().catch(() => {})
   await host?.close().catch(() => {})

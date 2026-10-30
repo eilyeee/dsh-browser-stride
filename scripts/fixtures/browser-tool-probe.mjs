@@ -2,6 +2,7 @@
 // registered browser tools through the real Host tool runtime, without a model.
 import { access, readFile, writeFile } from 'node:fs/promises'
 import assert from 'node:assert/strict'
+import { setTimeout as delay } from 'node:timers/promises'
 
 export const name = 'stride-browser-smoke-probe'
 export const inject = ['tools', 'browserRuns']
@@ -31,6 +32,18 @@ export function apply(ctx, config) {
     return ref
   }
 
+  async function waitFor(check, label) {
+    const deadline = Date.now() + 30_000
+    while (Date.now() < deadline) {
+      controller.signal.throwIfAborted()
+      if (await check()) return
+      await delay(100)
+    }
+    throw new Error(`timed out waiting for ${label}`)
+  }
+
+  async function exists(path) { try { await access(path); return true } catch { return false } }
+
   async function run() {
     try {
       const { sessionId } = JSON.parse(await readFile(config.trigger, 'utf8'))
@@ -45,8 +58,11 @@ export function apply(ctx, config) {
         const initial = await tool('browser_snapshot')
         const checkbox = reference(initial, '邮件通知')
         await tool('browser_click', { elementRef: checkbox })
-        const paused = await ctx.browserRuns.control(active.runId, active.version, 'pause')
+        await writeFile(`${config.result}.phase`, JSON.stringify({ phase: 'pause-ready', runId: active.runId, sessionId }), { mode: 0o600 })
+        await waitFor(() => ctx.browserRuns.get(active.runId).state === 'paused', 'panel pause')
+        const paused = ctx.browserRuns.get(active.runId)
         await denied()
+        await waitFor(() => exists(`${config.trigger}.resume`), 'trusted executor resume gate')
         const resumed = await ctx.browserRuns.control(active.runId, paused.version, 'resume')
         await denied()
         await ctx.browserRuns.withExecution(active.runId, resumed.controlRevision, async () => {
@@ -54,7 +70,10 @@ export function apply(ctx, config) {
           const save = reference(updated, '保存设置')
           await tool('browser_click', { elementRef: save })
         })
-        const stopping = await ctx.browserRuns.control(active.runId, resumed.version, 'stop')
+        await writeFile(`${config.result}.phase`, JSON.stringify({ phase: 'stop-ready', runId: active.runId, sessionId }), { mode: 0o600 })
+        await waitFor(() => ctx.browserRuns.get(active.runId).state === 'stopping', 'panel stop')
+        const stopping = ctx.browserRuns.get(active.runId)
+        await waitFor(() => exists(`${config.trigger}.ack-stop`), 'executor stop acknowledgement')
         await ctx.browserRuns.transition(active.runId, stopping.version, 'stopped')
       })
       const records = ctx.browserRuns.dispatches.list()

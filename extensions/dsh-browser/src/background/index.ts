@@ -46,7 +46,7 @@ import { needsWriteTurn, WriteQueue } from './write-queue.ts'
 import { executeRecordedTool } from './execution-receipts.ts'
 import { localBridgeUrl } from './bridge-address.ts'
 import { requestBrowserPairing, type BrowserPairingStatus } from './pairing-client.ts'
-import { createRpc } from './rpc.ts'
+import { createRpc, BridgeRpcError } from './rpc.ts'
 import {
   dispatchOpenTab,
   dispatchToolCall,
@@ -1506,7 +1506,7 @@ chrome.runtime.onConnect.addListener((port) => {
                 type: 'rpc.result',
                 id: rpcMsg.id,
                 ok: false,
-                error: { code: 'bridge-unavailable', message: error instanceof Error ? error.message : String(error) },
+                error: { code: error instanceof BridgeRpcError ? error.code : 'bridge-unavailable', message: error instanceof Error ? error.message : String(error) },
               })
             } catch { /* port closed */ }
           },

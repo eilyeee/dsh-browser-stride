@@ -35,6 +35,25 @@ export const BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD = 'bridge.injectBrowserSnapsh
 /** Internal RPC used by the panel to permanently delete one session's durable storage. */
 export const BRIDGE_SESSION_PURGE_METHOD = 'bridge.session.purge'
 
+/** Read-only metadata and explicit panel controls for existing Host-owned runs. */
+export const BRIDGE_RUN_LIST_METHOD = 'bridge.browserRuns.list'
+export const BRIDGE_RUN_CONTROL_METHOD = 'bridge.browserRuns.control'
+export const BROWSER_RUN_LIST_LIMIT = 20
+export const BROWSER_RUN_STATES = ['queued', 'running', 'blocked', 'paused', 'stopping', 'stopped', 'completed', 'failed'] as const
+export type PanelRunControl = 'pause' | 'stop'
+export interface BrowserRunSummary {
+  runId: string
+  sessionId: string
+  state: typeof BROWSER_RUN_STATES[number]
+  version: number
+  controlRevision: number
+  updatedAt: number
+  recoveryRequired: boolean
+  requiresReconciliation: boolean
+  controls: PanelRunControl[]
+}
+export interface BrowserRunList { items: BrowserRunSummary[]; total: number }
+
 /** Seconds a fresh socket may take to present `hello` before it is closed. */
 export const HELLO_TIMEOUT_MS = 5_000
 
