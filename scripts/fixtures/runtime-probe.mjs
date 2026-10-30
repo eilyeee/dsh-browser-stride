@@ -5,7 +5,7 @@ import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
 
 export const name = 'runtime-smoke-probe'
-export const inject = ['sessions', 'sessionPersistence', 'sessionQuery', 'sessionProjectionCache']
+export const inject = ['sessions', 'sessionPersistence', 'sessionQuery', 'sessionProjectionCache', 'browserRuns']
 
 export async function apply(ctx, config) {
   // DSH 0.1.7 resolves profile packages through process-local module hooks.
@@ -21,6 +21,30 @@ export async function apply(ctx, config) {
     assert.equal(version, config.expectedVersion, `Profile resolved an incompatible ${name} at ${path}`)
     const { default: Provider } = await import(pathToFileURL(resolve.resolve(packageName)).href)
     assert.ok(ctx.get(service) instanceof Provider, `${service} must use the profile's resolved provider`)
+  }
+  const runs = ctx.browserRuns
+  if (config.reopen) {
+    const records = runs.list(config.sessionId)
+    assert.equal(records.length, 2)
+    const interrupted = records.find(run => run.state === 'blocked')
+    assert.ok(interrupted, 'interrupted browser run must be fenced on restart')
+    assert.equal(interrupted.recoveryRequired, true)
+    assert.equal(interrupted.controlRevision, 1)
+    assert.equal(interrupted.facts.length, 1)
+    assert.equal(interrupted.facts[0].actionId, 'synthetic-runtime-action')
+    assert.equal(interrupted.facts[0].outcome, 'verified')
+    await assert.rejects(runs.control(interrupted.runId, interrupted.version, 'resume'), { code: 'reconciliation-required' })
+    assert.ok(records.some(run => run.state === 'stopped' && !run.recoveryRequired))
+  } else {
+    const created = await runs.create({ sessionId: config.sessionId, requiredCriteriaIds: ['saved'] })
+    const active = await runs.transition(created.runId, created.version, 'running')
+    await runs.recordFact(active.runId, active.version, {
+      actionId: 'synthetic-runtime-action', requestDigest: 'a'.repeat(64), controlRevision: active.controlRevision,
+      dispatchState: 'accepted', outcome: 'verified', verifiedCriteriaIds: ['saved'],
+      evidence: { observedText: ['Synthetic save confirmed'] },
+    })
+    const queued = await runs.create({ sessionId: config.sessionId, requiredCriteriaIds: ['saved'] })
+    await runs.control(queued.runId, queued.version, 'stop')
   }
   if (config.reopen) {
     assert.equal(ctx.sessions.get(config.sessionId), undefined, 'session must be cold after restart')

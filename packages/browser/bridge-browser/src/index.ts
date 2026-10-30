@@ -48,12 +48,13 @@ import {
   type TypertGatewayLike,
 } from './remote-host-api.ts'
 import { isRecord, type BrowserHostApi } from './host-api.ts'
+import { BrowserRunStore } from './run-store.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'bridge-browser'
 
 /** Services required by this plugin. */
-export const inject = ['webServer', 'typertGateway', 'connection', 'tools', 'agents']
+export const inject = ['webServer', 'typertGateway', 'connection', 'tools', 'agents', 'storageDomain']
 
 /** Default per-tool-call budget (ms). */
 const DEFAULT_TOOL_TIMEOUT_MS = 90_000
@@ -76,7 +77,7 @@ export interface Config {
   token?: string
   /** Separately authorize browser access to Host settings, credentials and local paths. */
   allowHostManagement?: boolean
-  /** Explicit profile namespace for installation credentials. */
+  /** Explicit profile namespace for installation credentials and browser run records. */
   pairingProfile?: string
   /** Per-tool-call timeout in ms. Defaults to 90000. */
   toolTimeoutMs?: number
@@ -157,6 +158,13 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   if (connection === undefined || typeof connection.createPeer !== 'function') {
     throw new Error('bridge-browser: dsh 0.2.1-rc.2 connection service with createPeer is required')
   }
+  const storage = ctx.get('storageDomain')
+  if (storage === undefined || typeof storage.open !== 'function') {
+    throw new Error('bridge-browser: DSH storageDomain service is required for browser run records')
+  }
+  const runs = await BrowserRunStore.open(storage, resolved.pairingProfile)
+  ctx.effect(() => () => runs.close(), 'bridge-browser: durable run records')
+  ctx.provide('browserRuns', runs)
   const tokenRes = await resolveToken(resolved.token)
   mountBridge(ctx, resolved, tokenRes, createRemoteHostApi(gateway, connection))
 }

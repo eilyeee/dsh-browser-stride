@@ -12,7 +12,8 @@
  * the recovery logic from inventing different rules. Anything not listed here
  * is a bug, not a judgement call.
  *
- * These rules are not yet wired into the runtime.
+ * The Host run-record service uses these rules. Browser tool dispatch and
+ * task controls in the UI are not yet connected to that service.
  *
  * @module
  */

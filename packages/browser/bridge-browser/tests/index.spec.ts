@@ -21,11 +21,13 @@ function stubContext(): Context {
     createPeer: () => ({ signal: new AbortController().signal, dispose: async () => {} }),
     createSharedFetchHandler: () => ({ fetch: async () => new Response('not found', { status: 404 }) }),
   }
+  const storage = { open: async () => ({ table: () => ({ entries: () => [][Symbol.iterator]() }), close: async () => {} }) }
   return {
     webServer: { port: 0, registerUpgrade: () => () => {}, register: () => () => {} },
     tools: { register: () => () => {} },
     agents: { get: () => undefined },
-    get: (key: string) => key === 'typertGateway' ? gateway : key === 'connection' ? connection : undefined,
+    get: (key: string) => key === 'typertGateway' ? gateway : key === 'connection' ? connection : key === 'storageDomain' ? storage : undefined,
+    provide: () => () => {},
     on: () => () => {},
     logger: { info: () => {}, warn: () => {}, error: () => {} },
     effect: (fn: () => unknown, label?: string) => {
@@ -91,6 +93,15 @@ describe('config', () => {
 })
 
 describe('apply', () => {
+  it('refuses to mount without the durable storage domain service', async () => {
+    const ctx = stubContext()
+    const get = ctx.get.bind(ctx)
+    vi.spyOn(ctx, 'get').mockImplementation(key => key === 'storageDomain' ? undefined : get(key))
+    const register = vi.spyOn(ctx.webServer, 'registerUpgrade')
+    await expect(apply(ctx, { token: 'fixed-token', ...VALID })).rejects.toThrow(/storageDomain service is required/)
+    expect(register).not.toHaveBeenCalled()
+  })
+
   it('registers the bridge with a fixed token (no generation)', async () => {
     await apply(stubContext(), { token: 'fixed-token', ...VALID, sessionWorkspacePath: '' })
   })

@@ -9,6 +9,10 @@ no release version has been assigned yet.
 
 ### Added
 
+- A Host-only `browserRuns` service uses DSH storage domains for durable run
+  state, version-checked controls and immutable action facts. Reopening fences
+  unfinished execution contexts and refuses automatic resume. Browser tools
+  and the side panel do not yet create or consume these records.
 - The Host rejects unversioned and incompatible extension handshakes before
   authentication, preserving its current connection and unconsumed pairing code.
 - The extension rejects incompatible Host handshakes before accepting a new
@@ -19,8 +23,9 @@ no release version has been assigned yet.
 - Execution contract skeleton in
   `packages/browser/bridge-browser/src/contracts/`: identity layers,
   observation envelopes, action facts, run lifecycle, error taxonomy and
-  capability negotiation. Only observation reference helpers are wired into
-  the runtime; the task and action ledger is not implemented.
+  capability negotiation. Observation helpers are used by the extension and
+  lifecycle/fact rules by the Host record service; a complete task executor
+  and dispatch ledger are not implemented.
 - `pnpm run stride:baseline` collector with a fixed upstream reference; local
   machine evidence is kept out of the public working tree.
 - Local one-time installation pairing, separately revocable credentials, and

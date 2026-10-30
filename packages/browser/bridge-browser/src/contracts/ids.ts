@@ -17,8 +17,9 @@
  * The module is deliberately dependency-free so both the Node bridge plugin
  * and the MV3 extension can import it. It performs no I/O and starts no timer.
  *
- * Observation and element-reference helpers are used by the extension; the
- * run identity and digest rules remain unwired.
+ * Observation and element-reference helpers are used by the extension, and
+ * run ids/revisions by the Host record service. Full action identities and
+ * digests are not yet carried by the browser tool transport.
  *
  * @module
  */

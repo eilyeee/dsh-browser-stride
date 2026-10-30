@@ -31,6 +31,9 @@ import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { createSessionFormatV3ToV4 } from '@deepseek-ai/dsh-session-format-v3-to-v4'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
+import Storage from '@deepseek-ai/dsh-storage'
+import * as StorageJson from '@deepseek-ai/dsh-storage-json'
+import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
 import * as BridgeBrowser from '../src/index.ts'
 import { BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, BRIDGE_PATH, type BridgeFrame } from '../src/protocol.ts'
 import { BROWSER_CONTEXT_KIND } from '../src/browser-context.ts'
@@ -137,6 +140,13 @@ async function loadComposition(): Promise<{ ctx: Context; configPath: string; po
     "- name: '@deepseek-ai/dsh-tools'",
     "- name: '@deepseek-ai/dsh-llm'",
     "- name: '@deepseek-ai/dsh-agent-loop'",
+    "- name: '@deepseek-ai/dsh-storage'",
+    "- name: '@deepseek-ai/dsh-storage-json'",
+    '  config:',
+    `    root: '${join(root, 'storage')}'`,
+    "- name: '@deepseek-ai/dsh-storage-domain'",
+    '  config:',
+    '    backend: json',
     `- name: '${apiHostName}'`,
     '  config:',
     `    cwd: '${root}'`,
@@ -164,6 +174,9 @@ async function loadComposition(): Promise<{ ctx: Context; configPath: string; po
     ['@deepseek-ai/dsh-tools', ToolRegistry],
     ['@deepseek-ai/dsh-llm', LlmService],
     ['@deepseek-ai/dsh-agent-loop', AgentLoop],
+    ['@deepseek-ai/dsh-storage', Storage],
+    ['@deepseek-ai/dsh-storage-json', StorageJson],
+    ['@deepseek-ai/dsh-storage-domain', StorageDomain],
     [apiHostName, RemoteApiHost],
     [BRIDGE, BridgeBrowser],
   ])
@@ -426,11 +439,14 @@ describe('real Loader composition', () => {
     const { ctx, configPath } = await loadComposition()
     const tools = ctx.get('tools') as ToolRegistry
     expect(tools.get('browser_snapshot')).toBeDefined()
+    const runs = ctx.browserRuns
+    expect(runs.list()).toEqual([])
 
     const bridgeEntry = [...ctx.loader.entries()].find((entry) => entry.options.name === BRIDGE)!
     await bridgeEntry.fiber!.dispose()
     expect(tools.get('browser_snapshot')).toBeUndefined()
     expect(tools.get('browser_click')).toBeUndefined()
+    expect(() => runs.list()).toThrow(/closed/)
     // Self-disposing an include-tree entry persists `disabled: true`; await
     // that debounced write so it cannot race the temp-dir removal.
     await expect.poll(async () => (await readFile(configPath, 'utf8')).includes('disabled: true')).toBe(true)

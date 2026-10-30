@@ -1,0 +1,250 @@
+/**
+ * Durable browser-run records for trusted Host plugins. This service does not
+ * dispatch tools or expose an RPC: the current browser_* path is still separate.
+ * A storage root has one Host owner, as required by the DSH JSON domain backend.
+ */
+import { randomUUID } from 'node:crypto'
+import { defineDomain, domainTable, type Domain, type DomainFacility } from '@deepseek-ai/dsh-storage-domain'
+import { z } from 'zod'
+import { canonicalize, asActionId, asObservationId, asControlRevision, asRunId, asSessionId, type RequestDigest, type RunId, type SessionId } from './contracts/ids.ts'
+import { BROWSER_ERROR_CODES } from './contracts/errors.ts'
+import { validateActionFact, summarizeActionFacts, type ActionFact } from './contracts/outcome.ts'
+import { assertTransition, decideCompletion, isTerminal, nextControlRevision, requestPause, requestResume, requestStop } from './contracts/run.ts'
+
+declare module '@deepseek-ai/cordis' {
+  interface Context { browserRuns: BrowserRunStore }
+}
+
+const id = z.string().min(1).max(200).refine(value => value.trim() === value)
+const counter = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER)
+const revision = counter.transform(asControlRevision)
+const criteria = z.array(id).min(1).max(128).refine(items => new Set(items).size === items.length)
+const text = z.string().max(8192)
+const factSchema = z.strictObject({
+  actionId: id.transform(asActionId),
+  requestDigest: z.string().regex(/^[a-f0-9]{64}$/).transform(value => value as RequestDigest),
+  controlRevision: revision,
+  dispatchState: z.enum(['not_sent', 'sent_unconfirmed', 'accepted', 'effect_started']),
+  outcome: z.enum(['verified', 'failed', 'uncertain', 'cancelled']),
+  beforeObservationId: id.transform(asObservationId).optional(),
+  afterObservationId: id.transform(asObservationId).optional(),
+  verifiedCriteriaIds: z.array(id).max(128).optional(),
+  evidence: z.strictObject({
+    url: text.optional(),
+    fieldValues: z.record(id, text).optional(),
+    observedText: z.array(text).max(128).optional(),
+    artifactRefs: z.array(text).max(128).optional(),
+  }).optional(),
+  error: z.strictObject({
+    code: z.enum(BROWSER_ERROR_CODES), message: text,
+    nextStep: z.enum(['reobserve', 'focus_window', 'reselect_instance', 'request_permission', 'repair_arguments', 'wait_for_page', 'release_debugger', 'upgrade_runtime', 'reconnect', 'reconcile_business_state', 'none']),
+    retryable: z.boolean(), blocksWrites: z.boolean(), sideEffectUnknown: z.boolean().optional(),
+    details: z.record(z.string(), z.unknown()).optional(),
+  }).optional(),
+}).superRefine((value, ctx) => {
+  for (const message of validateActionFact(value as ActionFact)) ctx.addIssue({ code: 'custom', message })
+}).transform(value => value as ActionFact)
+
+const runSchema = z.strictObject({
+  runId: id.transform(asRunId), sessionId: id.transform(asSessionId),
+  parentRunId: id.transform(asRunId).optional(),
+  state: z.enum(['queued', 'running', 'blocked', 'paused', 'stopping', 'stopped', 'completed', 'failed']),
+  controlRevision: revision,
+  version: counter,
+  createdAt: counter, updatedAt: counter,
+  requiredCriteriaIds: criteria,
+  recoveryRequired: z.boolean(),
+  facts: z.array(factSchema).max(256),
+}).superRefine((run, ctx) => {
+  if (run.updatedAt < run.createdAt) ctx.addIssue({ code: 'custom', message: 'invalid timestamps' })
+  if (new Set(run.facts.map(fact => fact.actionId)).size !== run.facts.length) ctx.addIssue({ code: 'custom', message: 'duplicate action id' })
+  if (run.facts.some(fact => fact.controlRevision > run.controlRevision)) ctx.addIssue({ code: 'custom', message: 'future action revision' })
+  if (run.state === 'completed' && (run.recoveryRequired || decideCompletion({
+    requiredCriteriaIds: run.requiredCriteriaIds, ...summarizeActionFacts(run.facts),
+  }).status !== 'complete')) ctx.addIssue({ code: 'custom', message: 'unverified completion' })
+})
+
+/** Version is a compare-and-swap record version; controlRevision is authority. */
+export type BrowserRunRecord = z.infer<typeof runSchema>
+
+function specFor(profile: string) {
+  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(profile)) throw new TypeError('invalid browser run profile')
+  // Encode instead of lowercasing/replacing: distinct profile names must not
+  // collide, and DSH unit names allow only lowercase letters/digits/underscores.
+  return defineDomain({ name: `browser_runs_${Buffer.from(profile).toString('hex')}`, version: 1, tables: { runs: domainTable(runSchema) } })
+}
+type RunDomain = Domain<ReturnType<typeof specFor>>
+
+/** Stable failures contain no page content, arguments or credentials. */
+export class BrowserRunStoreError extends Error {
+  constructor(readonly code: 'not-found' | 'stale-version' | 'session-busy' | 'reconciliation-required' | 'action-conflict' | 'invalid-state' | 'storage-unavailable' | 'closed') {
+    super(`browser run store: ${code}`)
+    this.name = 'BrowserRunStoreError'
+  }
+}
+
+function snapshot<T>(value: T): T { return structuredClone(value) }
+
+/** Serialized, durable lifecycle and immutable facts; never an execution permit. */
+export class BrowserRunStore {
+  private tail: Promise<void> = Promise.resolve()
+  private closing = false
+  private writeFaulted = false
+  private disposal: Promise<void> | undefined
+  private constructor(private readonly domain: RunDomain) {}
+
+  static async open(facility: Pick<DomainFacility, 'open'>, profile: string): Promise<BrowserRunStore> {
+    const domain = await facility.open(specFor(profile))
+    const store = new BrowserRunStore(domain)
+    try {
+      const records = [...domain.table('runs').entries()]
+      for (const [key, run] of records) {
+        if (key !== run.runId) throw new TypeError('browser run key mismatch')
+        const seen = new Set([run.runId])
+        let parentId = run.parentRunId
+        while (parentId !== undefined) {
+          const parent = domain.table('runs').get(parentId)
+          if (parent === undefined || parent.sessionId !== run.sessionId || !isTerminal(parent.state) || seen.has(parentId)) throw new TypeError('invalid browser run parent')
+          seen.add(parentId)
+          parentId = parent.parentRunId
+        }
+      }
+      for (const [, run] of records) {
+        // Persist a fence before publishing the service. A previous Host's
+        // execution context cannot survive a restart, even without a final fact.
+        if (!isTerminal(run.state) && run.state !== 'queued') {
+          await store.save({ ...run, state: run.state === 'running' ? 'blocked' : run.state,
+            recoveryRequired: true, controlRevision: asControlRevision(run.controlRevision + 1) })
+        }
+      }
+      return store
+    } catch (error) { await domain.close(); throw error }
+  }
+
+  get(runId: RunId): BrowserRunRecord | undefined {
+    this.assertOpen()
+    const run = this.domain.table('runs').get(runId)
+    return run === undefined ? undefined : snapshot(run)
+  }
+
+  list(sessionId?: SessionId): BrowserRunRecord[] {
+    this.assertOpen()
+    return [...this.domain.table('runs').entries()].map(([, run]) => run)
+      .filter(run => sessionId === undefined || run.sessionId === sessionId).map(snapshot)
+  }
+
+  create(input: { sessionId: SessionId; requiredCriteriaIds: readonly string[]; parentRunId?: RunId }): Promise<BrowserRunRecord> {
+    // Copy before queueing: callers must not mutate queued authority material.
+    const parsed = z.strictObject({ sessionId: id.transform(asSessionId), requiredCriteriaIds: criteria,
+      parentRunId: id.transform(asRunId).optional() }).parse(JSON.parse(canonicalize(input)))
+    return this.exclusive(async () => {
+      if (parsed.parentRunId !== undefined) {
+        const parent = this.require(parsed.parentRunId)
+        if (parent.sessionId !== parsed.sessionId || !isTerminal(parent.state)) throw new BrowserRunStoreError('invalid-state')
+        this.assertReconciled(parent)
+      }
+      const now = Date.now()
+      const run = runSchema.parse({ ...parsed, runId: `run_${randomUUID()}`, state: 'queued',
+        controlRevision: 0, version: 0, createdAt: now, updatedAt: now, recoveryRequired: false, facts: [] })
+      await this.persist(run)
+      return snapshot(run)
+    })
+  }
+
+  /** Executor reports state only; user pause/resume/stop use control(). */
+  transition(runId: RunId, expectedVersion: number, state: 'running' | 'blocked' | 'stopped' | 'completed' | 'failed'): Promise<BrowserRunRecord> {
+    return this.exclusive(async () => {
+      const run = this.current(runId, expectedVersion)
+      assertTransition(run.state, state)
+      if ((state === 'running' && run.state !== 'queued') || (state === 'stopped' && run.state !== 'stopping')) throw new BrowserRunStoreError('invalid-state')
+      if (state === 'running') { this.assertReconciled(run); this.assertSessionAvailable(run) }
+      if (state === 'completed') {
+        this.assertReconciled(run)
+        if (decideCompletion({ requiredCriteriaIds: run.requiredCriteriaIds, ...summarizeActionFacts(run.facts) }).status !== 'complete') throw new BrowserRunStoreError('invalid-state')
+      }
+      return this.save({ ...run, state })
+    })
+  }
+
+  control(runId: RunId, expectedVersion: number, control: 'pause' | 'resume' | 'stop'): Promise<BrowserRunRecord> {
+    z.enum(['pause', 'resume', 'stop']).parse(control)
+    return this.exclusive(async () => {
+      const run = this.current(runId, expectedVersion)
+      const state = control === 'pause' ? requestPause(run.state) : control === 'resume' ? requestResume(run.state) : requestStop(run.state)
+      if (state === run.state) return snapshot(run)
+      if (state === 'running') { this.assertReconciled(run); this.assertSessionAvailable(run) }
+      return this.save({ ...run, state, controlRevision: asControlRevision(nextControlRevision(run.controlRevision, control)) })
+    })
+  }
+
+  /** Trusted Host facts only. Tool text must never be converted to verified. */
+  recordFact(runId: RunId, expectedVersion: number, fact: ActionFact): Promise<BrowserRunRecord> {
+    const parsed = factSchema.parse(JSON.parse(canonicalize(fact)))
+    return this.exclusive(async () => {
+      const run = this.current(runId, expectedVersion)
+      const existing = run.facts.find(item => item.actionId === parsed.actionId)
+      if (existing !== undefined) {
+        if (canonicalize(existing) !== canonicalize(parsed)) throw new BrowserRunStoreError('action-conflict')
+        return snapshot(run)
+      }
+      // Late outcomes after stopping/failure remain evidence. They do not
+      // reopen the run or authorize further dispatch.
+      if (run.state === 'queued' || run.state === 'completed' || parsed.controlRevision > run.controlRevision) throw new BrowserRunStoreError('invalid-state')
+      return this.save({ ...run, facts: [...run.facts, parsed] })
+    })
+  }
+
+  close(): Promise<void> {
+    this.closing = true
+    return this.disposal ??= this.tail.then(() => this.domain.close())
+  }
+
+  private assertOpen(): void { if (this.closing) throw new BrowserRunStoreError('closed') }
+  private exclusive<T>(work: () => Promise<T>): Promise<T> {
+    this.assertOpen()
+    const result = this.tail.then(() => {
+      if (this.writeFaulted) throw new BrowserRunStoreError('storage-unavailable')
+      return work()
+    })
+    this.tail = result.then(() => undefined, () => undefined)
+    return result
+  }
+  private require(runId: RunId): BrowserRunRecord {
+    const run = this.domain.table('runs').get(runId)
+    if (run === undefined) throw new BrowserRunStoreError('not-found')
+    return run
+  }
+  private current(runId: RunId, expectedVersion: number): BrowserRunRecord {
+    const run = this.require(runId)
+    if (!Number.isSafeInteger(expectedVersion) || run.version !== expectedVersion) throw new BrowserRunStoreError('stale-version')
+    return run
+  }
+  private assertSessionAvailable(run: BrowserRunRecord): void {
+    const others = [...this.domain.table('runs').entries()].map(([, other]) => other)
+      .filter(other => other.runId !== run.runId && other.sessionId === run.sessionId)
+    if (others.some(other => other.recoveryRequired || summarizeActionFacts(other.facts).pendingReconciliation.length > 0)) throw new BrowserRunStoreError('reconciliation-required')
+    if (others.some(other => other.state === 'running' || other.state === 'stopping')) throw new BrowserRunStoreError('session-busy')
+  }
+  private assertReconciled(run: BrowserRunRecord): void {
+    let current: BrowserRunRecord | undefined = run
+    while (current !== undefined) {
+      if (current.recoveryRequired || summarizeActionFacts(current.facts).pendingReconciliation.length > 0) throw new BrowserRunStoreError('reconciliation-required')
+      current = current.parentRunId === undefined ? undefined : this.require(current.parentRunId)
+    }
+  }
+  private async save(run: BrowserRunRecord): Promise<BrowserRunRecord> {
+    const next = runSchema.parse({ ...run, version: run.version + 1, updatedAt: Math.max(Date.now(), run.updatedAt) })
+    await this.persist(next)
+    return snapshot(next)
+  }
+  private async persist(run: BrowserRunRecord): Promise<void> {
+    try { await this.domain.table('runs').put(run.runId, run) }
+    catch (error) {
+      // A backend error can leave the commit point unknown (e.g. rename
+      // succeeded but directory fsync failed). Reopen and validate disk before
+      // allowing another write; never overwrite it from a possibly stale cache.
+      this.writeFaulted = true
+      throw error
+    }
+  }
+}

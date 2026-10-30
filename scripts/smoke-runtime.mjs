@@ -237,7 +237,7 @@ try {
   const closed = once(socket, 'close')
   assert.match(await pairCommand(bridgeBase, 'revoke', installationId), /Installation revoked/)
   assert.equal((await closed)[0], 4000)
-  console.log('Real DSH smoke passed: discovery, CLI pairing, restart authentication and revocation, create/list/history, Session model selection, V2 migration, V4 browser snapshots, and prepared projections after restart')
+  console.log('Real DSH smoke passed: discovery, pairing/revocation, Session history/models/migration, browser snapshots, prepared projections, and durable browser run facts with restart fencing (no model)')
   succeeded = true
 } catch (error) {
   // The Host may print an ephemeral launch URL; never publish its credential.

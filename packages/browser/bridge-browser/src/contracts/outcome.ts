@@ -12,7 +12,8 @@
  * `verified` needs recorded criteria and evidence, `cancelled` requires proof
  * that no side effect started, and an accepted action is not a success.
  *
- * These rules are not yet wired into the runtime.
+ * The Host run-record service validates stored facts with these rules.
+ * Browser tool replies do not yet produce these facts automatically.
  *
  * @module
  */
