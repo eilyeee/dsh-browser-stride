@@ -22,7 +22,7 @@
     "tldts": "7.4.19"
   },
   "devDependencies": {
-    "@eilyeee/dsh-stride-browser-bridge": "workspace:^",
+    "@eilyeee/dsh-browser-stride": "workspace:^",
     "@types/chrome": "0.3.7",
     "@types/node": "24.19.2",
     "@types/react": "19.3.0",

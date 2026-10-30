@@ -1,5 +1,5 @@
 {
-  "name": "@eilyeee/dsh-stride-browser-bridge",
+  "name": "@eilyeee/dsh-browser-stride",
   "description": "DSH Stride Host bridge: authenticated browser connection, text-only browser tools and run controls",
   "version": "0.0.7",
   "author": "Yuxiang Lin",

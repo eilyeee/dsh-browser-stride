@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createRpc, BridgeRpcError } from '../src/background/rpc.ts'
 import type { BridgeClient } from '../src/background/bridge.ts'
-import type { ServerFrame } from '@eilyeee/dsh-stride-browser-bridge/src/protocol.ts'
+import type { ServerFrame } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 
 describe('bridge RPC failures', () => {
   it('preserves a stale-control code for the panel instead of reporting a connection failure', async () => {

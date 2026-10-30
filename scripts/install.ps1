@@ -21,8 +21,8 @@ $ProgressPreference = 'SilentlyContinue'
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { }
 
 $DshHomeDir = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $HOME '.dsh' }
-$LegacyPlugins = @('@yuxianglin/dsh-bridge-browser', '@deepseek-ai/dsh-bridge-browser')
-$BridgePlugin = '@eilyeee/dsh-stride-browser-bridge'
+$LegacyPlugins = @('@eilyeee/dsh-stride-browser-bridge', '@yuxianglin/dsh-bridge-browser', '@deepseek-ai/dsh-bridge-browser')
+$BridgePlugin = '@eilyeee/dsh-browser-stride'
 
 function Write-Step {
   param([int]$Number, [string]$Zh, [string]$En)

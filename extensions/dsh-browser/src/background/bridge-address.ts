@@ -1,4 +1,4 @@
-import { BRIDGE_PATH } from '@eilyeee/dsh-stride-browser-bridge/src/protocol.ts'
+import { BRIDGE_PATH } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 
 /** Only literal local addresses can receive the bridge credential. */
 export function localBridgeUrl(value: string): string | undefined {

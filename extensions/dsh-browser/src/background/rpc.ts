@@ -6,7 +6,7 @@
  */
 
 import type { BridgeClient } from './bridge.ts'
-import type { ServerFrame } from '@eilyeee/dsh-stride-browser-bridge/src/protocol.ts'
+import type { ServerFrame } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 
 const RPC_TIMEOUT_MS = 30_000
 

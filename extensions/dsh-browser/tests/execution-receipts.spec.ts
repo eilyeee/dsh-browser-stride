@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { IDBObjectStore } from 'fake-indexeddb'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { ServerFrame } from '@eilyeee/dsh-stride-browser-bridge/src/protocol.ts'
+import type { ServerFrame } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 import { admitExecution, executeRecordedTool, finishExecution } from '../src/background/execution-receipts.ts'
 import { wireToolCall } from './wire-tool-call.ts'
 

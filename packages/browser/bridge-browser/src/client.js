@@ -1,11 +1,11 @@
 /**
- * Browser half of `@eilyeee/dsh-stride-browser-bridge`.
+ * Browser half of `@eilyeee/dsh-browser-stride`.
  *
  * When the host plugin is active, this client registers a General-settings row
  * that shows the pasteable bridge WebSocket URL for the Chrome extension.
  */
 window.__ModuleLoader__.load({
-  id: '@eilyeee/dsh-stride-browser-bridge',
+  id: '@eilyeee/dsh-browser-stride',
   factory: (require) => {
     const module = { exports: {} }
     const React = require('react')
@@ -13,7 +13,7 @@ window.__ModuleLoader__.load({
     const BRIDGE_PATH = '/ext/bridge'
     const BRIDGE_CONFIG_PATH = '/ext/bridge-config'
     const LOCALE_NS = 'bridge-browser'
-    const STYLE_ID = '@eilyeee/dsh-stride-browser-bridge/BridgeAddressRow'
+    const STYLE_ID = '@eilyeee/dsh-browser-stride/BridgeAddressRow'
     const inject = ['slots', 'locale']
 
     const dictionaries = {
@@ -80,7 +80,7 @@ window.__ModuleLoader__.load({
         return () => {}
       }
       const style = document.createElement('style')
-      style.dataset.plugin = '@eilyeee/dsh-stride-browser-bridge'
+      style.dataset.plugin = '@eilyeee/dsh-browser-stride'
       style.dataset.pluginCss = STYLE_ID
       style.textContent = [
         '.dshBridgeAddressRow{border-bottom:1px solid var(--dsw-alias-border-l2);display:flex;flex-direction:column;gap:8px;padding:16px 0}',

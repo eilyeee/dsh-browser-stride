@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { BRIDGE_PROTOCOL_VERSION } from '@eilyeee/dsh-stride-browser-bridge/src/protocol.ts'
+import { BRIDGE_PROTOCOL_VERSION } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { wireToolCall } from './wire-tool-call.ts'
 

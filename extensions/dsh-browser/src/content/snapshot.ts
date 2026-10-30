@@ -13,7 +13,7 @@
 import { accessibleName, collectInteractive, isInViewport, isVisible, mainText, pageText, truncate } from './extract.ts'
 import { ElementIds, SELECT_OPTION_LIMIT } from './ids.ts'
 import { isSensitiveField, maskValue } from './privacy.ts'
-import { makeElementRef, makeObservationId, type ObservationId } from '@eilyeee/dsh-stride-browser-bridge/src/contracts/ids.ts'
+import { makeElementRef, makeObservationId, type ObservationId } from '@eilyeee/dsh-browser-stride/src/contracts/ids.ts'
 
 /** Role label per element kind (model-facing vocabulary). */
 function roleOf(el: Element): string {

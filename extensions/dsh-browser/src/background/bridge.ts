@@ -9,14 +9,14 @@
  * @module
  */
 
-import type { BridgeCaps, ClientFrame, ServerFrame } from '@eilyeee/dsh-stride-browser-bridge/src/protocol.ts'
+import type { BridgeCaps, ClientFrame, ServerFrame } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 import {
   DEFAULT_SNAPSHOT_MAX_CHARS,
   BRIDGE_PROTOCOL_VERSION,
   PROTOCOL_MISMATCH_CLOSE_CODE,
   isServerFrame,
   parseBridgeFrame,
-} from '@eilyeee/dsh-stride-browser-bridge/src/protocol.ts'
+} from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 
 /** Coarse connection state for the UI. */
 export type BridgeState = 'connecting' | 'connected' | 'reconnecting' | 'stopped' | 'update-host' | 'update-extension' | 'incompatible'

@@ -2,7 +2,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-const BRIDGE_PACKAGES = ['@eilyeee/dsh-stride-browser-bridge', '@yuxianglin/dsh-bridge-browser', '@deepseek-ai/dsh-bridge-browser']
+const BRIDGE_PACKAGES = ['@eilyeee/dsh-browser-stride', '@eilyeee/dsh-stride-browser-bridge', '@yuxianglin/dsh-bridge-browser', '@deepseek-ai/dsh-bridge-browser']
 
 export function profileRoot(env = process.env, home = homedir()) {
   const configured = env.DSH_HOME?.trim()

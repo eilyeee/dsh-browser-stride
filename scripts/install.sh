@@ -245,8 +245,8 @@ fi
 EXT="$ROOT/extensions/dsh-browser"
 PLUGIN="$ROOT/packages/browser/bridge-browser"
 WEB_PROFILE_MANIFEST="$DSH_HOME_DIR/profiles/web/package.json"
-BRIDGE_PLUGIN="@eilyeee/dsh-stride-browser-bridge"
-LEGACY_PLUGINS=("@yuxianglin/dsh-bridge-browser" "@deepseek-ai/dsh-bridge-browser")
+BRIDGE_PLUGIN="@eilyeee/dsh-browser-stride"
+LEGACY_PLUGINS=("@eilyeee/dsh-stride-browser-bridge" "@yuxianglin/dsh-bridge-browser" "@deepseek-ai/dsh-bridge-browser")
 
 profile_has_dependency() {
   local manifest="$1"
@@ -265,7 +265,7 @@ require_command rsync "未找到 rsync；请先安装 rsync。" "rsync was not f
 
 print_step 1 "构建浏览器桥" "Build the browser bridge"
 (cd "$ROOT" && pnpm install --frozen-lockfile >/dev/null 2>&1)
-(cd "$ROOT" && pnpm --filter @eilyeee/dsh-stride-browser-bridge run build >/dev/null 2>&1)
+(cd "$ROOT" && pnpm --filter @eilyeee/dsh-browser-stride run build >/dev/null 2>&1)
 
 print_step 2 "注册到本机 web profile" "Register with the local web profile"
 # Keep the existing registration until the new package has installed successfully.

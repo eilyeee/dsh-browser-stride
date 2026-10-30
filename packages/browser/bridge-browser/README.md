@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-`@eilyeee/dsh-stride-browser-bridge`
+`@eilyeee/dsh-browser-stride`
 The bridge mounts a loopback-only, token-authenticated WebSocket on the local DeepSeek Harness Host and registers text-based `browser_*` tools. The browser extension performs the actual page operations. See the [repository README](../../../README.md) for setup and current limitations.
 
 ## Configuration

@@ -5,7 +5,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import type { BridgeState } from '../src/background/bridge.ts'
 import type { PanelApi } from '../src/panel/api.ts'
-import { BRIDGE_SESSION_PURGE_METHOD, type ServerFrame } from '@eilyeee/dsh-stride-browser-bridge/src/protocol.ts'
+import { BRIDGE_SESSION_PURGE_METHOD, type ServerFrame } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 
 let panelApi: PanelApi
 
@@ -14,7 +14,7 @@ vi.mock('../src/panel/api.ts', () => ({
 }))
 
 import { App } from '../src/panel/App.tsx'
-import { createRemoteHostApi } from '@eilyeee/dsh-stride-browser-bridge/src/remote-host-api.ts'
+import { createRemoteHostApi } from '@eilyeee/dsh-browser-stride/src/remote-host-api.ts'
 
 describe('panel session transitions', () => {
   let root: Root

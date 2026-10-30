@@ -9,9 +9,9 @@
 
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { BrowserPairingStatus } from '../background/pairing-client.ts'
-import { BRIDGE_SESSION_PURGE_METHOD, DEFAULT_SNAPSHOT_MAX_CHARS } from '@eilyeee/dsh-stride-browser-bridge/src/protocol.ts'
-import type { BridgeCaps } from '@eilyeee/dsh-stride-browser-bridge/src/protocol.ts'
-import type { ServerFrame } from '@eilyeee/dsh-stride-browser-bridge/src/protocol.ts'
+import { BRIDGE_SESSION_PURGE_METHOD, DEFAULT_SNAPSHOT_MAX_CHARS } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
+import type { BridgeCaps } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
+import type { ServerFrame } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 import type { BridgeState } from '../background/bridge.ts'
 import type { AffinityTab, TabAffinityDecision, TabAffinityState } from '../background/tab-affinity.ts'
 import { connectPanel, PanelRpcError, type PanelApi, type PanelSettings } from './api.ts'

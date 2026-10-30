@@ -195,8 +195,8 @@ try {
   await writeFile(legacyFile, legacyBytes)
   // Exercise the real package-name migration with one unchanged temporary
   // DSH home, including the saved installation credential and run domains.
-  const legacyName = '@yuxianglin/dsh-bridge-browser'
-  const currentName = '@eilyeee/dsh-stride-browser-bridge'
+  const legacyName = '@eilyeee/dsh-stride-browser-bridge'
+  const currentName = '@eilyeee/dsh-browser-stride'
   const legacyBridge = join(temp, 'legacy-bridge')
   await mkdir(legacyBridge)
   const manifest = JSON.parse(await readFile(join(bridge, 'package.json'), 'utf8'))

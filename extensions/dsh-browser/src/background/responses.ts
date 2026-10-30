@@ -1,4 +1,4 @@
-import type { ServerFrame } from '@eilyeee/dsh-stride-browser-bridge/src/protocol.ts'
+import type { ServerFrame } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 
 type ResponseReceipt = Extract<ServerFrame, { t: 'respond.result' }>
 

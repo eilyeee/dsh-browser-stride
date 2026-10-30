@@ -2,7 +2,7 @@ import { defineConfig } from 'tsdown'
 
 /**
  * The bridge package ships the plugin and protocol module — the extension imports
- * `@eilyeee/dsh-stride-browser-bridge/protocol`, so the protocol bundle is part
+ * `@eilyeee/dsh-browser-stride/protocol`, so the protocol bundle is part
  * of the published surface, not an internal module.
  */
 export default defineConfig({

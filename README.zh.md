@@ -6,7 +6,7 @@ DSH Stride 是 [dsh-browser](https://github.com/omdsh-dev/dsh-browser) 的社区
 
 项目目前处于 **M0：兼容性与基线验证**。上游的文本浏览器工具和侧栏聊天可作为开发基线；连接、安装级配对与目标检查已有加固，目前没有正式支持的发行版。
 
-Host 组件包名为 `@eilyeee/dsh-stride-browser-bridge`，源码目录仍为 `packages/browser/bridge-browser/`；浏览器扩展是单独的组件。
+Host 组件包名为 `@eilyeee/dsh-browser-stride`，源码目录仍为 `packages/browser/bridge-browser/`；浏览器扩展是单独的组件。
 
 ## 环境要求
 
@@ -36,7 +36,7 @@ pnpm start
 
 当前使用源码安装：在原检出目录拉取更新，用项目要求的 Node/pnpm 安装锁定依赖并运行 `pnpm build`，重启 Host，在 `chrome://extensions/` 点击扩展的「重新加载」，再刷新需要操作的网页。保留原扩展安装、相同浏览器配置和 Host 数据即可沿用配对；更换扩展安装身份或清除数据后需要重新配对。Firefox 临时扩展需重新载入。Bridge 和扩展应来自同一检出，不兼容时会提示更新哪一端。
 
-本次包名迁移需在拉取并构建后再运行一次安装脚本（`./scripts/install.sh`，Windows 使用 `.\scripts\install.ps1`）。脚本会先注册 `@eilyeee/dsh-stride-browser-bridge`，再移除旧的 `@yuxianglin/dsh-bridge-browser` 与 `@deepseek-ai/dsh-bridge-browser` 注册。保留原 DSH home 和扩展安装即可沿用配对及任务记录。
+本次包名迁移需在拉取并构建后再运行一次安装脚本（`./scripts/install.sh`，Windows 使用 `.\scripts\install.ps1`）。脚本会先注册 `@eilyeee/dsh-browser-stride`，再移除过渡名称 `@eilyeee/dsh-stride-browser-bridge` 以及旧的 `@yuxianglin/dsh-bridge-browser` 与 `@deepseek-ai/dsh-bridge-browser` 注册。保留原 DSH home 和扩展安装即可沿用配对及任务记录。
 
 DSH 能安装 GitHub 插件，但本仓库根目录目前是开发工作区，尚未提供可直接通过 GitHub 插件入口安装的发布包，也没有浏览器商店自动更新渠道。GitHub 安装 Host 插件不会替浏览器安装或更新扩展。
 

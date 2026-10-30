@@ -2,7 +2,7 @@
  * Best-effort workspace grouping for sessions created through the browser
  * bridge. The wrapper changes only implicit `session.create` requests;
  * explicit workspace choices and every other gateway method pass through.
- * @module @eilyeee/dsh-stride-browser-bridge/src/session-workspace
+ * @module @eilyeee/dsh-browser-stride/src/session-workspace
  */
 
 import { randomUUID } from 'node:crypto'

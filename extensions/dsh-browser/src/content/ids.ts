@@ -10,7 +10,7 @@
  */
 
 import { accessibleName, isVisible } from './extract.ts'
-import { parseElementRef, type ObservationId } from '@eilyeee/dsh-stride-browser-bridge/src/contracts/ids.ts'
+import { parseElementRef, type ObservationId } from '@eilyeee/dsh-browser-stride/src/contracts/ids.ts'
 
 /** Attribute written on every inventoried element (observable numbering). */
 const ID_ATTRIBUTE = 'data-dsh-el'

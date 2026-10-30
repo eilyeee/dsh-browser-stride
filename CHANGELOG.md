@@ -9,9 +9,9 @@ no release version has been assigned yet.
 
 ### Changed
 
-- The Host component is now `@eilyeee/dsh-stride-browser-bridge`. Workspace
+- The Host component is now `@eilyeee/dsh-browser-stride`. Workspace
   imports, the Host settings module and installers use this name. Installers
-  migrate both legacy package registrations after installing the new package;
+  migrate transitional and legacy package registrations after installing the new package;
   pairing namespaces, run domains and extension identity remain unchanged.
 
 ### Added

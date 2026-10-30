@@ -6,7 +6,7 @@
  * goes through Connection because it is a Gateway-owned RPC endpoint rather
  * than a Typert Remote method.
  *
- * @module @eilyeee/dsh-stride-browser-bridge/src/remote-host-api
+ * @module @eilyeee/dsh-browser-stride/src/remote-host-api
  */
 
 import type {
