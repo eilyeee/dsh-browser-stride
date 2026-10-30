@@ -8,6 +8,16 @@ updates:
       deepseek-harness:
         patterns:
           - '@deepseek-ai/dsh*'
+      react:
+        patterns:
+          - react
+          - react-dom
+          - '@types/react'
+          - '@types/react-dom'
+    ignore:
+      # Keep declarations on the Node 24 runtime baseline until it is upgraded.
+      - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']
   - package-ecosystem: github-actions
     directory: /
     schedule:

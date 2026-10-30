@@ -24,6 +24,7 @@
   "devDependencies": {
     "@yuxianglin/dsh-bridge-browser": "workspace:^",
     "@types/chrome": "0.3.7",
+    "@types/node": "24.19.2",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
     "@vitejs/plugin-react": "6.1.2",

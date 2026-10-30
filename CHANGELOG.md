@@ -56,6 +56,8 @@ no release version has been assigned yet.
   to the DSH 0.2.1 release-candidate Host API.
 - Align the DSH Host and client peers on `0.2.1-rc.3` and allow the bridge
   settings client to run with React 19.
+- Keep Node declarations on the Node 24 baseline and group React runtime and
+  declaration updates together in Dependabot.
 - Security overrides for vulnerable versions pinned by DSH, with focused MCP
   and archive compatibility checks and a clean npm advisory audit.
 - DOM settle timeouts now report an unquiet page and invalidate prior
