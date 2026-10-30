@@ -43,6 +43,7 @@ import { BRIDGE_CONFIG_PATH, BRIDGE_PATH } from '@yuxianglin/dsh-bridge-browser/
 import { BridgeClient, type BridgeState } from './bridge.ts'
 import { readBridgeCredential, writeBridgeCredential } from './credential-store.ts'
 import { needsWriteTurn, WriteQueue } from './write-queue.ts'
+import { executeRecordedTool } from './execution-receipts.ts'
 import { localBridgeUrl } from './bridge-address.ts'
 import { createRpc } from './rpc.ts'
 import {
@@ -53,7 +54,6 @@ import {
   isTabManagementTool,
   resetTabSnapshot,
   type ToolAnswer,
-  type ToolCall,
 } from './tools.ts'
 import {
   isApprovalDecision,
@@ -1096,9 +1096,10 @@ async function pushBudgetToControlledTab(negotiated: BridgeCaps): Promise<void> 
 }
 
 /** Route one tool.call frame to the user-approved controlled tab. */
-function routeToolCall(call: ToolCall): void {
+function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
   if (bridge === null) return
-  activeToolCalls.get(call.id)?.controller.abort()
+  // Transport duplicates must not replace an already-authorized operation.
+  if (activeToolCalls.has(call.id)) return
   const controller = new AbortController()
   const unrestrictedAccess = unrestrictedAccessEnabled()
   let settle!: () => void
@@ -1204,7 +1205,8 @@ function routeToolCall(call: ToolCall): void {
     }
     return answer
   }
-  const result = needsWriteTurn(call.name) ? writeQueue.run(controller.signal, dispatchAndCheckpoint) : dispatchAndCheckpoint()
+  const result = executeRecordedTool(call, controller.signal, () => needsWriteTurn(call.name)
+    ? writeQueue.run(controller.signal, dispatchAndCheckpoint) : dispatchAndCheckpoint())
   void result.then(
     async (answer) => {
       if (activeToolCalls.get(call.id) !== activeCall) return
@@ -1214,7 +1216,7 @@ function routeToolCall(call: ToolCall): void {
         if (activeToolCalls.get(call.id) === activeCall) {
           bridge?.send({
             t: 'tool.result',
-            id: call.id,
+            id: call.id, action: call.action,
             ok: false,
             error: { code: 'action-failed', message: 'Tool call was cancelled' },
           })
@@ -1225,11 +1227,11 @@ function routeToolCall(call: ToolCall): void {
         if (activeToolCalls.get(call.id) !== activeCall) return
         const socket = bridge
         if (socket === null) return
-        socket.send({ t: 'tool.result', id: call.id, ok: true, result: answer.result })
+        socket.send({ t: 'tool.result', id: call.id, action: call.action, ok: true, result: answer.result })
       } else {
         const socket = bridge
         if (socket === null) return
-        socket.send({ t: 'tool.result', id: call.id, ok: false, error: answer.error! })
+        socket.send({ t: 'tool.result', id: call.id, action: call.action, ok: false, error: answer.error! })
       }
     },
     (error: unknown) => {
@@ -1238,7 +1240,7 @@ function routeToolCall(call: ToolCall): void {
         if (activeToolCalls.get(call.id) === activeCall) {
           bridge?.send({
             t: 'tool.result',
-            id: call.id,
+            id: call.id, action: call.action,
             ok: false,
             error: { code: 'action-failed', message: 'Tool call was cancelled' },
           })
@@ -1247,7 +1249,7 @@ function routeToolCall(call: ToolCall): void {
       }
       bridge?.send({
         t: 'tool.result',
-        id: call.id,
+        id: call.id, action: call.action,
         ok: false,
         error: { code: 'internal', message: error instanceof Error ? error.message : String(error) },
       })

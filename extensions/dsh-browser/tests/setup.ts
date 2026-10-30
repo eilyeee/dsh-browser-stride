@@ -5,10 +5,12 @@
  */
 
 import { IDBFactory } from 'fake-indexeddb'
+import { webcrypto } from 'node:crypto'
 import { beforeEach } from 'vitest'
 
 beforeEach(() => {
   Object.defineProperty(globalThis, 'indexedDB', { configurable: true, value: new IDBFactory() })
+  if (globalThis.crypto?.subtle === undefined) Object.defineProperty(globalThis, 'crypto', { configurable: true, value: webcrypto })
 })
 
 const FAKE_RECT: DOMRect = {

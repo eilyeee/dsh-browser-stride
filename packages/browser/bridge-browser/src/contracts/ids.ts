@@ -18,8 +18,8 @@
  * and the MV3 extension can import it. It performs no I/O and starts no timer.
  *
  * Observation and element-reference helpers are used by the extension, and
- * run ids/revisions by the Host record service. Full action identities and
- * digests are not yet carried by the browser tool transport.
+ * run ids/revisions by the Host record service. Wire v2 carries tool-command
+ * identities/digests; full run control and live-target binding remain unwired.
  *
  * @module
  */

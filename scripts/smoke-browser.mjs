@@ -22,6 +22,7 @@ const require = createRequire(join(repoRoot, 'package.json'))
 const bridgeRequire = createRequire(join(repoRoot, 'packages/browser/bridge-browser/package.json'))
 const { WebSocketServer } = bridgeRequire('ws')
 const { BRIDGE_PROTOCOL_VERSION } = await import(pathToFileURL(join(repoRoot, 'packages/browser/bridge-browser/lib/protocol.js')).href)
+const { computeToolCommandDigest } = await import(pathToFileURL(join(repoRoot, 'packages/browser/bridge-browser/lib/index.js')).href)
 const cli = join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'lib/bin.js')
 const root = await mkdtemp(join(tmpdir(), 'stride-browser-smoke-'))
 const home = join(root, 'home')
@@ -76,6 +77,9 @@ async function waitForResult() {
 }
 
 async function verifyIncompatibleHost(protocolVersion, expectedState) {
+  const args = { url: `${site.origin}/health` }
+  const actionId = 'act_synthetic_incompatible'
+  const action = { actionId, requestDigest: await computeToolCommandDigest({ actionId, name: 'browser_navigate', args }) }
   let connections = 0
   let toolResults = 0
   let url
@@ -92,8 +96,8 @@ async function verifyIncompatibleHost(protocolVersion, expectedState) {
       if (frame.t !== 'hello') return
       socket.send(JSON.stringify({ t: 'hello.ok', caps: frame.caps,
         ...(protocolVersion === undefined ? {} : { protocolVersion }) }))
-      socket.send(JSON.stringify({ t: 'tool.call', id: 'rejected-navigation', name: 'browser_navigate',
-        args: { url: `${site.origin}/health` }, expiresAt: Date.now() + 10000 }))
+      socket.send(JSON.stringify({ t: 'tool.call', id: 'rejected-navigation', action, name: 'browser_navigate',
+        args, expiresAt: Date.now() + 10000 }))
     })
   })
   try {
@@ -124,6 +128,124 @@ async function verifyIncompatibleHost(protocolVersion, expectedState) {
     assert.equal(toolResults, 0, 'an incompatible peer must not dispatch tools')
     assert.equal(browser.target.url(), originalTarget, 'rejected tools must not navigate the page')
   } finally {
+    for (const socket of sockets.clients) socket.terminate()
+    await new Promise(resolveClose => sockets.close(resolveClose))
+    await new Promise(resolveClose => server.close(resolveClose))
+  }
+}
+
+async function verifyPersistentExecutionFence() {
+  let url
+  let activeSocket
+  let connections = 0
+  const replies = new Map()
+  const server = createHttpServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ wsUrl: url }))
+  })
+  const sockets = new WebSocketServer({ server })
+  sockets.on('connection', socket => {
+    connections += 1
+    activeSocket = socket
+    socket.on('message', bytes => {
+      const frame = JSON.parse(bytes.toString())
+      if (frame.t === 'hello') socket.send(JSON.stringify({ t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps: frame.caps }))
+      if (frame.t === 'tool.result') replies.set(frame.id, frame)
+    })
+  })
+  const destination = `${site.origin}/health?execution-fence=synthetic`
+  let navigations = 0
+  const countNavigation = request => { if (request.isNavigationRequest() && request.url() === destination) navigations += 1 }
+  browser.target.on('request', countNavigation)
+  async function connectPanel() {
+    await browser.panel.evaluate(bridgeUrl => new Promise((resolveStatus, reject) => {
+      const port = window.__dshBenchmarkPort ??= chrome.runtime.connect({ name: 'dsh-panel' })
+      const timer = setTimeout(() => { port.onMessage.removeListener(onMessage); reject(new Error('synthetic Host connection timed out')) }, 10000)
+      const onMessage = message => {
+        if (message?.type !== 'status' || message.state !== 'connected') return
+        clearTimeout(timer)
+        port.onMessage.removeListener(onMessage)
+        resolveStatus()
+      }
+      port.onMessage.addListener(onMessage)
+      port.postMessage({ type: 'settings', settings: { bridgeUrl, token: 'synthetic-execution-token' } })
+    }), url)
+  }
+  const actionId = 'act_synthetic_persistent_execution'
+  async function command(id, args) {
+    const action = { actionId, requestDigest: await computeToolCommandDigest({ actionId, name: 'browser_navigate', args }) }
+    activeSocket.send(JSON.stringify({ t: 'tool.call', id, action, name: 'browser_navigate', args, expiresAt: Date.now() + 15000 }))
+    const deadline = Date.now() + 20000
+    while (Date.now() < deadline && !replies.has(id)) await delay(50)
+    const reply = replies.get(id)
+    assert.ok(reply, 'synthetic command did not produce a receipt')
+    assert.deepEqual(reply.action, action)
+    return reply
+  }
+  try {
+    await new Promise((resolveListen, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolveListen) })
+    url = `ws://127.0.0.1:${server.address().port}/ext/bridge`
+    await connectPanel()
+    const args = { url: destination }
+    assert.equal((await command('synthetic-first-attempt', args)).ok, true)
+    assert.equal(navigations, 1)
+    assert.equal((await command('synthetic-retransmission', args)).error?.code, 'action-duplicate')
+    assert.equal((await command('synthetic-conflict', { url: `${site.origin}/health?changed=synthetic` })).error?.code, 'action-conflict')
+    assert.equal(navigations, 1)
+    const stored = await browser.panel.evaluate(id => new Promise((resolveRow, reject) => {
+      const open = indexedDB.open('dsh-browser-execution', 1)
+      open.onsuccess = () => {
+        const db = open.result
+        const transaction = db.transaction('receipts', 'readonly')
+        const get = transaction.objectStore('receipts').get(id)
+        transaction.oncomplete = () => { db.close(); resolveRow(get.result) }
+        transaction.onerror = () => { db.close(); reject(new Error('receipt read failed')) }
+      }
+      open.onerror = () => reject(new Error('receipt database failed'))
+    }), actionId)
+    assert.equal(stored.phase, 'finished')
+    assert.deepEqual(Object.keys(stored).sort(), ['actionId', 'createdAt', 'finishedAt', 'phase', 'requestDigest'])
+    const pageStores = await browser.target.evaluate(() => new Promise((resolveStores, reject) => {
+      const open = indexedDB.open('dsh-browser-execution', 1)
+      open.onsuccess = () => { const db = open.result; const names = [...db.objectStoreNames]; db.close(); resolveStores(names) }
+      open.onerror = () => reject(new Error('synthetic page database failed'))
+    }))
+    assert.deepEqual(pageStores, [], 'webpage origin must not see extension execution receipts')
+    // Stop the actual extension worker and wake a fresh one from the panel.
+    // This retains the same disposable browser profile and IndexedDB.
+    const cdp = await browser.context.newCDPSession(browser.panel)
+    const versions = new Map()
+    const stopped = new Set()
+    cdp.on('ServiceWorker.workerVersionUpdated', event => {
+      for (const version of event.versions) {
+        versions.set(version.versionId, version)
+        if (version.runningStatus === 'stopped') stopped.add(version.versionId)
+      }
+    })
+    await cdp.send('ServiceWorker.enable')
+    const workerUrl = browser.worker.url()
+    let version
+    let deadline = Date.now() + 10000
+    while (Date.now() < deadline && version === undefined) {
+      version = [...versions.values()].find(item => item.scriptURL === workerUrl && item.runningStatus === 'running')
+      if (version === undefined) await delay(50)
+    }
+    assert.ok(version, 'running extension worker must appear in CDP service-worker state')
+    stopped.delete(version.versionId)
+    const previousConnections = connections
+    await cdp.send('ServiceWorker.stopWorker', { versionId: version.versionId })
+    deadline = Date.now() + 10000
+    while (Date.now() < deadline && !stopped.has(version.versionId)) await delay(50)
+    assert.ok(stopped.has(version.versionId), 'CDP must confirm the extension worker stopped')
+    await browser.panel.reload()
+    await browser.panel.waitForSelector('header.topbar')
+    await connectPanel()
+    assert.ok(connections > previousConnections, 'fresh worker must establish a new connection')
+    await cdp.detach()
+    assert.equal((await command('synthetic-after-worker-reload', args)).error?.code, 'action-duplicate')
+    assert.equal(navigations, 1, 'worker restart must not replay a recorded navigation')
+  } finally {
+    browser.target.off('request', countNavigation)
     for (const socket of sockets.clients) socket.terminate()
     await new Promise(resolveClose => sockets.close(resolveClose))
     await new Promise(resolveClose => server.close(resolveClose))
@@ -163,9 +285,11 @@ try {
   assert.equal(await host.revokeInstallation(installations[0].installationId), true)
   assert.equal((await host.listInstallations()).length, 0)
   await browser.panel.locator('.connection .dot.connected').waitFor({ state: 'hidden', timeout: 15_000 })
+  await verifyPersistentExecutionFence()
   await verifyIncompatibleHost(undefined, 'update-host')
+  await verifyIncompatibleHost(BRIDGE_PROTOCOL_VERSION - 1, 'update-host')
   await verifyIncompatibleHost(BRIDGE_PROTOCOL_VERSION + 1, 'update-extension')
-  console.log('Browser smoke passed: real DSH tools with durable dispatch receipts, pairing/revocation, snapshots and writes, independent site state, and incompatible-host rejection (no model)')
+  console.log('Browser smoke passed: real DSH tools, durable v2 identities, persistent replay/conflict rejection across worker restart, origin isolation, pairing/revocation and independent site state (no model)')
 } finally {
   await browser?.close().catch(() => {})
   await host?.close().catch(() => {})

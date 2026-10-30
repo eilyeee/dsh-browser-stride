@@ -2,6 +2,7 @@
 
 import { BRIDGE_PROTOCOL_VERSION } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { wireToolCall } from './wire-tool-call.ts'
 
 class FakeWebSocket extends EventTarget {
   static readonly CONNECTING = 0
@@ -27,7 +28,7 @@ class FakeWebSocket extends EventTarget {
   }
 
   receive(frame: unknown): void {
-    this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(frame) }))
+    this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(wireToolCall(frame)) }))
   }
 
   close(code = 1000, reason = ''): void {
@@ -538,7 +539,7 @@ describe('background bridge lifecycle', () => {
     finishTabLookup({ id: 1, windowId: 1, title: 'Tab', url: 'https://example.com/' } as chrome.tabs.Tab)
     await vi.waitFor(() => {
       expect(socket.sent).toContainEqual({
-        t: 'tool.result',
+        t: 'tool.result', action: expect.objectContaining({ actionId: expect.any(String), requestDigest: expect.stringMatching(/^[a-f0-9]{64}$/) }),
         id: 'close-in-flight',
         ok: false,
         error: { code: 'action-failed', message: 'Tool call was cancelled' },
@@ -599,7 +600,7 @@ describe('background bridge lifecycle', () => {
     await Promise.resolve()
     expect(chrome.storage.local.set).not.toHaveBeenCalled()
     expect(socket.sent).not.toContainEqual(expect.objectContaining({
-      t: 'tool.result',
+      t: 'tool.result', action: expect.objectContaining({ actionId: expect.any(String), requestDigest: expect.stringMatching(/^[a-f0-9]{64}$/) }),
       id: 'close-committed',
       ok: false,
     }))
@@ -607,7 +608,7 @@ describe('background bridge lifecycle', () => {
     finishClose()
     await vi.waitFor(() => {
       expect(socket.sent).toContainEqual(expect.objectContaining({
-        t: 'tool.result',
+        t: 'tool.result', action: expect.objectContaining({ actionId: expect.any(String), requestDigest: expect.stringMatching(/^[a-f0-9]{64}$/) }),
         id: 'close-committed',
         ok: true,
       }))
@@ -763,8 +764,8 @@ describe('background bridge lifecycle', () => {
     })
     expect(savedBeforeClose).toBe(false)
 
-    expect(originalSocket.sent).not.toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'old-close' }))
-    expect(replacementSocket.sent).not.toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'old-close' }))
+    expect(originalSocket.sent).not.toContainEqual(expect.objectContaining({ t: 'tool.result', action: expect.objectContaining({ actionId: expect.any(String), requestDigest: expect.stringMatching(/^[a-f0-9]{64}$/) }), id: 'old-close' }))
+    expect(replacementSocket.sent).not.toContainEqual(expect.objectContaining({ t: 'tool.result', action: expect.objectContaining({ actionId: expect.any(String), requestDigest: expect.stringMatching(/^[a-f0-9]{64}$/) }), id: 'old-close' }))
   })
 
   it('does not send a navigation result across a reconnect during its checkpoint', async () => {
@@ -801,7 +802,7 @@ describe('background bridge lifecycle', () => {
       sessionId: 'checkpoint-session', args: { tabId: 1 }, expiresAt: Date.now() + 10_000,
     })
     await vi.waitFor(() => {
-      expect(original.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'follow-before-reload', ok: true }))
+      expect(original.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', action: expect.objectContaining({ actionId: expect.any(String), requestDigest: expect.stringMatching(/^[a-f0-9]{64}$/) }), id: 'follow-before-reload', ok: true }))
     })
     original.receive({
       t: 'tool.call', id: 'old-reload', name: 'browser_reload',
@@ -818,7 +819,7 @@ describe('background bridge lifecycle', () => {
     finishCheckpoint(tab)
     await new Promise((resolve) => { setTimeout(resolve, 0) })
     for (const socket of [original, replacement]) {
-      expect(socket.sent).not.toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'old-reload' }))
+      expect(socket.sent).not.toContainEqual(expect.objectContaining({ t: 'tool.result', action: expect.objectContaining({ actionId: expect.any(String), requestDigest: expect.stringMatching(/^[a-f0-9]{64}$/) }), id: 'old-reload' }))
     }
   })
 
@@ -873,7 +874,7 @@ describe('background bridge lifecycle', () => {
     finishInjection()
     await vi.waitFor(() => {
       expect(socket.sent).toContainEqual(expect.objectContaining({
-        t: 'tool.result',
+        t: 'tool.result', action: expect.objectContaining({ actionId: expect.any(String), requestDigest: expect.stringMatching(/^[a-f0-9]{64}$/) }),
         id: 'recovering-action',
         ok: false,
       }))
@@ -943,7 +944,7 @@ describe('background bridge lifecycle', () => {
     await vi.waitFor(() => { expect(chrome.storage.local.set).toHaveBeenCalledTimes(2) })
     expect(FakeWebSocket.instances).toHaveLength(1)
     expect(socket.sent).not.toContainEqual(expect.objectContaining({
-      t: 'tool.result',
+      t: 'tool.result', action: expect.objectContaining({ actionId: expect.any(String), requestDigest: expect.stringMatching(/^[a-f0-9]{64}$/) }),
       id: 'restricted-across-toggle',
     }))
 
@@ -954,7 +955,7 @@ describe('background bridge lifecycle', () => {
     })
     await vi.waitFor(() => {
       expect(socket.sent).toContainEqual(expect.objectContaining({
-        t: 'tool.result',
+        t: 'tool.result', action: expect.objectContaining({ actionId: expect.any(String), requestDigest: expect.stringMatching(/^[a-f0-9]{64}$/) }),
         id: 'restricted-across-toggle',
         ok: true,
       }))

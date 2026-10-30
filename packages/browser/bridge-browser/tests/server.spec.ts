@@ -119,6 +119,20 @@ async function connectedLedger() {
 }
 
 describe('recorded tool dispatch', () => {
+  it.each(['actionId', 'requestDigest'] as const)('ignores a receipt with the wrong %s', async field => {
+    const h = await connectedLedger()
+    let delivered = false
+    const pending = h.bridge.requestTool('browser_click', {}, new AbortController().signal).then(value => { delivered = true; return value })
+    await waitFor(() => h.frames.some(frame => frame.t === 'tool.call'))
+    const call = h.frames.find(frame => frame.t === 'tool.call')! as Extract<BridgeFrame, { t: 'tool.call' }>
+    const wrong = { ...call.action, [field]: field === 'actionId' ? 'act_forged' : 'b'.repeat(64) }
+    send(h.ws, { t: 'tool.result', id: call.id, action: wrong, ok: true, result: { text: 'forged' } })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(delivered).toBe(false)
+    expect(h.ledger.get(call.id)?.state).toBe('sent_unconfirmed')
+    send(h.ws, { t: 'tool.result', id: call.id, action: call.action, ok: true, result: { text: 'matching' } })
+    await expect(pending).resolves.toEqual({ text: 'matching' })
+  })
   it('commits before sending and before returning a receipt, without storing arguments or results', async () => {
     const h = await connectedLedger()
     let releaseSend!: () => void
@@ -143,7 +157,7 @@ describe('recorded tool dispatch', () => {
       await waitFor(() => h.frames.some(frame => frame.t === 'tool.call'))
       const call = h.frames.find(frame => frame.t === 'tool.call')! as Extract<BridgeFrame, { t: 'tool.call' }>
       expect(call.args.text).toBe('synthetic-private-input')
-      send(h.ws, { t: 'tool.result', id: call.id, ok: true, result: { text: 'synthetic-private-page-result' } })
+      send(h.ws, { t: 'tool.result', id: call.id, action: call.action, ok: true, result: { text: 'synthetic-private-page-result' } })
       await waitFor(() => settling)
       expect(delivered).toBe(false)
       expect(h.ledger.get(call.id)?.state).toBe('sent_unconfirmed')
@@ -225,7 +239,7 @@ describe('recorded tool dispatch', () => {
     abort.abort()
     expect(await pending).toMatchObject({ code: 'bridge-closed', message: expect.stringContaining('may have started') })
     expect(h.ledger.get(call.id)?.state).toBe('unresolved')
-    send(h.ws, { t: 'tool.result', id: call.id, ok: true, result: { text: 'synthetic late result' } })
+    send(h.ws, { t: 'tool.result', id: call.id, action: call.action, ok: true, result: { text: 'synthetic late result' } })
     await waitFor(() => h.ledger.get(call.id)?.state === 'returned')
     expect(h.ledger.get(call.id)?.interruption?.reason).toBe('cancelled')
     expect(h.frames.filter(frame => frame.t === 'tool.call')).toHaveLength(1)
@@ -250,7 +264,7 @@ describe('recorded tool dispatch', () => {
     await rename(root, root + '-backup')
     await writeFile(root, 'synthetic-obstacle')
     try {
-      send(h.ws, { t: 'tool.result', id: call.id, ok: true, result: { text: 'synthetic result' } })
+      send(h.ws, { t: 'tool.result', id: call.id, action: call.action, ok: true, result: { text: 'synthetic result' } })
       expect(await pending).toMatchObject({ code: 'internal', message: expect.stringContaining('may be unknown') })
       await expect(h.bridge.requestTool('browser_click', {}, new AbortController().signal)).rejects.toMatchObject({ code: 'internal' })
       expect(h.frames.filter(frame => frame.t === 'tool.call')).toHaveLength(1)
@@ -273,7 +287,7 @@ describe('BridgeServer', () => {
     ws.close()
   })
 
-  it.each([undefined, BRIDGE_PROTOCOL_VERSION + 1])('rejects version %s without replacing the active connection', async (protocolVersion) => {
+  it.each([undefined, BRIDGE_PROTOCOL_VERSION - 1, BRIDGE_PROTOCOL_VERSION + 1])('rejects version %s without replacing the active connection', async (protocolVersion) => {
     const h = await startBridge()
     harnesses.push(h)
     const active = await connect(h.url)
@@ -284,7 +298,7 @@ describe('BridgeServer', () => {
       ...(protocolVersion === undefined ? {} : { protocolVersion }) })
     await rejected.done
     expect(rejected.frames).toContainEqual(expect.objectContaining({
-      t: 'error', code: protocolVersion === undefined ? 'protocol-upgrade-extension' : 'protocol-upgrade-host',
+      t: 'error', code: protocolVersion === undefined || protocolVersion < BRIDGE_PROTOCOL_VERSION ? 'protocol-upgrade-extension' : 'protocol-upgrade-host',
     }))
     expect(active.ws.readyState).toBe(WebSocket.OPEN)
     send(active.ws, { t: 'rpc', id: 'still-owned', method: 'session.list', payload: {} })
@@ -639,7 +653,7 @@ describe('BridgeServer', () => {
     const call = frames.find((f) => f.t === 'tool.call') as Extract<BridgeFrame, { t: 'tool.call' }>
     expect(call.name).toBe('browser_click')
     expect(call.args).toEqual({ index: 1 })
-    send(ws, { t: 'tool.result', id: call.id, ok: true, result: { text: 'clicked' } })
+    send(ws, { t: 'tool.result', id: call.id, action: call.action, ok: true, result: { text: 'clicked' } })
     await expect(result).resolves.toEqual({ text: 'clicked' })
     ws.close()
   })
@@ -690,7 +704,7 @@ describe('BridgeServer', () => {
     const result = h.bridge.requestTool('browser_navigate', { url: 'https://x' }, new AbortController().signal)
     await waitFor(() => frames.some((f) => f.t === 'tool.call'))
     const call = frames.find((f) => f.t === 'tool.call') as Extract<BridgeFrame, { t: 'tool.call' }>
-    send(ws, { t: 'tool.result', id: call.id, ok: false, error: { code: 'action-failed', message: 'blocked' } })
+    send(ws, { t: 'tool.result', id: call.id, action: call.action, ok: false, error: { code: 'action-failed', message: 'blocked' } })
     await expect(result).rejects.toBeInstanceOf(BridgeToolError)
     await expect(result).rejects.toMatchObject({ code: 'action-failed', message: 'blocked' })
     ws.close()
@@ -786,7 +800,7 @@ describe('BridgeServer', () => {
     await waitFor(() => frames.some((f) => f.t === 'tool.call'))
     const call = frames.find((frame) => frame.t === 'tool.call') as Extract<BridgeFrame, { t: 'tool.call' }>
     expect(call.sessionId).toBe('session-browser')
-    send(ws, { t: 'tool.result', id: call.id, ok: true, result: { text: 'done' } })
+    send(ws, { t: 'tool.result', id: call.id, action: call.action, ok: true, result: { text: 'done' } })
     await expect(pending).resolves.toEqual({ text: 'done' })
     ws.close()
   })
@@ -940,7 +954,7 @@ describe('BridgeServer', () => {
     send(ws, { t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: TOKEN, caps: CAPS })
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
     // Unknown id: ignored, connection stays healthy.
-    send(ws, { t: 'tool.result', id: 'nope', ok: true, result: {} })
+    send(ws, { t: 'tool.result', id: 'nope', action: { actionId: 'act_unknown', requestDigest: 'a'.repeat(64) }, ok: true, result: {} })
     await new Promise((resolve) => { setTimeout(resolve, 50) })
     expect(ws.readyState).toBe(WebSocket.OPEN)
     ws.close()

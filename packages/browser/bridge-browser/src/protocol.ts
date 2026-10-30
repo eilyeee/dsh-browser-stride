@@ -16,7 +16,7 @@
 export const BRIDGE_PATH = '/ext/bridge'
 
 /** Version of the WebSocket wire format, independent of task-runtime contracts. */
-export const BRIDGE_PROTOCOL_VERSION = 1
+export const BRIDGE_PROTOCOL_VERSION = 2
 
 /** Terminal incompatibility: retry only after the user updates/reconfigures a peer. */
 export const PROTOCOL_MISMATCH_CLOSE_CODE = 4003
@@ -61,6 +61,19 @@ export type ToolErrorCode =
   | 'bridge-closed'
   | 'bad-args'
   | 'internal'
+  | 'action-duplicate'
+  | 'action-conflict'
+  | 'receipt-unavailable'
+
+/** Host-issued logical command identity. It never grants browser permission. */
+export interface ToolActionIdentity { actionId: string; requestDigest: string }
+export function isToolActionIdentity(value: unknown): value is ToolActionIdentity {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const action = value as Record<string, unknown>
+  return typeof action.actionId === 'string' && action.actionId.trim() === action.actionId
+    && action.actionId.length > 0 && action.actionId.length <= 200
+    && typeof action.requestDigest === 'string' && /^[a-f0-9]{64}$/.test(action.requestDigest)
+}
 
 /** One tool-call failure: stable machine code plus human text for the model. */
 export interface ToolError {
@@ -92,8 +105,8 @@ export type ClientFrame =
   /** Answer or cancel a pending Host interaction waterfall. */
   | { t: 'respond'; id: string; rpcId: string; result: RespondResult }
   /** Result of a previously dispatched tool call. */
-  | { t: 'tool.result'; id: string; ok: true; result: unknown }
-  | { t: 'tool.result'; id: string; ok: false; error: ToolError }
+  | { t: 'tool.result'; id: string; action: ToolActionIdentity; ok: true; result: unknown }
+  | { t: 'tool.result'; id: string; action: ToolActionIdentity; ok: false; error: ToolError }
   /** Liveness reply. */
   | { t: 'pong' }
 
@@ -110,7 +123,7 @@ export type ServerFrame =
   /** One bridge-owned event envelope projected from Remote streams and waterfalls. */
   | { t: 'event'; frame: { rpcId: string; method: string; payload: unknown } }
   /** A model-requested browser action to execute in the user-controlled tab. */
-  | { t: 'tool.call'; id: string; name: string; args: Record<string, unknown>; expiresAt: number; sessionId?: string }
+  | { t: 'tool.call'; id: string; action: ToolActionIdentity; name: string; args: Record<string, unknown>; expiresAt: number; sessionId?: string }
   /** Withdraw a tool call that timed out or whose caller was cancelled. */
   | { t: 'tool.cancel'; id: string }
   /** Liveness probe. */
@@ -183,12 +196,12 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
         ? { t: 'respond', id: frame.id, rpcId: frame.rpcId, result: frame.result }
         : undefined
     case 'tool.result':
-      if (typeof frame.id !== 'string') return undefined
+      if (typeof frame.id !== 'string' || !isToolActionIdentity(frame.action)) return undefined
       if (frame.ok === true && 'result' in frame) {
-        return { t: 'tool.result', id: frame.id, ok: true, result: frame.result }
+        return { t: 'tool.result', id: frame.id, action: frame.action, ok: true, result: frame.result }
       }
       return isToolError(frame.error)
-        ? { t: 'tool.result', id: frame.id, ok: false, error: frame.error }
+        ? { t: 'tool.result', id: frame.id, action: frame.action, ok: false, error: frame.error }
         : undefined
     case 'pong':
       return { t: 'pong' }
@@ -222,12 +235,13 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
     case 'tool.call':
       if (frame.sessionId !== undefined
         && (typeof frame.sessionId !== 'string' || frame.sessionId.trim() === '')) return undefined
-      return typeof frame.id === 'string' && typeof frame.name === 'string'
+      return typeof frame.id === 'string' && typeof frame.name === 'string' && isToolActionIdentity(frame.action)
         && typeof frame.args === 'object' && frame.args !== null && !Array.isArray(frame.args)
         && typeof frame.expiresAt === 'number' && Number.isFinite(frame.expiresAt) && frame.expiresAt > 0
         ? {
             t: 'tool.call',
             id: frame.id,
+            action: frame.action,
             name: frame.name,
             args: frame.args as Record<string, unknown>,
             expiresAt: frame.expiresAt,

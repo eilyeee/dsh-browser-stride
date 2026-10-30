@@ -49,6 +49,7 @@ import {
 } from './remote-host-api.ts'
 import { isRecord, type BrowserHostApi } from './host-api.ts'
 import { BrowserRunStore } from './run-store.ts'
+export { computeToolCommandDigest } from './tool-identity.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'bridge-browser'

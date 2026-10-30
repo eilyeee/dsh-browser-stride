@@ -4,12 +4,14 @@ import { defineDomain, domainTable, type Domain, type DomainFacility } from '@de
 import { z } from 'zod'
 import { canonicalize, makeActionId } from './contracts/ids.ts'
 import { isReadOnlyBrowserTool } from './protocol.ts'
+import { toolCommandMaterial } from './tool-identity.ts'
 
 const id = z.string().min(1).max(200).refine(value => value.trim() === value)
 const time = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER)
 const reason = z.enum(['cancelled', 'expired', 'connection-closed', 'send-failed', 'interrupted'])
 const errorCode = z.enum([
   'no-active-tab', 'content-unavailable', 'action-failed', 'timeout', 'bridge-closed', 'bad-args', 'internal', 'unknown',
+  'action-duplicate', 'action-conflict', 'receipt-unavailable',
 ])
 const receipt = z.strictObject({ ok: z.boolean(), errorCode: errorCode.optional() })
   .refine(value => value.ok ? value.errorCode === undefined : value.errorCode !== undefined)
@@ -20,6 +22,8 @@ export function transportReceipt(ok: boolean, code?: string): z.infer<typeof rec
 const recordSchema = z.strictObject({
   actionId: id, requestId: id, connectionId: id,
   requestDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  identityVersion: z.literal(2).optional(),
+  transportDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   installationId: id.optional(), sessionId: id.optional(), name: id,
   effect: z.enum(['read', 'write']),
   state: z.enum(['prepared', 'sent_unconfirmed', 'not_sent', 'unresolved', 'returned']),
@@ -31,6 +35,7 @@ const recordSchema = z.strictObject({
   const marked = row.dispatchMarkedAt !== undefined
   const settled = row.settledAt !== undefined
   const valid = row.expiresAt > 0
+    && (row.identityVersion === 2 ? row.transportDigest !== undefined : row.transportDigest === undefined)
     && row.effect === (isReadOnlyBrowserTool(row.name) ? 'read' : 'write')
     && (row.dispatchMarkedAt === undefined || row.dispatchMarkedAt >= row.preparedAt)
     && (row.settledAt === undefined || row.settledAt >= (row.dispatchMarkedAt ?? row.preparedAt))
@@ -111,16 +116,19 @@ export class BrowserDispatchLedger {
     // Snapshot before awaiting anything. Only the digest and metadata survive
     // this method: field values, credentials and page content are not stored.
     const material = canonicalize(input)
-    const { args: _args, ...metadata } = JSON.parse(material) as typeof input
-    const candidate = recordSchema.parse({ ...metadata, actionId: makeActionId(),
-      requestDigest: createHash('sha256').update(material).digest('hex'),
-      effect: isReadOnlyBrowserTool(metadata.name) ? 'read' : 'write', state: 'prepared', preparedAt: Date.now() })
+    const { args, ...metadata } = JSON.parse(material) as typeof input
+    const transportDigest = createHash('sha256').update(material).digest('hex')
     return this.exclusive(async () => {
-      const existing = this.domain.table('dispatches').get(candidate.requestId)
+      const existing = this.domain.table('dispatches').get(metadata.requestId)
       if (existing !== undefined) {
-        if (existing.requestDigest !== candidate.requestDigest) throw new DispatchLedgerError('request-conflict')
+        if ((existing.transportDigest ?? existing.requestDigest) !== transportDigest) throw new DispatchLedgerError('request-conflict')
         return structuredClone(existing)
       }
+      const actionId = makeActionId()
+      const requestDigest = createHash('sha256').update(toolCommandMaterial({ actionId, name: metadata.name, args,
+        ...(metadata.sessionId === undefined ? {} : { sessionId: metadata.sessionId }) })).digest('hex')
+      const candidate = recordSchema.parse({ ...metadata, actionId, requestDigest, transportDigest, identityVersion: 2,
+        effect: isReadOnlyBrowserTool(metadata.name) ? 'read' : 'write', state: 'prepared', preparedAt: Date.now() })
       await this.persist(candidate)
       return structuredClone(candidate)
     })

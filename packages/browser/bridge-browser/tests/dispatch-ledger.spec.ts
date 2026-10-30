@@ -98,6 +98,23 @@ describe('durable browser dispatch ledger', () => {
     expect(reopened.get('returned')).toEqual(returned)
   })
 
+  it('preserves historical transport-only rows without inventing a v2 action identity', async () => {
+    const { ledger, store, open, dispatchFile } = await setup()
+    await ledger.prepare(input())
+    await store.close()
+    const data = JSON.parse(await readFile(dispatchFile, 'utf8'))
+    const row = data.tables.dispatches['synthetic-request']
+    row.requestDigest = row.transportDigest
+    delete row.transportDigest
+    delete row.identityVersion
+    await writeFile(dispatchFile, JSON.stringify(data))
+    const historical = (await open()).dispatches.get('synthetic-request')!
+    expect(historical.identityVersion).toBeUndefined()
+    expect(historical.transportDigest).toBeUndefined()
+    expect(historical.requestDigest).toBe(row.requestDigest)
+    expect(historical.state).toBe('not_sent')
+  })
+
   it('stops later writes after a storage failure until disk is reopened', async () => {
     const { ledger, storageRoot, store, open } = await setup()
     const row = await ledger.prepare(input())

@@ -187,6 +187,9 @@ export function fromLegacyToolError(code: string, message: string): BrowserError
     case 'action-failed':
       return makeBrowserError('action_failed', message)
     case 'timeout':
+    case 'action-duplicate':
+    case 'action-conflict':
+    case 'receipt-unavailable':
       return makeBrowserError('result_unknown', message, { sideEffectUnknown: true })
     case 'bridge-closed':
       return makeBrowserError('connection_unavailable', message)

@@ -9,6 +9,14 @@ no release version has been assigned yet.
 
 ### Added
 
+- Wire protocol v2 carries Host-issued logical action ids and SHA-256 command
+  digests on calls and replies. The Host ignores replies with mismatched ids or
+  digests, and the extension verifies the command before execution admission.
+- Extension-origin IndexedDB commits an execution fence before dispatch and a
+  finish marker after settlement. Repeated ids and conflicting commands are
+  refused across worker restart, without caching page/input text or replaying
+  results. Corrupt receipts and unavailable/full storage fail closed; 5,000 fences are
+  retained with no automatic eviction.
 - Real browser tool calls persist request identities/digests before dispatch
   and transport receipt metadata before returning results. Cancellation,
   timeout and connection loss retain uncertainty; late same-connection replies

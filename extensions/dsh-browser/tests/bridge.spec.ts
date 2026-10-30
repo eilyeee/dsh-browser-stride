@@ -2,6 +2,7 @@
 
 import { BRIDGE_PROTOCOL_VERSION } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { wireToolCall } from './wire-tool-call.ts'
 import { BridgeClient, type BridgeState } from '../src/background/bridge.ts'
 
 class FakeWebSocket extends EventTarget {
@@ -25,7 +26,7 @@ class FakeWebSocket extends EventTarget {
   }
 
   receive(frame: unknown): void {
-    this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(frame) }))
+    this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(wireToolCall(frame)) }))
   }
 
   close(code = 1000, reason = ''): void {
@@ -44,6 +45,7 @@ afterEach(() => {
 describe('BridgeClient connection probe', () => {
   it.each([
     { frame: { t: 'hello.ok' }, state: 'update-host' },
+    { frame: { t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION - 1 }, state: 'update-host' },
     { frame: { t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION + 1 }, state: 'update-extension' },
     { frame: { t: 'hello.ok', protocolVersion: '1' }, state: 'incompatible' },
     { frame: { t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps: { textOnly: true, snapshotMaxChars: 64000, maxInteractiveItems: 60 } }, state: 'incompatible' },

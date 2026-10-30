@@ -2,6 +2,7 @@
 
 import { BRIDGE_PROTOCOL_VERSION } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { wireToolCall } from './wire-tool-call.ts'
 import { PAGE_SESSION_CONTEXT_STORAGE_KEY } from '../src/background/session-continuity.ts'
 
 class FakeWebSocket extends EventTarget {
@@ -28,7 +29,7 @@ class FakeWebSocket extends EventTarget {
   }
 
   receive(frame: unknown): void {
-    this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(frame) }))
+    this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(wireToolCall(frame)) }))
   }
 
   close(code = 1000, reason = ''): void {

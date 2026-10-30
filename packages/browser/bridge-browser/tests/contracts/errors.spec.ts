@@ -35,6 +35,12 @@ describe('error defaults', () => {
 })
 
 describe('fromLegacyToolError', () => {
+  it.each(['action-duplicate', 'action-conflict', 'receipt-unavailable'])('requires reconciliation for %s instead of suggesting another write', code => {
+    expect(fromLegacyToolError(code, 'synthetic error')).toMatchObject({
+      code: 'result_unknown', nextStep: 'reconcile_business_state', retryable: false,
+      blocksWrites: true, sideEffectUnknown: true,
+    })
+  })
   it('maps a timeout to an unknown side effect rather than a retry', () => {
     const error = fromLegacyToolError('timeout', 'tool timed out')
     expect(error.code).toBe('result_unknown')

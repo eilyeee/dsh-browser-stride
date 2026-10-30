@@ -17,12 +17,14 @@
  * @module
  */
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer } from 'ws'
 import type { BrowserHostApi } from './host-api.ts'
-import { canonicalize } from './contracts/ids.ts'
+import { canonicalize, makeActionId } from './contracts/ids.ts'
+import { toolCommandMaterial } from './tool-identity.ts'
+import type { ToolActionIdentity } from './protocol.ts'
 import { transportReceipt, type BrowserDispatchLedger, type DispatchSettlement } from './dispatch-ledger.ts'
 import {
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
@@ -123,6 +125,7 @@ export interface BridgeServerDeps {
 
 /** One in-flight tool call awaiting the extension's `tool.result`. */
 interface PendingTool {
+  action: ToolActionIdentity
   finish: (settlement: DispatchSettlement, value: unknown, error?: BridgeToolError) => void
 }
 
@@ -219,20 +222,27 @@ export class BridgeServer {
     }
     const id = randomUUID()
     const expiresAt = Date.now() + timeoutMs
-    if (this.deps.dispatches === undefined) return this.sendTool(conn, id, name, args, signal, expiresAt, sessionId)
     let copied: Record<string, unknown>
     try { copied = JSON.parse(canonicalize(args)) as Record<string, unknown> }
     catch { throw new BridgeToolError('bad-args', 'browser arguments must be plain JSON data') }
+    if (this.deps.dispatches === undefined) {
+      const actionId = makeActionId()
+      const requestDigest = createHash('sha256').update(toolCommandMaterial({ actionId, name, args: copied,
+        ...(sessionId === undefined ? {} : { sessionId }) })).digest('hex')
+      return this.sendTool(conn, id, name, copied, signal, expiresAt, { actionId, requestDigest }, sessionId)
+    }
     return this.track(this.recordAndSend(conn, id, name, copied, signal, expiresAt, sessionId))
   }
 
   private async recordAndSend(conn: ReadyConnection, id: string, name: string, args: Record<string, unknown>, signal: AbortSignal, expiresAt: number, sessionId?: string): Promise<unknown> {
     const ledger = this.deps.dispatches!
+    let action: ToolActionIdentity
     try {
       const prepared = await ledger.prepare({ requestId: id, connectionId: conn.connectionId,
         name, args, expiresAt, ...(sessionId === undefined ? {} : { sessionId }),
         ...(conn.installationId === undefined ? {} : { installationId: conn.installationId }) })
-      if (prepared.state !== 'prepared') throw new Error('request already consumed')
+      if (prepared.state !== 'prepared' || prepared.identityVersion !== 2) throw new Error('request already consumed or incompatible')
+      action = { actionId: prepared.actionId, requestDigest: prepared.requestDigest }
       let stopped = this.beforeDispatch(conn, signal, expiresAt)
       if (stopped !== undefined) {
         await ledger.settle(id, { state: 'not_sent', reason: stopped.reason })
@@ -250,7 +260,7 @@ export class BridgeServer {
       if (error instanceof BridgeToolError) throw error
       throw new BridgeToolError('internal', 'browser dispatch could not be durably recorded; no action was sent')
     }
-    return this.sendTool(conn, id, name, args, signal, expiresAt, sessionId)
+    return this.sendTool(conn, id, name, args, signal, expiresAt, action, sessionId)
   }
 
   private beforeDispatch(conn: ReadyConnection, signal: AbortSignal, expiresAt: number): { reason: 'cancelled' | 'expired' | 'connection-closed'; error: BridgeToolError } | undefined {
@@ -260,10 +270,10 @@ export class BridgeServer {
     return undefined
   }
 
-  private sendTool(conn: ReadyConnection, id: string, name: string, args: Record<string, unknown>, signal: AbortSignal, expiresAt: number, sessionId?: string): Promise<unknown> {
+  private sendTool(conn: ReadyConnection, id: string, name: string, args: Record<string, unknown>, signal: AbortSignal, expiresAt: number, action: ToolActionIdentity, sessionId?: string): Promise<unknown> {
     return new Promise<unknown>((resolve, reject) => {
       let timer: NodeJS.Timeout
-      const pending: PendingTool = { finish: (settlement, value, error) => {
+      const pending: PendingTool = { action, finish: (settlement, value, error) => {
         if (this.pendingTools.get(id) !== pending) return
         clearTimeout(timer)
         this.pendingTools.delete(id)
@@ -297,6 +307,7 @@ export class BridgeServer {
       const frame = JSON.stringify({
         t: 'tool.call',
         id,
+        action,
         name,
         args,
         expiresAt,
@@ -467,7 +478,7 @@ export class BridgeServer {
         void this.handleRespond(frame, conn)
         break
       case 'tool.result':
-        this.settleTool(conn, frame.id, frame.ok, frame.ok ? frame.result : frame.error)
+        this.settleTool(conn, frame.id, frame.action, frame.ok, frame.ok ? frame.result : frame.error)
         break
       case 'pong':
       case 'hello':
@@ -593,17 +604,19 @@ export class BridgeServer {
     }
   }
 
-  private settleTool(conn: ReadyConnection, id: string, ok: boolean, payload: unknown): void {
+  private settleTool(conn: ReadyConnection, id: string, action: ToolActionIdentity, ok: boolean, payload: unknown): void {
     const settlement: DispatchSettlement = { state: 'returned', receipt: transportReceipt(ok, ok ? undefined : payloadCode(payload)) }
     const pending = this.pendingTools.get(id)
     if (pending !== undefined) {
+      if (pending.action.actionId !== action.actionId || pending.action.requestDigest !== action.requestDigest) return
       pending.finish(settlement, payload, ok ? undefined : new BridgeToolError(payloadCode(payload), payloadMessage(payload)))
     } else {
       // A late result may settle transport uncertainty, but cannot resurrect
       // the old caller or cross into a replacement connection's authority.
       let row
       try { row = this.deps.dispatches?.get(id) } catch { return }
-      if (row?.connectionId === conn.connectionId && row.state === 'unresolved') {
+      if (row?.connectionId === conn.connectionId && row.state === 'unresolved'
+        && row.actionId === action.actionId && row.requestDigest === action.requestDigest) {
         void this.track(this.deps.dispatches!.settle(id, settlement)).catch(() => {})
       }
     }

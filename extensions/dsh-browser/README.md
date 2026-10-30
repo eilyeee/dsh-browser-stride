@@ -8,6 +8,8 @@ See the [repository README](../../README.md) for installation, one-time pairing,
 
 The Firefox build uses a provisional extension ID distinct from the upstream extension. It is not a published Firefox release.
 
+Wire protocol v2 requires the matching Host build. Commands carry an action id and digest, checked before an extension-origin IndexedDB transaction commits an execution fence. The same id is never executed twice while its fence is retained, including after worker restart; changed commands are refused. Only identity, timestamps and admission/finish phase are stored. Page/input text and previous result payloads are not cached. The store holds up to 5,000 fences with no automatic expiry or eviction; Unavailable or full storage blocks new execution; a corrupt existing fence blocks its action. Clearing browser/extension data removes this protection. These fences do not replace user permission, live target checks or business-result verification, and there is no automatic recovery/replay.
+
 ## Development
 
 From the repository root:
