@@ -7,12 +7,14 @@ no release version has been assigned yet.
 
 ## [Unreleased]
 
-### Changed
+### Fixed
 
-- The Host component is now `@eilyeee/dsh-browser-stride`. Workspace
-  imports, the Host settings module and installers use this name. Installers
-  migrate transitional and legacy package registrations after installing the new package;
-  pairing namespaces, run domains and extension identity remain unchanged.
+- Session checkpoints recheck the connection owner and a fresh document/binding
+  generation after native reads. A late read cannot overwrite a newer checkpoint,
+  including after same-tab rebinding, same-URL navigation or reconnect.
+- Deferred tab-follow/open binding callbacks cannot acquire a replacement
+  connection's authority. An undelivered page action stops recovery when its
+  original connection or target has been revoked.
 
 ### Added
 
@@ -74,7 +76,7 @@ no release version has been assigned yet.
   observation envelopes, action facts, run lifecycle, error taxonomy and
   capability negotiation. Observation helpers are used by the extension and
   lifecycle/fact rules by the Host record service; a complete task executor
-  and dispatch ledger are not implemented.
+  is not implemented.
 - `pnpm run stride:baseline` collector with a fixed upstream reference; local
   machine evidence is kept out of the public working tree.
 - Local one-time installation pairing, separately revocable credentials, and
@@ -108,8 +110,12 @@ no release version has been assigned yet.
 
 ### Changed
 
-- The workspace is named `dsh-browser-stride`; upstream package names and
-  published versions are unchanged.
+- The workspace is named `dsh-browser-stride`; upstream provenance and the
+  source directory layout are preserved.
+- The Host component is now `@eilyeee/dsh-browser-stride`. Workspace
+  imports, the Host settings module and installers use this name. Installers
+  migrate transitional and legacy package registrations after installing the new package;
+  pairing namespaces, run domains and extension identity remain unchanged.
 - Both READMEs carry a product-branch notice and an unofficial-project
   disclaimer; the README i18n record is refreshed.
 - CI also runs on pushes to `stride/main`, not only `main`.

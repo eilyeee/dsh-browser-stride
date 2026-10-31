@@ -267,11 +267,12 @@ async function verifyPersistentExecutionFence() {
   }
 }
 
-async function verifyQueuedTargetFence() {
+async function verifyTargetFences() {
   const counts = { a: 0, b: 0 }
   const replies = new Map()
   let activeSocket
   let other
+  let opened
   let wsUrl
   const sessionId = 'session-synthetic-target-fence'
   const server = createHttpServer((req, res) => {
@@ -286,7 +287,7 @@ async function verifyQueuedTargetFence() {
       res.writeHead(204).end()
       return
     }
-    const page = path === '/b' ? 'b' : 'a'
+    const page = path.startsWith('/b') ? 'b' : 'a'
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
     res.end(`<!doctype html><title>Synthetic target ${page}</title><input autofocus aria-label="Probe"><script>document.addEventListener('keydown',e=>{if(e.key==='Enter')fetch('/event/${page}',{method:'POST'})})</script>`)
   })
@@ -307,21 +308,19 @@ async function verifyQueuedTargetFence() {
     }
     throw new Error(`Queued target smoke timed out: ${label}`)
   }
-  const actionFor = async id => {
+  const actionFor = async (id, name = 'browser_press', args = { key: 'Enter' }) => {
     const actionId = `act_${id}`
-    const name = 'browser_press'
-    const args = { key: 'Enter' }
     const action = { actionId, requestDigest: await computeToolCommandDigest({ actionId, name, args, sessionId }) }
     return { t: 'tool.call', id, action, name, args, sessionId, expiresAt: Date.now() + 15_000 }
   }
-  const admitted = async actionId => await browser.worker.evaluate(id => new Promise((resolveAdmission, reject) => {
+  const receiptPhase = async actionId => await browser.worker.evaluate(id => new Promise((resolveAdmission, reject) => {
     const request = indexedDB.open('dsh-browser-execution', 1)
     request.onerror = () => reject(new Error('receipt read failed'))
     request.onsuccess = () => {
       const db = request.result
       const transaction = db.transaction('receipts', 'readonly')
       const read = transaction.objectStore('receipts').get(id)
-      read.onsuccess = () => resolveAdmission(read.result !== undefined)
+      read.onsuccess = () => resolveAdmission(read.result?.phase)
       transaction.oncomplete = () => db.close()
     }
   }), actionId)
@@ -343,10 +342,31 @@ async function verifyQueuedTargetFence() {
     await browser.bindSession(sessionId)
     await browser.worker.evaluate(() => {
       const original = chrome.tabs.sendMessage.bind(chrome.tabs)
+      const originalGet = chrome.tabs.get.bind(chrome.tabs)
+      const originalSet = chrome.storage.session.set.bind(chrome.storage.session)
       let release
       const gate = new Promise(resolveGate => { release = resolveGate })
-      const state = { started: false, sends: [], release, restore: () => { chrome.tabs.sendMessage = original } }
+      const state = { started: false, sends: [], release, contextWrites: [], checkpoint: undefined,
+        armCheckpoint: tabId => {
+          let releaseCheckpoint
+          const gate = new Promise(resolveGate => { releaseCheckpoint = resolveGate })
+          state.checkpoint = { tabId, gets: 0, started: false, release: releaseCheckpoint, gate }
+        },
+        restore: () => { chrome.tabs.sendMessage = original; chrome.tabs.get = originalGet; chrome.storage.session.set = originalSet } }
       globalThis.__strideTargetFence = state
+      chrome.tabs.get = async tabId => {
+        const tab = await originalGet(tabId)
+        const checkpoint = state.checkpoint
+        if (checkpoint?.tabId === tabId && ++checkpoint.gets === 2) {
+          checkpoint.started = true
+          await checkpoint.gate
+        }
+        return tab
+      }
+      chrome.storage.session.set = async items => {
+        if (items.dshPageSessionContexts !== undefined) state.contextWrites.push(items.dshPageSessionContexts)
+        return originalSet(items)
+      }
       chrome.tabs.sendMessage = async (...args) => {
         const message = args[1]
         const first = message?.type === 'DSH_ACTION' && message.action === 'browser_press' && state.sends.length === 0
@@ -362,7 +382,7 @@ async function verifyQueuedTargetFence() {
     await wait(() => counts.a === 1, 'first page keyboard effect')
     const queued = await actionFor('synthetic-target-queued')
     activeSocket.send(JSON.stringify(queued))
-    await wait(() => admitted(queued.action.actionId), 'queued write admitted')
+    await wait(async () => (await receiptPhase(queued.action.actionId)) !== undefined, 'queued write admitted')
     other = await browser.context.newPage()
     await other.goto(`${origin}/b`, { waitUntil: 'domcontentloaded' })
     await browser.bindSession(sessionId, other)
@@ -370,7 +390,7 @@ async function verifyQueuedTargetFence() {
     assert.equal(replies.get(queued.id).ok, false)
     const fresh = await actionFor('synthetic-target-fresh')
     activeSocket.send(JSON.stringify(fresh))
-    await wait(() => admitted(fresh.action.actionId), 'fresh write admitted')
+    await wait(async () => (await receiptPhase(fresh.action.actionId)) !== undefined, 'fresh write admitted')
     await delay(150)
     assert.equal(counts.b, 0, 'cancelling a waiter must not release the next write before the committed action settles')
     assert.equal(replies.has(fresh.id), false)
@@ -382,8 +402,32 @@ async function verifyQueuedTargetFence() {
     const sends = await browser.worker.evaluate(() => globalThis.__strideTargetFence.sends)
     assert.equal(sends.length, 2, 'only the committed old write and the explicitly fresh write reach content scripts')
     console.log('Queued target fence passed: one committed old-page effect, no obsolete queued effect, one fresh new-page effect, no write overtaking')
+
+    const tabId = sends[1]
+    await browser.worker.evaluate(id => globalThis.__strideTargetFence.armCheckpoint(id), tabId)
+    const checkpointCall = await actionFor('synthetic-target-checkpoint', 'browser_reload', {})
+    activeSocket.send(JSON.stringify(checkpointCall))
+    await wait(() => browser.worker.evaluate(() => globalThis.__strideTargetFence.checkpoint.started), 'navigation checkpoint read held')
+    await other.goto(`${origin}/b/current`, { waitUntil: 'domcontentloaded' })
+    await browser.bindSession(sessionId, other)
+    const contextWritesBefore = await browser.worker.evaluate(() => globalThis.__strideTargetFence.contextWrites.length)
+    await browser.worker.evaluate(() => globalThis.__strideTargetFence.checkpoint.release())
+    await wait(async () => (await receiptPhase(checkpointCall.action.actionId)) === 'finished', 'old checkpoint execution settled')
+    await wait(() => replies.has(checkpointCall.id), 'old checkpoint reply returned')
+    assert.equal(replies.get(checkpointCall.id).ok, false)
+    assert.equal(await browser.worker.evaluate(() => globalThis.__strideTargetFence.contextWrites.length), contextWritesBefore, 'a superseded checkpoint must not persist after a same-tab rebind')
+    const recovered = await browser.worker.evaluate(async id => (await chrome.storage.session.get('dshPageSessionContexts')).dshPageSessionContexts?.tabs?.[id]?.urlKey, tabId)
+    assert.equal(recovered, `${origin}/b/current`, 'the fresh page-to-conversation checkpoint must survive an old native read')
+
+    const openCall = await actionFor('synthetic-target-open', 'browser_open_tab', { url: `${origin}/opened`, active: false })
+    activeSocket.send(JSON.stringify(openCall))
+    await wait(() => replies.has(openCall.id), 'current owner opens a background tab')
+    assert.equal(replies.get(openCall.id).ok, true, JSON.stringify(replies.get(openCall.id).error))
+    await wait(() => (opened = browser.context.pages().find(page => page.url() === `${origin}/opened`)) !== undefined, 'current-owner page appears')
+    console.log('Checkpoint owner fence passed: late native read withheld after same-tab navigation/rebind; current owner can still open a tab')
   } finally {
-    await browser.worker.evaluate(() => { globalThis.__strideTargetFence?.release(); globalThis.__strideTargetFence?.restore(); delete globalThis.__strideTargetFence }).catch(() => {})
+    await browser.worker.evaluate(() => { globalThis.__strideTargetFence?.release(); globalThis.__strideTargetFence?.checkpoint?.release(); globalThis.__strideTargetFence?.restore(); delete globalThis.__strideTargetFence }).catch(() => {})
+    await opened?.close().catch(() => {})
     await other?.close().catch(() => {})
     await browser.prepare(`${site.origin}/health`).catch(() => {})
     await browser.bindSession('session-synthetic-target-restored').catch(() => {})
@@ -524,12 +568,12 @@ try {
   assert.equal(await host.revokeInstallation(installations[0].installationId), true)
   assert.equal((await host.listInstallations()).length, 0)
   await browser.panel.locator('.connection .dot.connected').waitFor({ state: 'hidden', timeout: 15_000 })
-  await verifyQueuedTargetFence()
+  await verifyTargetFences()
   await verifyPersistentExecutionFence()
   await verifyIncompatibleHost(undefined, 'update-host')
   await verifyIncompatibleHost(BRIDGE_PROTOCOL_VERSION - 1, 'update-host')
   await verifyIncompatibleHost(BRIDGE_PROTOCOL_VERSION + 1, 'update-extension')
-  console.log('Browser smoke passed: owner-confirmed pairing UI, authentication fence, reconnect after reload, real DSH tools, panel pause/stop and executor acknowledgement, run/revision dispatch metadata, revoked old contexts, queued-target revocation without write overtaking, durable v2 identities, persistent replay/conflict rejection across worker restart, origin isolation, revocation and independent site state (no model)')
+  console.log('Browser smoke passed: owner-confirmed pairing UI, authentication fence, reconnect after reload, real DSH tools, panel pause/stop and executor acknowledgement, run/revision dispatch metadata, revoked old contexts, queued-target revocation without write overtaking, checkpoint owner fence, current-owner tab creation, durable v2 identities, persistent replay/conflict rejection across worker restart, origin isolation, revocation and independent site state (no model)')
 } finally {
   await browser?.close().catch(() => {})
   await host?.close().catch(() => {})

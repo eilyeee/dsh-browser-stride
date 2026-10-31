@@ -31,4 +31,6 @@ The side panel shows metadata for Host-created browser runs in the current conve
 
 For received page-tool requests, the background captures the selected tab/window and URL before waiting for IndexedDB admission, approval or a write turn. Native navigation/history events invalidate the captured document generation, including same-URL reloads; explicit rebinds, tab replacement/moves and connection replacement invalidate the old binding. A rejected call does not retry itself against a new page. Expired reads are withheld. Already dispatched operations are awaited before later writes; they are not undone or replayed. A committed action may observe its own navigation while its original binding remains valid.
 
+Conversation checkpoints capture a fresh document/binding generation and recheck it after native tab reads. Late reads cannot overwrite a newer checkpoint, even for the same tab id. Deferred follow/open callbacks also check their original connection before changing bindings or conversation hints.
+
 The fences live only in the worker. Existing persistent action identities prevent replay across worker restarts. Browser-level tab creation/management and internal handoff refreshes keep their existing approval paths. Full receiver run/control authority, account/tenant binding and automatic reconciliation are still unavailable.

@@ -3,6 +3,7 @@
 import { BRIDGE_PROTOCOL_VERSION } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { wireToolCall } from './wire-tool-call.ts'
+import { PAGE_SESSION_CONTEXT_STORAGE_KEY } from '../src/background/session-continuity.ts'
 
 class FakeWebSocket extends EventTarget {
   static readonly CONNECTING = 0
@@ -64,6 +65,7 @@ function mockChrome(options: {
   localGet?: () => Promise<Record<string, unknown>>
   localSet?: (items: Record<string, unknown>) => Promise<void>
   localSetAccessLevel?: () => Promise<void>
+  sessionGet?: (key: string) => Promise<Record<string, unknown>>
   tabGet?: (tabId: number) => Promise<chrome.tabs.Tab>
   tabQuery?: (queryInfo: chrome.tabs.QueryInfo) => Promise<chrome.tabs.Tab[]>
   tabRemove?: (tabId: number) => Promise<void>
@@ -75,6 +77,7 @@ function mockChrome(options: {
     return new Response(JSON.stringify({ wsUrl: `ws://127.0.0.1:${port}/ext/bridge` }), { status: 200 })
   }))
   const onConnect = chromeEvent<[chrome.runtime.Port]>()
+  const onCommitted = chromeEvent<[{ tabId: number; frameId: number }]>()
   const onAlarm = chromeEvent<[chrome.alarms.Alarm]>()
   const alarms = {
     create: vi.fn(),
@@ -105,7 +108,7 @@ function mockChrome(options: {
         setAccessLevel: vi.fn(options.localSetAccessLevel ?? (async () => {})),
       },
       session: {
-        get: vi.fn(async () => ({})),
+        get: vi.fn(options.sessionGet ?? (async () => ({}))),
         set: vi.fn(async () => {}),
         remove: vi.fn(async () => {}),
       },
@@ -128,7 +131,7 @@ function mockChrome(options: {
         documentId: 'document-1',
         url: 'https://example.com/',
       }]),
-      onCommitted: chromeEvent<[{ tabId: number; frameId: number }]>(),
+      onCommitted,
     },
     scripting: {
       executeScript: vi.fn(options.executeScript ?? (async () => [])),
@@ -139,7 +142,7 @@ function mockChrome(options: {
       onRemoved: chromeEvent<[number]>(),
     },
   } as unknown as typeof chrome)
-  return { alarms, onConnect, tabs: chrome.tabs }
+  return { alarms, onConnect, onCommitted, tabs: chrome.tabs }
 }
 
 afterEach(() => {
@@ -768,8 +771,8 @@ describe('background bridge lifecycle', () => {
     expect(replacementSocket.sent).not.toContainEqual(expect.objectContaining({ t: 'tool.result', action: expect.objectContaining({ actionId: expect.any(String), requestDigest: expect.stringMatching(/^[a-f0-9]{64}$/) }), id: 'old-close' }))
   })
 
-  it('does not send a navigation result across a reconnect during its checkpoint', async () => {
-    const tab = { id: 1, windowId: 1, title: 'New tab', url: 'chrome://newtab/' } as chrome.tabs.Tab
+  it.each(['reconnect', 'same-tab rebind', 'same-URL navigation'])('does not persist an old navigation checkpoint after %s', async (change) => {
+    let tab = { id: 1, windowId: 1, title: 'New tab', url: 'chrome://newtab/' } as chrome.tabs.Tab
     let pauseCheckpoint = false
     let checkpointStarted = false
     let finishCheckpoint!: (tab: chrome.tabs.Tab) => void
@@ -782,6 +785,7 @@ describe('background bridge lifecycle', () => {
       tabQuery: async () => [tab],
       tabGet: async () => {
         if (!pauseCheckpoint) return tab
+        pauseCheckpoint = false
         checkpointStarted = true
         return checkpoint
       },
@@ -809,17 +813,73 @@ describe('background bridge lifecycle', () => {
       sessionId: 'checkpoint-session', args: {}, expiresAt: Date.now() + 10_000,
     })
     await vi.waitFor(() => { expect(checkpointStarted).toBe(true) })
-    panel.onMessage.emit({ type: 'settings', settings: { bridgeUrl: 'ws://127.0.0.1:39002/ext/bridge' } })
-    await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(2) })
-    const replacement = FakeWebSocket.instances[1]!
-    replacement.open()
-    await Promise.resolve()
-    replacement.receive({ t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
-    await Promise.resolve()
-    finishCheckpoint(tab)
+    if (change === 'reconnect') {
+      panel.onMessage.emit({ type: 'settings', settings: { bridgeUrl: 'ws://127.0.0.1:39002/ext/bridge' } })
+      await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(2) })
+      const replacement = FakeWebSocket.instances[1]!
+      replacement.open()
+      await Promise.resolve()
+      replacement.receive({ t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
+      await Promise.resolve()
+    }
+    if (change === 'same-URL navigation') {
+      chromeMock.onCommitted.emit({ tabId: 1, frameId: 0 })
+    } else {
+      // A fresh explicit binding to the same tab id must survive the old read.
+      tab = { ...tab, url: 'https://example.com/current' }
+      panel.onMessage.emit({ type: 'tab-affinity.rebind', id: 'fresh-binding', sessionId: 'checkpoint-session' })
+      await vi.waitFor(() => { expect(panel.postMessage).toHaveBeenCalledWith({ type: 'tab-affinity.rebind.result', id: 'fresh-binding', ok: true }) })
+    }
+    const contextWrites = () => vi.mocked(chrome.storage.session.set).mock.calls.filter(([items]) => PAGE_SESSION_CONTEXT_STORAGE_KEY in items)
+    const beforeOldRead = [...contextWrites()]
+    finishCheckpoint({ ...tab, url: 'https://example.com/stale-checkpoint' })
     await new Promise((resolve) => { setTimeout(resolve, 0) })
-    for (const socket of [original, replacement]) {
-      expect(socket.sent).not.toContainEqual(expect.objectContaining({ t: 'tool.result', action: expect.objectContaining({ actionId: expect.any(String), requestDigest: expect.stringMatching(/^[a-f0-9]{64}$/) }), id: 'old-reload' }))
+    expect(contextWrites()).toEqual(beforeOldRead)
+    if (change === 'reconnect') {
+      for (const socket of FakeWebSocket.instances) {
+        expect(socket.sent).not.toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'old-reload' }))
+      }
+    }
+  })
+
+  it.each(['retained', 'replaced'])('finishes a deferred follow only for its %s connection owner', async (owner) => {
+    let restore!: (value: Record<string, unknown>) => void
+    const restored = new Promise<Record<string, unknown>>(resolve => { restore = resolve })
+    const chromeMock = mockChrome({
+      localGet: async () => ({ dshSettings: { bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge', unrestrictedBrowserAccess: true } }),
+      sessionGet: async key => key === PAGE_SESSION_CONTEXT_STORAGE_KEY ? restored : {},
+    })
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+    const panel = panelPort()
+    chromeMock.onConnect.emit(panel.port)
+    await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
+    const original = FakeWebSocket.instances[0]!
+    original.open()
+    await Promise.resolve()
+    original.receive({ t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
+    original.receive({ t: 'tool.call', id: 'old-follow', name: 'browser_follow_tab', args: { tabId: 2 }, expiresAt: Date.now() + 10_000 })
+    await vi.waitFor(() => { expect(vi.mocked(chrome.tabs.get).mock.calls.filter(([id]) => id === 2)).toHaveLength(2) })
+    if (owner === 'replaced') {
+      panel.onMessage.emit({ type: 'settings', settings: { bridgeUrl: 'ws://127.0.0.1:39002/ext/bridge' } })
+      await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(2) })
+      const replacement = FakeWebSocket.instances[1]!
+      replacement.open()
+      await Promise.resolve()
+      replacement.receive({ t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
+    }
+    restore({})
+    await new Promise(resolve => { setTimeout(resolve, 0) })
+    panel.onMessage.emit({ type: 'request-status' })
+    const binding = expect.objectContaining({ type: 'tab-affinity', state: expect.objectContaining({ controlled: expect.objectContaining({ tabId: 2 }) }) })
+    if (owner === 'retained') {
+      expect(panel.postMessage).toHaveBeenCalledWith(binding)
+      await vi.waitFor(() => { expect(original.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'old-follow', ok: true })) })
+    } else {
+      expect(panel.postMessage).not.toHaveBeenCalledWith(binding)
+      for (const socket of FakeWebSocket.instances) {
+        expect(socket.sent).not.toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'old-follow' }))
+      }
     }
   })
 

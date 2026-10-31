@@ -830,15 +830,21 @@ function validSessionId(value: unknown): string | undefined {
 }
 
 /** Refresh one session's recovery checkpoint from its actual controlled tab. */
-async function checkpointSessionPage(sessionValue: unknown): Promise<void> {
+async function checkpointSessionPage(sessionValue: unknown, isCurrentCall: () => boolean = () => true): Promise<void> {
   const sessionId = validSessionId(sessionValue)
-  if (sessionId === undefined) return
+  if (sessionId === undefined || !isCurrentCall()) return
   await Promise.all([affinityReady, pageSessionContexts.ready])
+  if (!isCurrentCall()) return
   const bound = tabAffinity.getSessionTab(sessionId)
   if (bound === undefined) return
+  // The action may have navigated before this checkpoint started. Pin this
+  // phase separately so a later navigation/rebind cannot revive a stale read.
+  const checkpointTarget = targetLeases.capture(sessionId, bound, () => selectedTargetIdentity(sessionId))
+  if (!checkpointTarget.current()) return
   try {
     const tab = await chrome.tabs.get(bound.tabId)
-    if (tabAffinity.getSessionTab(sessionId)?.tabId !== bound.tabId) return
+    if (!isCurrentCall() || !checkpointTarget.current()
+      || tab.id !== bound.tabId || tab.windowId !== bound.windowId) return
     pageSessionContexts.bind(sessionId, tab)
   } catch {
     // A concurrently closed tab is cleaned by tabs.onRemoved.
@@ -969,9 +975,11 @@ async function resolveOpenTabWindow(sessionId?: string): Promise<{ windowId: num
 
 function bindOpenedTab(
   tab: chrome.tabs.Tab,
-  sessionId?: string,
+  sessionId: string | undefined,
+  isCurrentCall: () => boolean,
   options: { active?: boolean } = {},
 ): boolean {
+  if (!isCurrentCall()) return false
   const summary = summarizeTab(tab)
   if (summary === null) return false
   const sid = sessionId?.trim()
@@ -981,8 +989,9 @@ function bindOpenedTab(
     sessionId: sid,
   })
   if (sid !== undefined && sid !== '') {
+    const binding = targetLeases.capture(sid, summary, () => selectedTargetIdentity(sid))
     void pageSessionContexts.ready.then(() => {
-      pageSessionContexts.bind(sid, { id: summary.tabId, ...summary })
+      if (isCurrentCall() && binding.current()) pageSessionContexts.bind(sid, { id: summary.tabId, ...summary })
     })
   }
   persistTabAffinity()
@@ -1143,10 +1152,11 @@ function commitTabAffinityRebind(
   broadcastTabAffinity()
 }
 
-async function followModelSelectedTab(tab: chrome.tabs.Tab, sessionId?: string): Promise<void> {
+async function followModelSelectedTab(tab: chrome.tabs.Tab, sessionId: string | undefined, isCurrentCall: () => boolean): Promise<void> {
   const summary = summarizeTab(tab)
   if (summary === null) throw new Error('the selected tab has no usable identifier')
   await pageSessionContexts.ready
+  if (!isCurrentCall()) throw new Error('Browser connection changed before the selected tab could be bound')
   commitTabAffinityRebind(summary, sessionId, 'background')
 }
 
@@ -1190,15 +1200,16 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
   unsettledToolCalls.add(activeCall)
   const target = isTabManagementTool(call.name) || call.name === 'browser_open_tab' ? undefined : captureToolTarget(call.sessionId)
   if (target !== undefined && !('ok' in target)) activeCall.targetLease = target
-  const targetAllowed = (): boolean => activeCall.targetLease === undefined
-    || (activeCall.committed ? activeCall.targetLease.sameBinding() : activeCall.targetLease.current())
+  const isCurrentCall = (): boolean => activeToolCalls.get(call.id) === activeCall
+  const targetAllowed = (): boolean => isCurrentCall() && (activeCall.targetLease === undefined
+    || (activeCall.committed ? activeCall.targetLease.sameBinding() : activeCall.targetLease.current()))
   const commitAction = (): void => {
     if (!targetAllowed()) throw new Error('Browser target lease expired before dispatch')
     activeCall.committed = true
   }
   const rollbackActionCommit = (): void => {
     activeCall.committed = false
-    if (activeCall.revocationRequested) controller.abort()
+    if (activeCall.revocationRequested || !targetAllowed()) controller.abort()
   }
   const expiryTimer = call.expiresAt === undefined
     ? undefined
@@ -1235,7 +1246,7 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
       {
         unrestrictedAccess,
         ...(controlledTabId === undefined ? {} : { controlledTabId }),
-        followTab: (tab) => followModelSelectedTab(tab, call.sessionId),
+        followTab: (tab) => followModelSelectedTab(tab, call.sessionId, isCurrentCall),
         commitAction,
         rollbackActionCommit,
       },
@@ -1253,8 +1264,8 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
           budget,
           (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, call.sessionId, unrestrictedAccess),
           controller.signal,
-          (tab) => bindOpenedTab(tab, call.sessionId, { active: call.args.active !== false }),
-          (tabId) => tabAffinity.allowsTarget(tabId, call.sessionId),
+          (tab) => bindOpenedTab(tab, call.sessionId, isCurrentCall, { active: call.args.active !== false }),
+          (tabId) => isCurrentCall() && tabAffinity.allowsTarget(tabId, call.sessionId),
           commitAction,
         ))
     : (target === undefined || 'ok' in target ? Promise.resolve(target ?? affinityFailure('missing'))
@@ -1276,7 +1287,7 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
     let answer = await dispatch()
     if (!targetAllowed()) return staleTarget()
     if (answer.ok && isNavigationCandidateTool(call.name) && activeToolCalls.get(call.id) === activeCall) {
-      await checkpointSessionPage(call.sessionId)
+      await checkpointSessionPage(call.sessionId, targetAllowed)
     }
     if (sharingAtDispatch !== pageSharingRevision && !unrestrictedAccessEnabled() && settings.sharePageContent !== 'auto') {
       if (call.name === 'browser_snapshot' || call.name === 'browser_get_text') {
