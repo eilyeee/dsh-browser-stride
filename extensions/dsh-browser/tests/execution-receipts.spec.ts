@@ -29,6 +29,13 @@ async function records(): Promise<Record<string, unknown>[]> {
 }
 
 describe('persistent execution admission', () => {
+  it('binds an expected run target into the command digest', async () => {
+    const original = call({ sessionId: 'session-a', execution: { kind: 'run', runId: 'run-a', controlRevision: 0 }, targetBinding: 'page_a' })
+    const work = vi.fn(async () => ({ ok: true }))
+    expect((await executeRecordedTool({ ...original, targetBinding: 'page_b' }, signal(), work)).error?.code).toBe('action-conflict')
+    expect(work).not.toHaveBeenCalled()
+    expect(await indexedDB.databases()).toEqual([])
+  })
   it('binds managed run and control revision into the command digest', async () => {
     const original = call({ sessionId: 'session-a', execution: { kind: 'run', runId: 'run-a', controlRevision: 0 } })
     const work = vi.fn(async () => ({ ok: true }))

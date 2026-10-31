@@ -9,6 +9,16 @@ function call() { return wireToolCall({ t: 'tool.call', id: 'synthetic-scope', n
 const accepted = async (payload: ToolDispatchConfirmation) => ({ ...payload, confirmed: true })
 
 describe('original Host execution confirmation', () => {
+  it('cannot replace a Host expected target with a new local proposal', async () => {
+    const request = vi.fn(accepted)
+    const fence = new ToolExecutionFence({ ...call(), targetBinding: 'page_a' }, () => true, 'page_b')
+    expect(await fence.confirm(request, new AbortController().signal)).toBe(false)
+    expect(request).not.toHaveBeenCalled()
+  })
+  it('requires the accepted native target to match its proposal', async () => {
+    const fence = new ToolExecutionFence(call(), () => true, 'page_a')
+    expect(await fence.confirm(async payload => ({ ...payload, confirmed: true, targetBinding: 'page_b' }), new AbortController().signal)).toBe(false)
+  })
   it('requires confirmation and never retries or renews it', async () => {
     const request = vi.fn(accepted)
     const fence = new ToolExecutionFence(call(), () => true)

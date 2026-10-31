@@ -5,6 +5,15 @@ const execution = { kind: 'legacy' as const }
 const action = { actionId: 'act_synthetic', requestDigest: 'a'.repeat(64) }
 
 describe('parseBridgeFrame', () => {
+  it('accepts an expected target only in a managed command', () => {
+    const frame = { t: 'tool.call', id: 'pinned', action, name: 'browser_snapshot', args: {}, expiresAt: 123,
+      execution: { kind: 'run', runId: 'run-a', controlRevision: 0 }, sessionId: 'session-a', targetBinding: 'page_a' }
+    expect(parseBridgeFrame(JSON.stringify(frame))).toMatchObject({ targetBinding: 'page_a' })
+    for (const targetBinding of ['', null, 1, ' page_a ']) {
+      expect(parseBridgeFrame(JSON.stringify({ ...frame, targetBinding }))).toBeUndefined()
+    }
+    expect(parseBridgeFrame(JSON.stringify({ ...frame, execution: { kind: 'legacy' } }))).toBeUndefined()
+  })
   it('requires explicit execution scope and a session for managed commands', () => {
     const frame = { t: 'tool.call', id: 'scoped', action, name: 'browser_snapshot', args: {}, expiresAt: 123 }
     for (const execution of [undefined, null, {}, { kind: 'legacy', runId: 'ignored' },

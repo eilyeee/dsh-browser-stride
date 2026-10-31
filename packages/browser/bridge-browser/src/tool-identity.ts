@@ -8,11 +8,13 @@ export interface ToolCommandMaterial {
   args: Record<string, unknown>
   sessionId?: string
   execution?: ToolExecutionScope
+  targetBinding?: string
 }
 
 export function toolCommandMaterial(command: ToolCommandMaterial): string {
   return canonicalize({ actionId: command.actionId, name: command.name, args: command.args,
     execution: command.execution ?? { kind: 'legacy' },
+    ...(command.targetBinding === undefined ? {} : { targetBinding: command.targetBinding }),
     ...(command.sessionId === undefined ? {} : { sessionId: command.sessionId }) })
 }
 

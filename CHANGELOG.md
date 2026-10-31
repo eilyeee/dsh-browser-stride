@@ -18,7 +18,14 @@ no release version has been assigned yet.
 
 ### Added
 
-- Wire protocol v3 requires explicit legacy/run scopes, includes run/control
+- Wire protocol v4 pins managed page operations to the first confirmed native
+  tab/binding for a run/control revision. Known pins enter command digests;
+  rebinds, tab lifetime/window changes and connection replacement cannot renew
+  them. A fresh trusted revision can select a new target. Managed open/follow/close
+  are refused until trusted target handoff is supported; unscoped tools retain
+  their existing permission paths. Account/tenant identification is not implemented.
+
+- The v3 confirmation flow (extended by v4) requires explicit legacy/run scopes, includes run/control
   metadata in command digests and confirms original pending requests before
   browser dispatch. Confirmation is single-use and connection-owned; copied ids,
   expired contexts and late replies cannot create or renew execution. Browser
@@ -41,7 +48,7 @@ no release version has been assigned yet.
   work and unscoped managed-session calls fail closed. Dispatch records retain
   the run/revision without treating transport receipts as business evidence.
   Pending or uncertain writes fence new execution; unfinished runs block session purge.
-  Run-to-page/account binding and task orchestration remain unimplemented.
+  Account/tenant identification and task orchestration remain unimplemented.
 
 - Owner-confirmed browser pairing: the extension requests a short-lived matching
   verification code, an authenticated DSH settings user approves, and only the

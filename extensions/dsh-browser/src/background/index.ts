@@ -35,6 +35,8 @@
 import {
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
   BRIDGE_CONFIRM_TOOL_METHOD,
+  isPageBrowserTool,
+  isRunTabMutation,
   isRespondResult,
   type BridgeCaps,
   type RespondResult,
@@ -46,6 +48,7 @@ import { readBridgeCredential, writeBridgeCredential } from './credential-store.
 import { needsWriteTurn, WriteQueue } from './write-queue.ts'
 import { executeRecordedTool } from './execution-receipts.ts'
 import { ToolExecutionFence } from './execution-authority.ts'
+import { RunTargetRegistry, type RunTargetBinding } from './run-targets.ts'
 import { localBridgeUrl } from './bridge-address.ts'
 import { requestBrowserPairing, type BrowserPairingStatus } from './pairing-client.ts'
 import { createRpc, BridgeRpcError } from './rpc.ts'
@@ -188,6 +191,7 @@ const interactionResponses = new InteractionResponseRouter()
 const transientEvents = new TransientEventCache()
 const tabAffinity = new TabAffinityController()
 const targetLeases = new TargetLeaseRegistry()
+const runTargets = new RunTargetRegistry()
 const focusedWindow = new FocusedWindowTracker()
 const selections = new SelectionTracker()
 const pageSessionContexts = new PageSessionContextTracker({
@@ -201,7 +205,7 @@ void chrome.storage.session.remove(LEGACY_RECENT_SESSION_STORAGE_KEY).catch(() =
 const sessionTrustedActionOrigins = new Set<string>()
 /** Tool calls that are either withdrawable or completing an already-dispatched action. */
 interface ActiveToolCall {
-  executionFence: ToolExecutionFence
+  executionFence?: ToolExecutionFence
   managed: boolean
   targetLease?: ToolTargetLease
   controller: AbortController
@@ -1193,9 +1197,9 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
   const unrestrictedAccess = unrestrictedAccessEnabled()
   let settle!: () => void
   const callRpc = rpc
-  const executionFence = new ToolExecutionFence(call, () => activeToolCalls.get(call.id) === activeCall)
+  let executionFence: ToolExecutionFence | undefined
+  let runTarget: RunTargetBinding | undefined
   const activeCall: ActiveToolCall = {
-    executionFence,
     managed: call.execution.kind === 'run',
     controller,
     unrestrictedAccess,
@@ -1209,7 +1213,7 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
   const target = isTabManagementTool(call.name) || call.name === 'browser_open_tab' ? undefined : captureToolTarget(call.sessionId)
   if (target !== undefined && !('ok' in target)) activeCall.targetLease = target
   const isCurrentCall = (): boolean => activeToolCalls.get(call.id) === activeCall
-  const targetAllowed = (): boolean => isCurrentCall() && executionFence.current() && (activeCall.targetLease === undefined
+  const targetAllowed = (): boolean => isCurrentCall() && executionFence?.current() === true && (runTarget === undefined || runTarget.current()) && (activeCall.targetLease === undefined
     || (activeCall.committed ? activeCall.targetLease.sameBinding() : activeCall.targetLease.current()))
   const commitAction = (): void => {
     if (!targetAllowed()) throw new Error('Browser target lease expired before dispatch')
@@ -1291,6 +1295,18 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
         ))
   )
   const dispatchAndCheckpoint = async (): Promise<ToolAnswer> => {
+    if (call.execution.kind === 'run') {
+      if (isRunTabMutation(call.name)) return { ok: false, error: { code: 'execution-denied',
+        message: 'Run-bound tab creation, follow and close require a trusted target handoff, which is not yet supported.' } }
+      if (isPageBrowserTool(call.name)) {
+        if (target === undefined || 'ok' in target) return target ?? affinityFailure('missing')
+        runTarget = runTargets.join(call.execution, call.sessionId!, target, call.targetBinding)
+        if (runTarget === undefined) return { ok: false, error: { code: 'execution-denied',
+          message: 'The original run target is unavailable or was rebound. Select the intended page and enter a new trusted control revision.' } }
+      }
+    }
+    executionFence = new ToolExecutionFence(call, isCurrentCall, runTarget?.id)
+    activeCall.executionFence = executionFence
     if (callRpc === null || !await executionFence.confirm(payload => callRpc.request(BRIDGE_CONFIRM_TOOL_METHOD, payload, {
       signal: controller.signal, timeoutMs: Math.min(5000, call.expiresAt - Date.now()),
     }), controller.signal)) return { ok: false, error: { code: 'execution-denied',
@@ -1373,7 +1389,7 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
 function cancelToolCall(id: string): void {
   const call = activeToolCalls.get(id)
   if (call !== undefined) {
-    if (!call.committed || call.managed) call.executionFence.revoke()
+    if (!call.committed || call.managed) call.executionFence?.revoke()
     if (!call.committed) call.controller.abort()
   }
 }
@@ -1394,8 +1410,9 @@ async function revokeUnrestrictedAccess(): Promise<void> {
 
 function cancelAllToolCalls(): void {
   targetLeases.revokeAll()
+  runTargets.revokeAll()
   for (const call of activeToolCalls.values()) {
-    call.executionFence.revoke()
+    call.executionFence?.revoke()
     if (!call.committed) call.controller.abort()
   }
   activeToolCalls.clear()

@@ -22,10 +22,11 @@ export function transportReceipt(ok: boolean, code?: string): z.infer<typeof rec
 const recordSchema = z.strictObject({
   actionId: id, requestId: id, connectionId: id,
   requestDigest: z.string().regex(/^[a-f0-9]{64}$/),
-  identityVersion: z.union([z.literal(2), z.literal(3)]).optional(),
+  identityVersion: z.union([z.literal(2), z.literal(3), z.literal(4)]).optional(),
   transportDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   installationId: id.optional(), sessionId: id.optional(), name: id,
   runId: id.optional(), controlRevision: time.optional(),
+  targetBinding: id.optional(),
   effect: z.enum(['read', 'write']),
   state: z.enum(['prepared', 'sent_unconfirmed', 'not_sent', 'unresolved', 'returned']),
   preparedAt: time, expiresAt: time,
@@ -37,6 +38,7 @@ const recordSchema = z.strictObject({
   const settled = row.settledAt !== undefined
   const valid = row.expiresAt > 0
     && ((row.runId === undefined) === (row.controlRevision === undefined))
+    && (row.targetBinding === undefined || (row.runId !== undefined && row.identityVersion === 4))
     && (row.runId === undefined || (row.sessionId !== undefined && row.identityVersion !== undefined))
     && (row.identityVersion !== undefined ? row.transportDigest !== undefined : row.transportDigest === undefined)
     && row.effect === (isReadOnlyBrowserTool(row.name) ? 'read' : 'write')
@@ -115,7 +117,7 @@ export class BrowserDispatchLedger {
   }
 
   prepare(input: { requestId: string; connectionId: string; installationId?: string; sessionId?: string;
-    name: string; args: Record<string, unknown>; expiresAt: number; runId?: string; controlRevision?: number }): Promise<DispatchRecord> {
+    name: string; args: Record<string, unknown>; expiresAt: number; runId?: string; controlRevision?: number; targetBinding?: string }): Promise<DispatchRecord> {
     // Snapshot before awaiting anything. Only the digest and metadata survive
     // this method: field values, credentials and page content are not stored.
     const material = canonicalize(input)
@@ -129,9 +131,10 @@ export class BrowserDispatchLedger {
       }
       const actionId = makeActionId()
       const requestDigest = createHash('sha256').update(toolCommandMaterial({ actionId, name: metadata.name, args,
+        ...(metadata.targetBinding === undefined ? {} : { targetBinding: metadata.targetBinding }),
         execution: metadata.runId === undefined ? { kind: 'legacy' } : { kind: 'run', runId: metadata.runId, controlRevision: metadata.controlRevision! },
         ...(metadata.sessionId === undefined ? {} : { sessionId: metadata.sessionId }) })).digest('hex')
-      const candidate = recordSchema.parse({ ...metadata, actionId, requestDigest, transportDigest, identityVersion: 3,
+      const candidate = recordSchema.parse({ ...metadata, actionId, requestDigest, transportDigest, identityVersion: 4,
         effect: isReadOnlyBrowserTool(metadata.name) ? 'read' : 'write', state: 'prepared', preparedAt: Date.now() })
       await this.persist(candidate)
       return structuredClone(candidate)

@@ -5,7 +5,7 @@ import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import WebSocket from 'ws'
 import { BridgeServer, BridgeToolError, isLoopbackAddress, messageToText, payloadCode, payloadMessage } from '../src/server.ts'
-import { BRIDGE_CONFIRM_TOOL_METHOD, BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, BRIDGE_SESSION_PURGE_METHOD, BRIDGE_RUN_LIST_METHOD, BRIDGE_RUN_CONTROL_METHOD, type BridgeFrame } from '../src/protocol.ts'
+import { isPageBrowserTool, BRIDGE_CONFIRM_TOOL_METHOD, BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, BRIDGE_SESSION_PURGE_METHOD, BRIDGE_RUN_LIST_METHOD, BRIDGE_RUN_CONTROL_METHOD, type BridgeFrame } from '../src/protocol.ts'
 import { SessionPurgeError } from '../src/session-purge.ts'
 import type { BrowserHostApi, HostEventFrame } from '../src/host-api.ts'
 import { createRunStorage } from './helpers/run-storage.ts'
@@ -76,8 +76,10 @@ function connect(url: string, origin?: string, autoConfirm = true): Promise<{ ws
       frames.push(frame)
       if (autoConfirm && frame.t === 'tool.call') {
         const { id, action, execution, sessionId } = frame
+        const targetBinding = execution.kind === 'run' && isPageBrowserTool(frame.name)
+          ? frame.targetBinding ?? `page_synthetic_${execution.runId}_${execution.controlRevision}` : undefined
         ws.send(JSON.stringify({ t: 'rpc', id: `confirm-${id}`, method: BRIDGE_CONFIRM_TOOL_METHOD,
-          payload: { id, action, execution, ...(sessionId === undefined ? {} : { sessionId }) } }))
+          payload: { id, action, execution, ...(targetBinding === undefined ? {} : { targetBinding }), ...(sessionId === undefined ? {} : { sessionId }) } }))
       }
     })
     ws.on('error', reject)
@@ -128,6 +130,82 @@ async function connectedLedger(scoped = false, autoConfirm = true) {
 }
 
 describe('recorded tool dispatch', () => {
+  it('pins the first native target across calls, permits a new revision, and refuses borrowing across connections', async () => {
+    const h = await connectedLedger(true, false)
+    const queued = await h.storage.store.create({ sessionId: asSessionId('target-session'), requiredCriteriaIds: ['saved'] })
+    const run = await h.storage.store.transition(queued.runId, queued.version, 'running')
+    const calls = () => h.frames.filter(frame => frame.t === 'tool.call') as Array<Extract<BridgeFrame, { t: 'tool.call' }>>
+    const confirm = async (call: ReturnType<typeof calls>[number], targetBinding: string | undefined, id: string) => {
+      send(h.ws, { t: 'rpc', id, method: BRIDGE_CONFIRM_TOOL_METHOD,
+        payload: { id: call.id, action: call.action, execution: call.execution, sessionId: call.sessionId,
+          ...(targetBinding === undefined ? {} : { targetBinding }) } })
+      await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === id))
+      return (h.frames.find(frame => frame.t === 'rpc.result' && frame.id === id) as Extract<BridgeFrame, { t: 'rpc.result' }>).ok
+    }
+    const reply = (call: ReturnType<typeof calls>[number]) => send(h.ws, { t: 'tool.result', id: call.id, action: call.action, ok: true, result: {} })
+    await h.storage.store.withExecution(run.runId, 0, async () => {
+      const first = h.bridge.requestTool('browser_snapshot', {}, new AbortController().signal)
+      await waitFor(() => calls().length === 1)
+      expect(calls()[0].targetBinding).toBeUndefined()
+      expect(await confirm(calls()[0], undefined, 'missing-pin')).toBe(false)
+      expect(await confirm(calls()[0], 'page_a', 'first-pin')).toBe(true)
+      reply(calls()[0]); await first
+      const next = h.bridge.requestTool('browser_snapshot', {}, new AbortController().signal)
+      await waitFor(() => calls().length === 2)
+      expect(calls()[1].targetBinding).toBe('page_a')
+      expect(await confirm(calls()[1], 'page_b', 'foreign-pin')).toBe(false)
+      expect(await confirm(calls()[1], 'page_a', 'same-pin')).toBe(true)
+      reply(calls()[1]); await next
+      expect(h.ledger.get(calls()[1].id)).toMatchObject({ identityVersion: 4, targetBinding: 'page_a' })
+      const paused = await h.storage.store.control(run.runId, h.storage.store.get(run.runId)!.version, 'pause')
+      const resumed = await h.storage.store.control(run.runId, paused.version, 'resume')
+      await h.storage.store.withExecution(run.runId, resumed.controlRevision, async () => {
+        const fresh = h.bridge.requestTool('browser_snapshot', {}, new AbortController().signal)
+        await waitFor(() => calls().length === 3)
+        expect(calls()[2].targetBinding).toBeUndefined()
+        expect(await confirm(calls()[2], 'page_b', 'new-revision')).toBe(true)
+        reply(calls()[2]); await fresh
+        const replacement = await connect(h.url, undefined, false)
+        send(replacement.ws, { t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: TOKEN, caps: CAPS })
+        await waitFor(() => replacement.frames.some(frame => frame.t === 'hello.ok'))
+        expect(() => h.bridge.requestTool('browser_snapshot', {}, new AbortController().signal)).toThrow('older connection')
+        expect(h.ledger.list()).toHaveLength(3)
+      })
+    })
+  })
+
+  it('cannot race two first confirmations into different run targets', async () => {
+    const h = await connectedLedger(true, false)
+    const queued = await h.storage.store.create({ sessionId: asSessionId('target-race'), requiredCriteriaIds: ['saved'] })
+    const run = await h.storage.store.transition(queued.runId, queued.version, 'running')
+    await h.storage.store.withExecution(run.runId, 0, async () => {
+      const first = h.bridge.requestTool('browser_snapshot', {}, new AbortController().signal)
+      const second = h.bridge.requestTool('browser_snapshot', {}, new AbortController().signal).catch(error => error)
+      await waitFor(() => h.frames.filter(frame => frame.t === 'tool.call').length === 2)
+      const calls = h.frames.filter(frame => frame.t === 'tool.call') as Array<Extract<BridgeFrame, { t: 'tool.call' }>>
+      for (const [index, call] of calls.entries()) {
+        expect(call.targetBinding).toBeUndefined()
+        send(h.ws, { t: 'rpc', id: `race-${index}`, method: BRIDGE_CONFIRM_TOOL_METHOD,
+          payload: { id: call.id, action: call.action, execution: call.execution, sessionId: call.sessionId, targetBinding: index === 0 ? 'page_a' : 'page_b' } })
+        await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === `race-${index}`))
+        expect(h.frames).toContainEqual(expect.objectContaining({ id: `race-${index}`, ok: index === 0 }))
+      }
+      send(h.ws, { t: 'tool.result', id: calls[0].id, action: calls[0].action, ok: true, result: {} })
+      send(h.ws, { t: 'tool.result', id: calls[1].id, action: calls[1].action, ok: false, error: { code: 'execution-denied', message: 'refused' } })
+      await first; expect(await second).toBeInstanceOf(BridgeToolError)
+    })
+  })
+
+  it.each(['browser_open_tab', 'browser_follow_tab', 'browser_close_tab'])('refuses managed %s before recording a possible write', async name => {
+    const h = await connectedLedger(true)
+    const queued = await h.storage.store.create({ sessionId: asSessionId('target-tab-tools'), requiredCriteriaIds: ['saved'] })
+    const run = await h.storage.store.transition(queued.runId, queued.version, 'running')
+    await h.storage.store.withExecution(run.runId, 0, () => {
+      expect(() => h.bridge.requestTool(name, {}, new AbortController().signal)).toThrow('trusted target handoff')
+      expect(h.ledger.list()).toEqual([])
+      expect(h.frames.some(frame => frame.t === 'tool.call')).toBe(false)
+    })
+  })
   it.each(['run', 'revision', 'session', 'action', 'digest', 'mode'])('confirms only the original pending managed command: rejects forged %s', async field => {
     const h = await connectedLedger(true, false)
     const queued = await h.storage.store.create({ sessionId: asSessionId('confirmation-session'), requiredCriteriaIds: ['saved'] })
@@ -136,7 +214,7 @@ describe('recorded tool dispatch', () => {
       const result = h.bridge.requestTool('browser_snapshot', {}, new AbortController().signal)
       await waitFor(() => h.frames.some(frame => frame.t === 'tool.call'))
       const call = h.frames.find(frame => frame.t === 'tool.call')! as Extract<BridgeFrame, { t: 'tool.call' }>
-      const payload = { id: call.id, action: call.action, execution: call.execution, sessionId: call.sessionId }
+      const payload = { id: call.id, action: call.action, execution: call.execution, sessionId: call.sessionId, targetBinding: 'page_synthetic_scope' }
       const forged = { ...payload, ...(field === 'run' ? { execution: { kind: 'run', runId: 'other', controlRevision: 0 } }
         : field === 'revision' ? { execution: { kind: 'run', runId: run.runId, controlRevision: 1 } }
         : field === 'session' ? { sessionId: 'other-session' }

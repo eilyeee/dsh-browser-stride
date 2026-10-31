@@ -8,9 +8,11 @@ export class ToolExecutionFence {
   private signal?: AbortSignal
   readonly confirmation: ToolDispatchConfirmation
 
-  constructor(private readonly call: Extract<ServerFrame, { t: 'tool.call' }>, private readonly ownsCall: () => boolean) {
+  constructor(private readonly call: Extract<ServerFrame, { t: 'tool.call' }>, private readonly ownsCall: () => boolean, proposedTarget?: string) {
+    const targetBinding = proposedTarget ?? call.targetBinding
     this.confirmation = Object.freeze({ id: call.id, action: Object.freeze({ ...call.action }),
-      execution: Object.freeze({ ...call.execution }), ...(call.sessionId === undefined ? {} : { sessionId: call.sessionId }) })
+      execution: Object.freeze({ ...call.execution }), ...(call.sessionId === undefined ? {} : { sessionId: call.sessionId }),
+      ...(targetBinding === undefined ? {} : { targetBinding }) })
   }
 
   current(): boolean { return this.granted && !this.revoked && !this.signal?.aborted && this.ownsCall() }
@@ -23,6 +25,7 @@ export class ToolExecutionFence {
   private async check(request: (payload: ToolDispatchConfirmation) => Promise<unknown>, signal: AbortSignal): Promise<boolean> {
     this.signal = signal
     if (this.revoked || signal.aborted || !this.ownsCall() || Date.now() >= this.call.expiresAt) return false
+    if (this.call.targetBinding !== undefined && this.confirmation.targetBinding !== this.call.targetBinding) return false
     try {
       const result = await request(this.confirmation)
       if (typeof result !== 'object' || result === null || Array.isArray(result)) return false

@@ -33,6 +33,8 @@ import {
   BRIDGE_CONFIRM_TOOL_METHOD,
   isToolDispatchConfirmation,
   sameToolConfirmation,
+  isPageBrowserTool,
+  isRunTabMutation,
   PROTOCOL_MISMATCH_CLOSE_CODE,
   isReadOnlyBrowserTool,
   HELLO_TIMEOUT_MS,
@@ -137,6 +139,8 @@ interface PendingTool {
   confirmation: ToolDispatchConfirmation
   confirmed: boolean
   authorityCurrent: () => boolean
+  pageTarget: boolean
+  bindTarget: (payload: ToolDispatchConfirmation) => boolean
   finish: (settlement: DispatchSettlement, value: unknown, error?: BridgeToolError) => void
 }
 
@@ -183,6 +187,8 @@ export class BridgeServer {
   private readonly wss = new WebSocketServer({ noServer: true })
   private current: ReadyConnection | null = null
   private readonly pendingTools = new Map<string, PendingTool>()
+  /** Kept across socket replacement; a new connection cannot borrow an old pin. */
+  private readonly runTargets = new Map<string, { sessionId: string; controlRevision: number; connectionId: string; id: string }>()
   private readonly operations = new Set<Promise<unknown>>()
   private closed = false
   private disposal: Promise<void> | undefined
@@ -226,6 +232,7 @@ export class BridgeServer {
     try { execution = this.deps.runs?.executionFor(sessionId) }
     catch { throw new BridgeToolError('action-failed', 'Browser run execution context is missing, expired or not permitted to dispatch. Re-establish the run context before further actions.') }
     if (execution !== undefined) {
+      if (isRunTabMutation(name)) throw new BridgeToolError('execution-denied', 'Run-bound tab creation, follow and close require a trusted target handoff, which is not yet supported.')
       if (this.deps.dispatches === undefined) throw new BridgeToolError('internal', 'Run-scoped browser dispatch requires a durable ledger')
       sessionId = execution.sessionId
       signal = AbortSignal.any([signal, execution.signal])
@@ -234,6 +241,7 @@ export class BridgeServer {
     if (conn === null) {
       throw new BridgeToolError('bridge-closed', 'no browser extension is connected to the bridge')
     }
+    const targetBinding = execution !== undefined && isPageBrowserTool(name) ? this.expectedRunTarget(execution, conn) : undefined
     // A caller that already aborted must not dispatch: the abort listener
     // below does not replay for pre-aborted signals, so the call would be
     // sent to the extension and executed despite the cancellation.
@@ -251,18 +259,39 @@ export class BridgeServer {
         ...(sessionId === undefined ? {} : { sessionId }) })).digest('hex')
       return this.sendTool(conn, id, name, copied, signal, expiresAt, { actionId, requestDigest }, sessionId)
     }
-    return this.track(this.recordAndSend(conn, id, name, copied, signal, expiresAt, sessionId, execution))
+    return this.track(this.recordAndSend(conn, id, name, copied, signal, expiresAt, sessionId, execution, targetBinding))
   }
 
-  private async recordAndSend(conn: ReadyConnection, id: string, name: string, args: Record<string, unknown>, signal: AbortSignal, expiresAt: number, sessionId?: string, execution?: BrowserRunExecution): Promise<unknown> {
+  private expectedRunTarget(execution: BrowserRunExecution, conn: ReadyConnection): string | undefined {
+    const pin = this.runTargets.get(execution.runId)
+    if (pin === undefined || pin.controlRevision < execution.controlRevision) return
+    if (pin.controlRevision !== execution.controlRevision || pin.sessionId !== execution.sessionId || pin.connectionId !== conn.connectionId) {
+      throw new BridgeToolError('execution-denied', 'The run target belongs to an older connection or control revision. Establish a new trusted execution revision before continuing.')
+    }
+    return pin.id
+  }
+
+  private bindRunTarget(execution: BrowserRunExecution, conn: ReadyConnection, id: string): boolean {
+    const previous = this.runTargets.get(execution.runId)
+    if (previous !== undefined && previous.controlRevision >= execution.controlRevision) {
+      return previous.controlRevision === execution.controlRevision && previous.sessionId === execution.sessionId
+        && previous.connectionId === conn.connectionId && previous.id === id
+    }
+    if (previous === undefined && this.runTargets.size >= 5000) return false
+    this.runTargets.set(execution.runId, { sessionId: execution.sessionId, controlRevision: execution.controlRevision, connectionId: conn.connectionId, id })
+    return true
+  }
+
+  private async recordAndSend(conn: ReadyConnection, id: string, name: string, args: Record<string, unknown>, signal: AbortSignal, expiresAt: number, sessionId?: string, execution?: BrowserRunExecution, targetBinding?: string): Promise<unknown> {
     const ledger = this.deps.dispatches!
     let action: ToolActionIdentity
     try {
       const prepared = await ledger.prepare({ requestId: id, connectionId: conn.connectionId,
         name, args, expiresAt, ...(sessionId === undefined ? {} : { sessionId }),
+        ...(targetBinding === undefined ? {} : { targetBinding }),
         ...(execution === undefined ? {} : { runId: execution.runId, controlRevision: execution.controlRevision }),
         ...(conn.installationId === undefined ? {} : { installationId: conn.installationId }) })
-      if (prepared.state !== 'prepared' || prepared.identityVersion !== 3) throw new Error('request already consumed or incompatible')
+      if (prepared.state !== 'prepared' || prepared.identityVersion !== 4) throw new Error('request already consumed or incompatible')
       action = { actionId: prepared.actionId, requestDigest: prepared.requestDigest }
       let stopped = this.beforeDispatch(conn, signal, expiresAt, sessionId, execution)
       if (stopped !== undefined) {
@@ -281,7 +310,7 @@ export class BridgeServer {
       if (error instanceof BridgeToolError) throw error
       throw new BridgeToolError('internal', 'browser dispatch could not be durably recorded; no action was sent')
     }
-    return this.sendTool(conn, id, name, args, signal, expiresAt, action, sessionId, execution)
+    return this.sendTool(conn, id, name, args, signal, expiresAt, action, sessionId, execution, targetBinding)
   }
 
   private beforeDispatch(conn: ReadyConnection, signal: AbortSignal, expiresAt: number, sessionId?: string, execution?: BrowserRunExecution): { reason: 'cancelled' | 'expired' | 'connection-closed'; error: BridgeToolError } | undefined {
@@ -296,13 +325,17 @@ export class BridgeServer {
     return undefined
   }
 
-  private sendTool(conn: ReadyConnection, id: string, name: string, args: Record<string, unknown>, signal: AbortSignal, expiresAt: number, action: ToolActionIdentity, sessionId?: string, execution?: BrowserRunExecution): Promise<unknown> {
+  private sendTool(conn: ReadyConnection, id: string, name: string, args: Record<string, unknown>, signal: AbortSignal, expiresAt: number, action: ToolActionIdentity, sessionId?: string, execution?: BrowserRunExecution, targetBinding?: string): Promise<unknown> {
     const confirmation: ToolDispatchConfirmation = { id, action,
       execution: execution === undefined ? { kind: 'legacy' } : { kind: 'run', runId: execution.runId, controlRevision: execution.controlRevision },
+      ...(targetBinding === undefined ? {} : { targetBinding }),
       ...(sessionId === undefined ? {} : { sessionId }) }
     return new Promise<unknown>((resolve, reject) => {
       let timer: NodeJS.Timeout
       const pending: PendingTool = { action, owner: conn, confirmation, confirmed: false,
+        pageTarget: execution !== undefined && isPageBrowserTool(name),
+        bindTarget: payload => execution === undefined || !isPageBrowserTool(name) ? payload.targetBinding === undefined
+          : payload.targetBinding !== undefined && this.bindRunTarget(execution, conn, payload.targetBinding),
         authorityCurrent: () => {
           if (signal.aborted || this.current !== conn || conn.abort.signal.aborted || Date.now() >= expiresAt) return false
           try { this.deps.runs?.assertDispatchAuthority(execution, sessionId); return true } catch { return false }
@@ -343,6 +376,7 @@ export class BridgeServer {
         id,
         action,
         execution: confirmation.execution,
+        ...(targetBinding === undefined ? {} : { targetBinding }),
         name,
         args,
         expiresAt,
@@ -561,14 +595,17 @@ export class BridgeServer {
     if (frame.method === BRIDGE_CONFIRM_TOOL_METHOD) {
       const payload = frame.payload
       const pending = isToolDispatchConfirmation(payload) ? this.pendingTools.get(payload.id) : undefined
+      const expected = pending?.pageTarget && pending.confirmation.targetBinding === undefined && isToolDispatchConfirmation(payload) && payload.targetBinding !== undefined
+        ? { ...pending.confirmation, targetBinding: payload.targetBinding } : pending?.confirmation
       if (pending === undefined || pending.owner !== conn || !isToolDispatchConfirmation(payload)
-        || !sameToolConfirmation(payload, pending.confirmation) || pending.confirmed
-        || conn.confirmedTools.size >= 5000 || !pending.authorityCurrent()) {
+        || expected === undefined || !sameToolConfirmation(payload, expected) || pending.confirmed
+        || conn.confirmedTools.size >= 5000 || !pending.authorityCurrent() || !pending.bindTarget(payload)) {
         sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false,
           error: { code: 'execution-denied', message: 'The original pending browser execution is unavailable or revoked.' } })
         return
       }
       pending.confirmed = true
+      pending.confirmation = expected
       conn.confirmedTools.add(payload.id)
       sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true, result: { ...pending.confirmation, confirmed: true } })
       return

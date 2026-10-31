@@ -124,17 +124,17 @@ describe('durable browser dispatch ledger', () => {
     expect(historical.state).toBe('not_sent')
   })
 
-  it('reads historical v2 rows without upgrading their command identity', async () => {
+  it.each([2, 3])('reads historical v%s rows without upgrading their command identity', async version => {
     const { ledger, store, open, dispatchFile } = await setup()
     await ledger.prepare(input())
     await store.close()
     const data = JSON.parse(await readFile(dispatchFile, 'utf8'))
     const row = data.tables.dispatches['synthetic-request']
-    row.identityVersion = 2
+    row.identityVersion = version
     row.requestDigest = 'b'.repeat(64)
     await writeFile(dispatchFile, JSON.stringify(data))
     const historical = (await open()).dispatches.get('synthetic-request')!
-    expect(historical.identityVersion).toBe(2)
+    expect(historical.identityVersion).toBe(version)
     expect(historical.requestDigest).toBe(row.requestDigest)
     expect(historical.state).toBe('not_sent')
   })
