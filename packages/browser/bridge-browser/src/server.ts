@@ -24,12 +24,15 @@ import { WebSocket, WebSocketServer } from 'ws'
 import type { BrowserHostApi } from './host-api.ts'
 import { canonicalize, makeActionId } from './contracts/ids.ts'
 import { toolCommandMaterial } from './tool-identity.ts'
-import type { ToolActionIdentity } from './protocol.ts'
+import type { ToolActionIdentity, ToolDispatchConfirmation } from './protocol.ts'
 import { transportReceipt, type BrowserDispatchLedger, type DispatchSettlement } from './dispatch-ledger.ts'
 import {
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
   BRIDGE_SESSION_PURGE_METHOD,
   BRIDGE_PROTOCOL_VERSION,
+  BRIDGE_CONFIRM_TOOL_METHOD,
+  isToolDispatchConfirmation,
+  sameToolConfirmation,
   PROTOCOL_MISMATCH_CLOSE_CODE,
   isReadOnlyBrowserTool,
   HELLO_TIMEOUT_MS,
@@ -114,7 +117,7 @@ export interface BridgeServerDeps {
   /** Production always provides the durable ledger; optional for transport-only unit fixtures. */
   dispatches?: Pick<BrowserDispatchLedger, 'prepare' | 'markSent' | 'settle' | 'get'>
   /** Trusted Host async execution scopes; never caller/model-supplied ids. */
-  runs?: Pick<BrowserRunStore, 'executionFor'> & RunPanelStore
+  runs?: Pick<BrowserRunStore, 'executionFor' | 'assertDispatchAuthority'> & RunPanelStore
   /**
    * Test seam: force the remote address seen by the privilege gate. The
    * sandbox cannot bind arbitrary loopback literals, so the non-loopback
@@ -130,6 +133,10 @@ export interface BridgeServerDeps {
 /** One in-flight tool call awaiting the extension's `tool.result`. */
 interface PendingTool {
   action: ToolActionIdentity
+  owner: ReadyConnection
+  confirmation: ToolDispatchConfirmation
+  confirmed: boolean
+  authorityCurrent: () => boolean
   finish: (settlement: DispatchSettlement, value: unknown, error?: BridgeToolError) => void
 }
 
@@ -145,6 +152,7 @@ interface ReadyConnection {
   ping: NodeJS.Timeout
   /** Ordered requests belong to this connection, never to its replacement. */
   orderedSessionRpcs: Map<string, Promise<void>>
+  confirmedTools: Set<string>
 }
 
 function sendFrame(ws: WebSocket, frame: BridgeFrame): void {
@@ -254,7 +262,7 @@ export class BridgeServer {
         name, args, expiresAt, ...(sessionId === undefined ? {} : { sessionId }),
         ...(execution === undefined ? {} : { runId: execution.runId, controlRevision: execution.controlRevision }),
         ...(conn.installationId === undefined ? {} : { installationId: conn.installationId }) })
-      if (prepared.state !== 'prepared' || prepared.identityVersion !== 2) throw new Error('request already consumed or incompatible')
+      if (prepared.state !== 'prepared' || prepared.identityVersion !== 3) throw new Error('request already consumed or incompatible')
       action = { actionId: prepared.actionId, requestDigest: prepared.requestDigest }
       let stopped = this.beforeDispatch(conn, signal, expiresAt, sessionId, execution)
       if (stopped !== undefined) {
@@ -273,7 +281,7 @@ export class BridgeServer {
       if (error instanceof BridgeToolError) throw error
       throw new BridgeToolError('internal', 'browser dispatch could not be durably recorded; no action was sent')
     }
-    return this.sendTool(conn, id, name, args, signal, expiresAt, action, sessionId)
+    return this.sendTool(conn, id, name, args, signal, expiresAt, action, sessionId, execution)
   }
 
   private beforeDispatch(conn: ReadyConnection, signal: AbortSignal, expiresAt: number, sessionId?: string, execution?: BrowserRunExecution): { reason: 'cancelled' | 'expired' | 'connection-closed'; error: BridgeToolError } | undefined {
@@ -288,13 +296,21 @@ export class BridgeServer {
     return undefined
   }
 
-  private sendTool(conn: ReadyConnection, id: string, name: string, args: Record<string, unknown>, signal: AbortSignal, expiresAt: number, action: ToolActionIdentity, sessionId?: string): Promise<unknown> {
+  private sendTool(conn: ReadyConnection, id: string, name: string, args: Record<string, unknown>, signal: AbortSignal, expiresAt: number, action: ToolActionIdentity, sessionId?: string, execution?: BrowserRunExecution): Promise<unknown> {
+    const confirmation: ToolDispatchConfirmation = { id, action,
+      execution: execution === undefined ? { kind: 'legacy' } : { kind: 'run', runId: execution.runId, controlRevision: execution.controlRevision },
+      ...(sessionId === undefined ? {} : { sessionId }) }
     return new Promise<unknown>((resolve, reject) => {
       let timer: NodeJS.Timeout
-      const pending: PendingTool = { action, finish: (settlement, value, error) => {
+      const pending: PendingTool = { action, owner: conn, confirmation, confirmed: false,
+        authorityCurrent: () => {
+          if (signal.aborted || this.current !== conn || conn.abort.signal.aborted || Date.now() >= expiresAt) return false
+          try { this.deps.runs?.assertDispatchAuthority(execution, sessionId); return true } catch { return false }
+        }, finish: (settlement, value, error) => {
         if (this.pendingTools.get(id) !== pending) return
         clearTimeout(timer)
         this.pendingTools.delete(id)
+        if (settlement.state === 'returned') conn.confirmedTools.delete(id)
         signal.removeEventListener('abort', onAbort)
         this.track((async () => {
           try {
@@ -326,6 +342,7 @@ export class BridgeServer {
         t: 'tool.call',
         id,
         action,
+        execution: confirmation.execution,
         name,
         args,
         expiresAt,
@@ -478,7 +495,7 @@ export class BridgeServer {
         }
       }
     })()
-    this.current = { connectionId: randomUUID(), ws, remoteAddress, abort, pump, ping, orderedSessionRpcs: new Map(),
+    this.current = { connectionId: randomUUID(), ws, remoteAddress, abort, pump, ping, orderedSessionRpcs: new Map(), confirmedTools: new Set(),
       ...(installationId === undefined ? {} : { installationId }) }
     sendFrame(ws, { t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps, ...(credential === undefined ? {} : { credential }) })
     ws.once('close', () => {
@@ -541,6 +558,21 @@ export class BridgeServer {
     // An ordered call may have waited while another connection replaced its
     // owner. It must never borrow the new connection's identity or signal.
     if (this.current !== conn || conn.abort.signal.aborted) return
+    if (frame.method === BRIDGE_CONFIRM_TOOL_METHOD) {
+      const payload = frame.payload
+      const pending = isToolDispatchConfirmation(payload) ? this.pendingTools.get(payload.id) : undefined
+      if (pending === undefined || pending.owner !== conn || !isToolDispatchConfirmation(payload)
+        || !sameToolConfirmation(payload, pending.confirmation) || pending.confirmed
+        || conn.confirmedTools.size >= 5000 || !pending.authorityCurrent()) {
+        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false,
+          error: { code: 'execution-denied', message: 'The original pending browser execution is unavailable or revoked.' } })
+        return
+      }
+      pending.confirmed = true
+      conn.confirmedTools.add(payload.id)
+      sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true, result: { ...pending.confirmation, confirmed: true } })
+      return
+    }
     const management = PRIVILEGED_METHODS.has(frame.method)
       || frame.method.startsWith('settings.') || frame.method.startsWith('credentials.')
     const forbidden = management && this.deps.allowHostManagement !== true
@@ -636,7 +668,12 @@ export class BridgeServer {
     const settlement: DispatchSettlement = { state: 'returned', receipt: transportReceipt(ok, ok ? undefined : payloadCode(payload)) }
     const pending = this.pendingTools.get(id)
     if (pending !== undefined) {
-      if (pending.action.actionId !== action.actionId || pending.action.requestDigest !== action.requestDigest) return
+      if (pending.owner !== conn || pending.action.actionId !== action.actionId || pending.action.requestDigest !== action.requestDigest) return
+      if (ok && !pending.confirmed) {
+        pending.finish({ state: 'returned', receipt: transportReceipt(false, 'execution-denied') }, undefined,
+          new BridgeToolError('execution-denied', 'The extension returned success without execution confirmation. Check the page before another write.'))
+        return
+      }
       pending.finish(settlement, payload, ok ? undefined : new BridgeToolError(payloadCode(payload), payloadMessage(payload)))
     } else {
       // A late result may settle transport uncertainty, but cannot resurrect
@@ -644,8 +681,9 @@ export class BridgeServer {
       let row
       try { row = this.deps.dispatches?.get(id) } catch { return }
       if (row?.connectionId === conn.connectionId && row.state === 'unresolved'
+        && (!ok || conn.confirmedTools.has(id))
         && row.actionId === action.actionId && row.requestDigest === action.requestDigest) {
-        void this.track(this.deps.dispatches!.settle(id, settlement)).catch(() => {})
+        void this.track(this.deps.dispatches!.settle(id, settlement)).then(() => conn.confirmedTools.delete(id), () => {})
       }
     }
   }

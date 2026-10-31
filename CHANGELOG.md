@@ -18,6 +18,12 @@ no release version has been assigned yet.
 
 ### Added
 
+- Wire protocol v3 requires explicit legacy/run scopes, includes run/control
+  metadata in command digests and confirms original pending requests before
+  browser dispatch. Confirmation is single-use and connection-owned; copied ids,
+  expired contexts and late replies cannot create or renew execution. Browser
+  approvals still apply. Historical v2 ledger rows remain readable without replay.
+
 - Received page calls pin their browser target before receipt/approval/queue
   waits. Navigation, history changes, rebinding, tab lifecycle changes and new
   connections fence old pending work. Expired reads are withheld, and cancelled
@@ -35,7 +41,7 @@ no release version has been assigned yet.
   work and unscoped managed-session calls fail closed. Dispatch records retain
   the run/revision without treating transport receipts as business evidence.
   Pending or uncertain writes fence new execution; unfinished runs block session purge.
-  Receiver run/target authority and task orchestration remain unimplemented.
+  Run-to-page/account binding and task orchestration remain unimplemented.
 
 - Owner-confirmed browser pairing: the extension requests a short-lived matching
   verification code, an authenticated DSH settings user approves, and only the
@@ -44,7 +50,7 @@ no release version has been assigned yet.
   manual codes and saved-credential reconnect remain supported. Revocation also
   cancels outstanding requests for the installation.
 
-- Wire protocol v2 carries Host-issued logical action ids and SHA-256 command
+- The initial v2 action fence (superseded by v3) introduced Host-issued logical action ids and SHA-256 command
   digests on calls and replies. The Host ignores replies with mismatched ids or
   digests, and the extension verifies the command before execution admission.
 - Extension-origin IndexedDB commits an execution fence before dispatch and a

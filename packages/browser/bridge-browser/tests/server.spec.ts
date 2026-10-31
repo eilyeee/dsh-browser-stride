@@ -5,7 +5,7 @@ import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import WebSocket from 'ws'
 import { BridgeServer, BridgeToolError, isLoopbackAddress, messageToText, payloadCode, payloadMessage } from '../src/server.ts'
-import { BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, BRIDGE_SESSION_PURGE_METHOD, BRIDGE_RUN_LIST_METHOD, BRIDGE_RUN_CONTROL_METHOD, type BridgeFrame } from '../src/protocol.ts'
+import { BRIDGE_CONFIRM_TOOL_METHOD, BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, BRIDGE_SESSION_PURGE_METHOD, BRIDGE_RUN_LIST_METHOD, BRIDGE_RUN_CONTROL_METHOD, type BridgeFrame } from '../src/protocol.ts'
 import { SessionPurgeError } from '../src/session-purge.ts'
 import type { BrowserHostApi, HostEventFrame } from '../src/host-api.ts'
 import { createRunStorage } from './helpers/run-storage.ts'
@@ -67,11 +67,19 @@ function hostApi(overrides: Partial<BrowserHostApi> = {}): BrowserHostApi {
   }
 }
 
-function connect(url: string, origin?: string): Promise<{ ws: WebSocket; frames: BridgeFrame[]; done: Promise<void> }> {
+function connect(url: string, origin?: string, autoConfirm = true): Promise<{ ws: WebSocket; frames: BridgeFrame[]; done: Promise<void> }> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(url, origin !== undefined ? { headers: { origin } } : undefined)
     const frames: BridgeFrame[] = []
-    ws.on('message', (data) => { frames.push(JSON.parse(data.toString()) as BridgeFrame) })
+    ws.on('message', (data) => {
+      const frame = JSON.parse(data.toString()) as BridgeFrame
+      frames.push(frame)
+      if (autoConfirm && frame.t === 'tool.call') {
+        const { id, action, execution, sessionId } = frame
+        ws.send(JSON.stringify({ t: 'rpc', id: `confirm-${id}`, method: BRIDGE_CONFIRM_TOOL_METHOD,
+          payload: { id, action, execution, ...(sessionId === undefined ? {} : { sessionId }) } }))
+      }
+    })
     ws.on('error', reject)
     ws.on('open', () => {
       resolve({
@@ -107,19 +115,86 @@ afterEach(async () => {
   for (const fixture of storageFixtures.splice(0)) await fixture.close()
 })
 
-async function connectedLedger(scoped = false) {
+async function connectedLedger(scoped = false, autoConfirm = true) {
   const storage = await createRunStorage()
   storageFixtures.push(storage)
   const ledger = storage.store.dispatches
   const h = await startBridge({ dispatches: ledger, toolTimeoutMs: 2_000, ...(scoped ? { runs: storage.store } : {}) })
   harnesses.push(h)
-  const client = await connect(h.url)
+  const client = await connect(h.url, undefined, autoConfirm)
   send(client.ws, { t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: TOKEN, caps: CAPS })
   await waitFor(() => h.bridge.hasConnection())
   return { ...h, ...client, storage, ledger }
 }
 
 describe('recorded tool dispatch', () => {
+  it.each(['run', 'revision', 'session', 'action', 'digest', 'mode'])('confirms only the original pending managed command: rejects forged %s', async field => {
+    const h = await connectedLedger(true, false)
+    const queued = await h.storage.store.create({ sessionId: asSessionId('confirmation-session'), requiredCriteriaIds: ['saved'] })
+    const run = await h.storage.store.transition(queued.runId, queued.version, 'running')
+    await h.storage.store.withExecution(run.runId, 0, async () => {
+      const result = h.bridge.requestTool('browser_snapshot', {}, new AbortController().signal)
+      await waitFor(() => h.frames.some(frame => frame.t === 'tool.call'))
+      const call = h.frames.find(frame => frame.t === 'tool.call')! as Extract<BridgeFrame, { t: 'tool.call' }>
+      const payload = { id: call.id, action: call.action, execution: call.execution, sessionId: call.sessionId }
+      const forged = { ...payload, ...(field === 'run' ? { execution: { kind: 'run', runId: 'other', controlRevision: 0 } }
+        : field === 'revision' ? { execution: { kind: 'run', runId: run.runId, controlRevision: 1 } }
+        : field === 'session' ? { sessionId: 'other-session' }
+        : field === 'mode' ? { execution: { kind: 'legacy' } }
+        : { action: { ...call.action, ...(field === 'action' ? { actionId: 'other' } : { requestDigest: 'b'.repeat(64) }) } }) }
+      send(h.ws, { t: 'rpc', id: 'forged', method: BRIDGE_CONFIRM_TOOL_METHOD, payload: forged })
+      await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === 'forged'))
+      expect(h.frames).toContainEqual(expect.objectContaining({ id: 'forged', ok: false, error: expect.objectContaining({ code: 'execution-denied' }) }))
+      send(h.ws, { t: 'rpc', id: 'valid', method: BRIDGE_CONFIRM_TOOL_METHOD, payload })
+      await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === 'valid'))
+      expect(h.frames).toContainEqual(expect.objectContaining({ id: 'valid', ok: true, result: { ...payload, confirmed: true } }))
+      send(h.ws, { t: 'rpc', id: 'renew', method: BRIDGE_CONFIRM_TOOL_METHOD, payload })
+      await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === 'renew'))
+      expect(h.frames).toContainEqual(expect.objectContaining({ id: 'renew', ok: false }))
+      send(h.ws, { t: 'tool.result', id: call.id, action: call.action, ok: true, result: { text: 'confirmed' } })
+      await expect(result).resolves.toEqual({ text: 'confirmed' })
+      expect(h.callMock).not.toHaveBeenCalled()
+    })
+  })
+
+  it('cannot promote a pending legacy command into a newly started run', async () => {
+    const h = await connectedLedger(true, false)
+    const result = h.bridge.requestTool('browser_snapshot', {}, new AbortController().signal, 2000, 'confirmation-legacy').catch(error => error)
+    await waitFor(() => h.frames.some(frame => frame.t === 'tool.call'))
+    const call = h.frames.find(frame => frame.t === 'tool.call')! as Extract<BridgeFrame, { t: 'tool.call' }>
+    const queued = await h.storage.store.create({ sessionId: asSessionId('confirmation-legacy'), requiredCriteriaIds: ['saved'] })
+    await h.storage.store.transition(queued.runId, queued.version, 'running')
+    send(h.ws, { t: 'rpc', id: 'legacy', method: BRIDGE_CONFIRM_TOOL_METHOD,
+      payload: { id: call.id, action: call.action, execution: call.execution, sessionId: call.sessionId } })
+    await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === 'legacy'))
+    expect(h.frames).toContainEqual(expect.objectContaining({ id: 'legacy', ok: false }))
+    send(h.ws, { t: 'tool.result', id: call.id, action: call.action, ok: true, result: {} })
+    expect(await result).toMatchObject({ code: 'execution-denied' })
+  })
+
+  it('refuses confirmation after the captured context ends or the connection is replaced', async () => {
+    const h = await connectedLedger(true, false)
+    const queued = await h.storage.store.create({ sessionId: asSessionId('confirmation-ended'), requiredCriteriaIds: ['saved'] })
+    const run = await h.storage.store.transition(queued.runId, queued.version, 'running')
+    let call!: Extract<BridgeFrame, { t: 'tool.call' }>
+    let result!: Promise<unknown>
+    await h.storage.store.withExecution(run.runId, 0, async () => {
+      result = h.bridge.requestTool('browser_snapshot', {}, new AbortController().signal).catch(error => error)
+      await waitFor(() => h.frames.some(frame => frame.t === 'tool.call'))
+      call = h.frames.find(frame => frame.t === 'tool.call')! as typeof call
+    })
+    const payload = { id: call.id, action: call.action, execution: call.execution, sessionId: call.sessionId }
+    send(h.ws, { t: 'rpc', id: 'ended', method: BRIDGE_CONFIRM_TOOL_METHOD, payload })
+    await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === 'ended'))
+    expect(h.frames).toContainEqual(expect.objectContaining({ id: 'ended', ok: false }))
+    const replacement = await connect(h.url, undefined, false)
+    send(replacement.ws, { t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: TOKEN, caps: CAPS })
+    await waitFor(() => replacement.frames.some(frame => frame.t === 'hello.ok'))
+    send(replacement.ws, { t: 'rpc', id: 'stolen', method: BRIDGE_CONFIRM_TOOL_METHOD, payload })
+    await waitFor(() => replacement.frames.some(frame => frame.t === 'rpc.result' && frame.id === 'stolen'))
+    expect(replacement.frames).toContainEqual(expect.objectContaining({ id: 'stolen', ok: false }))
+    expect(await result).toBeInstanceOf(BridgeToolError)
+  })
   it('handles run metadata internally and refuses control before authentication', async () => {
     const h = await connectedLedger(true)
     const store = h.storage.store

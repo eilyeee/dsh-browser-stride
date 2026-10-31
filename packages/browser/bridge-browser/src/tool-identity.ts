@@ -1,15 +1,18 @@
 /** Digest of the logical command, independent of its transport attempt. */
 import { canonicalize } from './contracts/ids.ts'
+import type { ToolExecutionScope } from './protocol.ts'
 
 export interface ToolCommandMaterial {
   actionId: string
   name: string
   args: Record<string, unknown>
   sessionId?: string
+  execution?: ToolExecutionScope
 }
 
 export function toolCommandMaterial(command: ToolCommandMaterial): string {
   return canonicalize({ actionId: command.actionId, name: command.name, args: command.args,
+    execution: command.execution ?? { kind: 'legacy' },
     ...(command.sessionId === undefined ? {} : { sessionId: command.sessionId }) })
 }
 

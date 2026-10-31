@@ -16,7 +16,10 @@
 export const BRIDGE_PATH = '/ext/bridge'
 
 /** Version of the WebSocket wire format, independent of task-runtime contracts. */
-export const BRIDGE_PROTOCOL_VERSION = 2
+export const BRIDGE_PROTOCOL_VERSION = 3
+
+/** Confirms one original pending request; it cannot create or renew execution. */
+export const BRIDGE_CONFIRM_TOOL_METHOD = 'bridge.tool.confirm'
 
 /** Terminal incompatibility: retry only after the user updates/reconfigures a peer. */
 export const PROTOCOL_MISMATCH_CLOSE_CODE = 4003
@@ -85,9 +88,35 @@ export type ToolErrorCode =
   | 'action-duplicate'
   | 'action-conflict'
   | 'receipt-unavailable'
+  | 'execution-denied'
 
 /** Host-issued logical command identity. It never grants browser permission. */
 export interface ToolActionIdentity { actionId: string; requestDigest: string }
+export type ToolExecutionScope = { kind: 'legacy' } | { kind: 'run'; runId: string; controlRevision: number }
+const wireId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 200 && value.trim() === value
+export function isToolExecutionScope(value: unknown): value is ToolExecutionScope {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const scope = value as Record<string, unknown>
+  return scope.kind === 'legacy' ? Object.keys(scope).length === 1
+    : scope.kind === 'run' && Object.keys(scope).length === 3 && wireId(scope.runId)
+      && Number.isSafeInteger(scope.controlRevision) && (scope.controlRevision as number) >= 0
+}
+export interface ToolDispatchConfirmation { id: string; action: ToolActionIdentity; execution: ToolExecutionScope; sessionId?: string }
+export function isToolDispatchConfirmation(value: unknown): value is ToolDispatchConfirmation {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const row = value as Record<string, unknown>
+  return wireId(row.id) && isToolActionIdentity(row.action) && isToolExecutionScope(row.execution)
+    && (row.sessionId === undefined || wireId(row.sessionId))
+    && (row.execution.kind === 'legacy' || row.sessionId !== undefined)
+    && Object.keys(row).every(key => ['id', 'action', 'execution', 'sessionId'].includes(key))
+}
+export function sameToolConfirmation(a: ToolDispatchConfirmation, b: ToolDispatchConfirmation): boolean {
+  return a.id === b.id && a.sessionId === b.sessionId
+    && a.action.actionId === b.action.actionId && a.action.requestDigest === b.action.requestDigest
+    && a.execution.kind === b.execution.kind
+    && (a.execution.kind === 'legacy' || (b.execution.kind === 'run'
+      && a.execution.runId === b.execution.runId && a.execution.controlRevision === b.execution.controlRevision))
+}
 export function isToolActionIdentity(value: unknown): value is ToolActionIdentity {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
   const action = value as Record<string, unknown>
@@ -144,7 +173,7 @@ export type ServerFrame =
   /** One bridge-owned event envelope projected from Remote streams and waterfalls. */
   | { t: 'event'; frame: { rpcId: string; method: string; payload: unknown } }
   /** A model-requested browser action to execute in the user-controlled tab. */
-  | { t: 'tool.call'; id: string; action: ToolActionIdentity; name: string; args: Record<string, unknown>; expiresAt: number; sessionId?: string }
+  | { t: 'tool.call'; id: string; action: ToolActionIdentity; execution: ToolExecutionScope; name: string; args: Record<string, unknown>; expiresAt: number; sessionId?: string }
   /** Withdraw a tool call that timed out or whose caller was cancelled. */
   | { t: 'tool.cancel'; id: string }
   /** Liveness probe. */
@@ -254,8 +283,8 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
         ? { t: 'event', frame: frame.frame as ServerFrame extends { t: 'event' } ? ServerFrame['frame'] : never }
         : undefined
     case 'tool.call':
-      if (frame.sessionId !== undefined
-        && (typeof frame.sessionId !== 'string' || frame.sessionId.trim() === '')) return undefined
+      if (!isToolDispatchConfirmation({ id: frame.id, action: frame.action, execution: frame.execution,
+        ...(frame.sessionId === undefined ? {} : { sessionId: frame.sessionId }) })) return undefined
       return typeof frame.id === 'string' && typeof frame.name === 'string' && isToolActionIdentity(frame.action)
         && typeof frame.args === 'object' && frame.args !== null && !Array.isArray(frame.args)
         && typeof frame.expiresAt === 'number' && Number.isFinite(frame.expiresAt) && frame.expiresAt > 0
@@ -263,6 +292,7 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
             t: 'tool.call',
             id: frame.id,
             action: frame.action,
+            execution: frame.execution as ToolExecutionScope,
             name: frame.name,
             args: frame.args as Record<string, unknown>,
             expiresAt: frame.expiresAt,

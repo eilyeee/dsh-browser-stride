@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ServerFrame } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 import { admitExecution, executeRecordedTool, finishExecution } from '../src/background/execution-receipts.ts'
 import { wireToolCall } from './wire-tool-call.ts'
+import { computeToolCommandDigest } from '@eilyeee/dsh-browser-stride/src/tool-identity.ts'
 
 type Call = Extract<ServerFrame, { t: 'tool.call' }>
 function call(patch: Partial<Call> = {}): Call {
@@ -28,6 +29,17 @@ async function records(): Promise<Record<string, unknown>[]> {
 }
 
 describe('persistent execution admission', () => {
+  it('binds managed run and control revision into the command digest', async () => {
+    const original = call({ sessionId: 'session-a', execution: { kind: 'run', runId: 'run-a', controlRevision: 0 } })
+    const work = vi.fn(async () => ({ ok: true }))
+    const material = { ...original, actionId: original.action.actionId }
+    expect(await computeToolCommandDigest(material)).toBe(original.action.requestDigest)
+    for (const execution of [{ kind: 'legacy' as const }, { kind: 'run' as const, runId: 'run-b', controlRevision: 0 }, { kind: 'run' as const, runId: 'run-a', controlRevision: 1 }]) {
+      expect((await executeRecordedTool({ ...original, execution }, signal(), work)).error?.code).toBe('action-conflict')
+    }
+    expect(work).not.toHaveBeenCalled()
+    expect(await indexedDB.databases()).toEqual([])
+  })
   it('commits one admission atomically across concurrent database connections', async () => {
     const action = call().action
     const results = await Promise.all(Array.from({ length: 8 }, () => admitExecution(action)))

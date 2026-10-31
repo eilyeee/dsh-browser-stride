@@ -107,7 +107,7 @@ describe('durable browser dispatch ledger', () => {
     expect(reopened.get('returned')).toEqual(returned)
   })
 
-  it('preserves historical transport-only rows without inventing a v2 action identity', async () => {
+  it('preserves historical transport-only rows without inventing a current action identity', async () => {
     const { ledger, store, open, dispatchFile } = await setup()
     await ledger.prepare(input())
     await store.close()
@@ -120,6 +120,21 @@ describe('durable browser dispatch ledger', () => {
     const historical = (await open()).dispatches.get('synthetic-request')!
     expect(historical.identityVersion).toBeUndefined()
     expect(historical.transportDigest).toBeUndefined()
+    expect(historical.requestDigest).toBe(row.requestDigest)
+    expect(historical.state).toBe('not_sent')
+  })
+
+  it('reads historical v2 rows without upgrading their command identity', async () => {
+    const { ledger, store, open, dispatchFile } = await setup()
+    await ledger.prepare(input())
+    await store.close()
+    const data = JSON.parse(await readFile(dispatchFile, 'utf8'))
+    const row = data.tables.dispatches['synthetic-request']
+    row.identityVersion = 2
+    row.requestDigest = 'b'.repeat(64)
+    await writeFile(dispatchFile, JSON.stringify(data))
+    const historical = (await open()).dispatches.get('synthetic-request')!
+    expect(historical.identityVersion).toBe(2)
     expect(historical.requestDigest).toBe(row.requestDigest)
     expect(historical.state).toBe('not_sent')
   })

@@ -21,7 +21,7 @@ const benchmarkRoot = join(repoRoot, 'benchmark')
 const require = createRequire(join(repoRoot, 'package.json'))
 const bridgeRequire = createRequire(join(repoRoot, 'packages/browser/bridge-browser/package.json'))
 const { WebSocketServer } = bridgeRequire('ws')
-const { BRIDGE_PROTOCOL_VERSION } = await import(pathToFileURL(join(repoRoot, 'packages/browser/bridge-browser/lib/protocol.js')).href)
+const { BRIDGE_PROTOCOL_VERSION, BRIDGE_CONFIRM_TOOL_METHOD, isToolDispatchConfirmation, sameToolConfirmation } = await import(pathToFileURL(join(repoRoot, 'packages/browser/bridge-browser/lib/protocol.js')).href)
 const { computeToolCommandDigest } = await import(pathToFileURL(join(repoRoot, 'packages/browser/bridge-browser/lib/index.js')).href)
 const cli = join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'lib/bin.js')
 const root = await mkdtemp(join(tmpdir(), 'stride-browser-smoke-'))
@@ -90,6 +90,16 @@ async function waitForPhase(phase) {
   throw new Error(`timed out waiting for browser probe phase ${phase}`)
 }
 
+function confirmSyntheticTool(socket, frame, commands) {
+  if (frame.t !== 'rpc' || frame.method !== BRIDGE_CONFIRM_TOOL_METHOD) return
+  const original = commands.get(frame.payload?.id)
+  const expected = original === undefined ? undefined : { id: original.id, action: original.action, execution: original.execution,
+    ...(original.sessionId === undefined ? {} : { sessionId: original.sessionId }) }
+  const ok = expected !== undefined && isToolDispatchConfirmation(frame.payload) && sameToolConfirmation(expected, frame.payload)
+  socket.send(JSON.stringify({ t: 'rpc.result', id: frame.id, ok,
+    ...(ok ? { result: { ...expected, confirmed: true } } : { error: { code: 'execution-denied', message: 'Synthetic request is not pending' } }) }))
+}
+
 async function verifyIncompatibleHost(protocolVersion, expectedState) {
   const args = { url: `${site.origin}/health` }
   const actionId = 'act_synthetic_incompatible'
@@ -110,7 +120,7 @@ async function verifyIncompatibleHost(protocolVersion, expectedState) {
       if (frame.t !== 'hello') return
       socket.send(JSON.stringify({ t: 'hello.ok', caps: frame.caps,
         ...(protocolVersion === undefined ? {} : { protocolVersion }) }))
-      socket.send(JSON.stringify({ t: 'tool.call', id: 'rejected-navigation', action, name: 'browser_navigate',
+      socket.send(JSON.stringify({ t: 'tool.call', execution: { kind: 'legacy' }, id: 'rejected-navigation', action, name: 'browser_navigate',
         args, expiresAt: Date.now() + 10000 }))
     })
   })
@@ -153,6 +163,7 @@ async function verifyPersistentExecutionFence() {
   let activeSocket
   let connections = 0
   const replies = new Map()
+  const commands = new Map()
   const server = createHttpServer((_req, res) => {
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end(JSON.stringify({ wsUrl: url }))
@@ -165,6 +176,7 @@ async function verifyPersistentExecutionFence() {
       const frame = JSON.parse(bytes.toString())
       if (frame.t === 'hello') socket.send(JSON.stringify({ t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps: frame.caps }))
       if (frame.t === 'tool.result') replies.set(frame.id, frame)
+      confirmSyntheticTool(socket, frame, commands)
     })
   })
   const destination = `${site.origin}/health?execution-fence=synthetic`
@@ -188,7 +200,9 @@ async function verifyPersistentExecutionFence() {
   const actionId = 'act_synthetic_persistent_execution'
   async function command(id, args) {
     const action = { actionId, requestDigest: await computeToolCommandDigest({ actionId, name: 'browser_navigate', args }) }
-    activeSocket.send(JSON.stringify({ t: 'tool.call', id, action, name: 'browser_navigate', args, expiresAt: Date.now() + 15000 }))
+    const call = { t: 'tool.call', id, action, execution: { kind: 'legacy' }, name: 'browser_navigate', args, expiresAt: Date.now() + 15000 }
+    commands.set(id, call)
+    activeSocket.send(JSON.stringify(call))
     const deadline = Date.now() + 20000
     while (Date.now() < deadline && !replies.has(id)) await delay(50)
     const reply = replies.get(id)
@@ -270,10 +284,12 @@ async function verifyPersistentExecutionFence() {
 async function verifyTargetFences() {
   const counts = { a: 0, b: 0 }
   const replies = new Map()
+  const commands = new Map()
   let activeSocket
   let other
   let opened
   let wsUrl
+  let heldConfirmation
   const sessionId = 'session-synthetic-target-fence'
   const server = createHttpServer((req, res) => {
     const path = new URL(req.url, 'http://localhost').pathname
@@ -298,6 +314,19 @@ async function verifyTargetFences() {
       const frame = JSON.parse(bytes.toString())
       if (frame.t === 'hello') socket.send(JSON.stringify({ t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps: frame.caps }))
       if (frame.t === 'tool.result') replies.set(frame.id, frame)
+      if (frame.t === 'rpc' && frame.method === BRIDGE_CONFIRM_TOOL_METHOD) {
+        if (frame.payload?.id === 'synthetic-authority-denied') {
+          socket.send(JSON.stringify({ t: 'rpc.result', id: frame.id, ok: false, error: { code: 'execution-denied', message: 'Synthetic context revoked' } }))
+          return
+        }
+        if (frame.payload?.id === 'synthetic-authority-tampered') {
+          socket.send(JSON.stringify({ t: 'rpc.result', id: frame.id, ok: true, result: { ...frame.payload,
+            execution: { ...frame.payload.execution, controlRevision: 3 }, confirmed: true } }))
+          return
+        }
+        if (frame.payload?.id === 'synthetic-authority-late') { heldConfirmation = { socket, frame }; return }
+      }
+      confirmSyntheticTool(socket, frame, commands)
     })
   })
   const wait = async (check, label) => {
@@ -308,10 +337,12 @@ async function verifyTargetFences() {
     }
     throw new Error(`Queued target smoke timed out: ${label}`)
   }
-  const actionFor = async (id, name = 'browser_press', args = { key: 'Enter' }) => {
+  const actionFor = async (id, name = 'browser_press', args = { key: 'Enter' }, execution = { kind: 'legacy' }) => {
     const actionId = `act_${id}`
-    const action = { actionId, requestDigest: await computeToolCommandDigest({ actionId, name, args, sessionId }) }
-    return { t: 'tool.call', id, action, name, args, sessionId, expiresAt: Date.now() + 15_000 }
+    const action = { actionId, requestDigest: await computeToolCommandDigest({ actionId, name, args, sessionId, execution }) }
+    const call = { t: 'tool.call', id, action, execution, name, args, sessionId, expiresAt: Date.now() + 15_000 }
+    commands.set(id, call)
+    return call
   }
   const receiptPhase = async actionId => await browser.worker.evaluate(id => new Promise((resolveAdmission, reject) => {
     const request = indexedDB.open('dsh-browser-execution', 1)
@@ -418,6 +449,28 @@ async function verifyTargetFences() {
     assert.equal(await browser.worker.evaluate(() => globalThis.__strideTargetFence.contextWrites.length), contextWritesBefore, 'a superseded checkpoint must not persist after a same-tab rebind')
     const recovered = await browser.worker.evaluate(async id => (await chrome.storage.session.get('dshPageSessionContexts')).dshPageSessionContexts?.tabs?.[id]?.urlKey, tabId)
     assert.equal(recovered, `${origin}/b/current`, 'the fresh page-to-conversation checkpoint must survive an old native read')
+
+    const managed = { kind: 'run', runId: 'run_synthetic_receiver', controlRevision: 2 }
+    for (const id of ['synthetic-authority-denied', 'synthetic-authority-tampered']) {
+      activeSocket.send(JSON.stringify(await actionFor(id, 'browser_press', { key: 'Enter' }, managed)))
+      await wait(() => replies.has(id), 'refused managed execution returned')
+      assert.equal(replies.get(id).error?.code, 'execution-denied')
+    }
+    const late = await actionFor('synthetic-authority-late', 'browser_press', { key: 'Enter' }, managed)
+    activeSocket.send(JSON.stringify(late))
+    await wait(() => heldConfirmation !== undefined, 'managed confirmation held')
+    activeSocket.send(JSON.stringify({ t: 'tool.cancel', id: late.id }))
+    await wait(() => replies.has(late.id), 'managed request cancelled before confirmation')
+    heldConfirmation.socket.send(JSON.stringify({ t: 'rpc.result', id: heldConfirmation.frame.id, ok: true,
+      result: { ...heldConfirmation.frame.payload, confirmed: true } }))
+    const current = await actionFor('synthetic-authority-current', 'browser_press', { key: 'Enter' }, managed)
+    activeSocket.send(JSON.stringify(current))
+    await wait(() => replies.has(current.id), 'fresh managed request completed')
+    assert.equal(replies.get(current.id).ok, true)
+    await wait(() => counts.b === 2, 'exactly one new managed effect')
+    assert.deepEqual(counts, { a: 1, b: 2 }, 'refused, forged and late confirmations must have no page effects')
+    assert.equal(await browser.worker.evaluate(() => globalThis.__strideTargetFence.sends.length), 3)
+    console.log('Receiver execution fence passed: denied and forged revisions have no effect; late confirmation cannot revive cancellation; fresh managed call executes once')
 
     const openCall = await actionFor('synthetic-target-open', 'browser_open_tab', { url: `${origin}/opened`, active: false })
     activeSocket.send(JSON.stringify(openCall))
@@ -573,7 +626,7 @@ try {
   await verifyIncompatibleHost(undefined, 'update-host')
   await verifyIncompatibleHost(BRIDGE_PROTOCOL_VERSION - 1, 'update-host')
   await verifyIncompatibleHost(BRIDGE_PROTOCOL_VERSION + 1, 'update-extension')
-  console.log('Browser smoke passed: owner-confirmed pairing UI, authentication fence, reconnect after reload, real DSH tools, panel pause/stop and executor acknowledgement, run/revision dispatch metadata, revoked old contexts, queued-target revocation without write overtaking, checkpoint owner fence, current-owner tab creation, durable v2 identities, persistent replay/conflict rejection across worker restart, origin isolation, revocation and independent site state (no model)')
+  console.log('Browser smoke passed: owner-confirmed pairing UI, authentication fence, reconnect after reload, real DSH tools, panel pause/stop and executor acknowledgement, run/revision dispatch metadata, revoked old contexts, queued-target revocation without write overtaking, checkpoint owner fence, receiver execution confirmation/revocation, current-owner tab creation, durable v3 identities and Host execution confirmation, persistent replay/conflict rejection across worker restart, origin isolation, revocation and independent site state (no model)')
 } finally {
   await browser?.close().catch(() => {})
   await host?.close().catch(() => {})

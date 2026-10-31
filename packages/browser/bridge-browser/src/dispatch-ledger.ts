@@ -11,7 +11,7 @@ const time = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER)
 const reason = z.enum(['cancelled', 'expired', 'connection-closed', 'send-failed', 'interrupted'])
 const errorCode = z.enum([
   'no-active-tab', 'content-unavailable', 'action-failed', 'timeout', 'bridge-closed', 'bad-args', 'internal', 'unknown',
-  'action-duplicate', 'action-conflict', 'receipt-unavailable',
+  'action-duplicate', 'action-conflict', 'receipt-unavailable', 'execution-denied',
 ])
 const receipt = z.strictObject({ ok: z.boolean(), errorCode: errorCode.optional() })
   .refine(value => value.ok ? value.errorCode === undefined : value.errorCode !== undefined)
@@ -22,7 +22,7 @@ export function transportReceipt(ok: boolean, code?: string): z.infer<typeof rec
 const recordSchema = z.strictObject({
   actionId: id, requestId: id, connectionId: id,
   requestDigest: z.string().regex(/^[a-f0-9]{64}$/),
-  identityVersion: z.literal(2).optional(),
+  identityVersion: z.union([z.literal(2), z.literal(3)]).optional(),
   transportDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   installationId: id.optional(), sessionId: id.optional(), name: id,
   runId: id.optional(), controlRevision: time.optional(),
@@ -37,8 +37,8 @@ const recordSchema = z.strictObject({
   const settled = row.settledAt !== undefined
   const valid = row.expiresAt > 0
     && ((row.runId === undefined) === (row.controlRevision === undefined))
-    && (row.runId === undefined || (row.sessionId !== undefined && row.identityVersion === 2))
-    && (row.identityVersion === 2 ? row.transportDigest !== undefined : row.transportDigest === undefined)
+    && (row.runId === undefined || (row.sessionId !== undefined && row.identityVersion !== undefined))
+    && (row.identityVersion !== undefined ? row.transportDigest !== undefined : row.transportDigest === undefined)
     && row.effect === (isReadOnlyBrowserTool(row.name) ? 'read' : 'write')
     && (row.dispatchMarkedAt === undefined || row.dispatchMarkedAt >= row.preparedAt)
     && (row.settledAt === undefined || row.settledAt >= (row.dispatchMarkedAt ?? row.preparedAt))
@@ -129,8 +129,9 @@ export class BrowserDispatchLedger {
       }
       const actionId = makeActionId()
       const requestDigest = createHash('sha256').update(toolCommandMaterial({ actionId, name: metadata.name, args,
+        execution: metadata.runId === undefined ? { kind: 'legacy' } : { kind: 'run', runId: metadata.runId, controlRevision: metadata.controlRevision! },
         ...(metadata.sessionId === undefined ? {} : { sessionId: metadata.sessionId }) })).digest('hex')
-      const candidate = recordSchema.parse({ ...metadata, actionId, requestDigest, transportDigest, identityVersion: 2,
+      const candidate = recordSchema.parse({ ...metadata, actionId, requestDigest, transportDigest, identityVersion: 3,
         effect: isReadOnlyBrowserTool(metadata.name) ? 'read' : 'write', state: 'prepared', preparedAt: Date.now() })
       await this.persist(candidate)
       return structuredClone(candidate)

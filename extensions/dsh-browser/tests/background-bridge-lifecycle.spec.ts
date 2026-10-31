@@ -2,7 +2,7 @@
 
 import { BRIDGE_PROTOCOL_VERSION } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { wireToolCall } from './wire-tool-call.ts'
+import { wireToolCall, confirmTestTool } from './wire-tool-call.ts'
 import { PAGE_SESSION_CONTEXT_STORAGE_KEY } from '../src/background/session-continuity.ts'
 
 class FakeWebSocket extends EventTarget {
@@ -13,6 +13,7 @@ class FakeWebSocket extends EventTarget {
 
   readyState = FakeWebSocket.CONNECTING
   readonly sent: unknown[] = []
+  autoConfirm = true
 
   constructor(readonly url: string) {
     super()
@@ -20,7 +21,9 @@ class FakeWebSocket extends EventTarget {
   }
 
   send(value: string): void {
-    this.sent.push(JSON.parse(value))
+    const frame = JSON.parse(value)
+    this.sent.push(frame)
+    if (this.autoConfirm) queueMicrotask(() => confirmTestTool(frame, reply => this.receive(reply)))
   }
 
   open(): void {

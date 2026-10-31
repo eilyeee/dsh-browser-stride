@@ -34,6 +34,7 @@
 
 import {
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
+  BRIDGE_CONFIRM_TOOL_METHOD,
   isRespondResult,
   type BridgeCaps,
   type RespondResult,
@@ -44,6 +45,7 @@ import { BridgeClient, type BridgeState } from './bridge.ts'
 import { readBridgeCredential, writeBridgeCredential } from './credential-store.ts'
 import { needsWriteTurn, WriteQueue } from './write-queue.ts'
 import { executeRecordedTool } from './execution-receipts.ts'
+import { ToolExecutionFence } from './execution-authority.ts'
 import { localBridgeUrl } from './bridge-address.ts'
 import { requestBrowserPairing, type BrowserPairingStatus } from './pairing-client.ts'
 import { createRpc, BridgeRpcError } from './rpc.ts'
@@ -199,6 +201,8 @@ void chrome.storage.session.remove(LEGACY_RECENT_SESSION_STORAGE_KEY).catch(() =
 const sessionTrustedActionOrigins = new Set<string>()
 /** Tool calls that are either withdrawable or completing an already-dispatched action. */
 interface ActiveToolCall {
+  executionFence: ToolExecutionFence
+  managed: boolean
   targetLease?: ToolTargetLease
   controller: AbortController
   unrestrictedAccess: boolean
@@ -624,7 +628,7 @@ function selectedTargetIdentity(sessionId?: string): ToolTargetIdentity | undefi
 }
 
 const staleTarget = (): ToolAnswer => ({ ok: false, error: { code: 'action-failed',
-  message: 'The browser target changed after this request arrived. Its result cannot be used; observe the selected page before a new action.' } })
+  message: 'The browser target or execution authority changed after this request arrived. Its result cannot be used; observe the selected page before a new action.' } })
 
 /** Pin before receipt storage, approvals or the write queue can await anything. */
 function captureToolTarget(sessionId?: string): ToolTargetLease | ToolAnswer {
@@ -1188,7 +1192,11 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
   const controller = new AbortController()
   const unrestrictedAccess = unrestrictedAccessEnabled()
   let settle!: () => void
+  const callRpc = rpc
+  const executionFence = new ToolExecutionFence(call, () => activeToolCalls.get(call.id) === activeCall)
   const activeCall: ActiveToolCall = {
+    executionFence,
+    managed: call.execution.kind === 'run',
     controller,
     unrestrictedAccess,
     committed: false,
@@ -1201,7 +1209,7 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
   const target = isTabManagementTool(call.name) || call.name === 'browser_open_tab' ? undefined : captureToolTarget(call.sessionId)
   if (target !== undefined && !('ok' in target)) activeCall.targetLease = target
   const isCurrentCall = (): boolean => activeToolCalls.get(call.id) === activeCall
-  const targetAllowed = (): boolean => isCurrentCall() && (activeCall.targetLease === undefined
+  const targetAllowed = (): boolean => isCurrentCall() && executionFence.current() && (activeCall.targetLease === undefined
     || (activeCall.committed ? activeCall.targetLease.sameBinding() : activeCall.targetLease.current()))
   const commitAction = (): void => {
     if (!targetAllowed()) throw new Error('Browser target lease expired before dispatch')
@@ -1246,7 +1254,7 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
       {
         unrestrictedAccess,
         ...(controlledTabId === undefined ? {} : { controlledTabId }),
-        followTab: (tab) => followModelSelectedTab(tab, call.sessionId, isCurrentCall),
+        followTab: (tab) => followModelSelectedTab(tab, call.sessionId, targetAllowed),
         commitAction,
         rollbackActionCommit,
       },
@@ -1264,8 +1272,8 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
           budget,
           (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, call.sessionId, unrestrictedAccess),
           controller.signal,
-          (tab) => bindOpenedTab(tab, call.sessionId, isCurrentCall, { active: call.args.active !== false }),
-          (tabId) => isCurrentCall() && tabAffinity.allowsTarget(tabId, call.sessionId),
+          (tab) => bindOpenedTab(tab, call.sessionId, targetAllowed, { active: call.args.active !== false }),
+          (tabId) => targetAllowed() && tabAffinity.allowsTarget(tabId, call.sessionId),
           commitAction,
         ))
     : (target === undefined || 'ok' in target ? Promise.resolve(target ?? affinityFailure('missing'))
@@ -1283,6 +1291,10 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
         ))
   )
   const dispatchAndCheckpoint = async (): Promise<ToolAnswer> => {
+    if (callRpc === null || !await executionFence.confirm(payload => callRpc.request(BRIDGE_CONFIRM_TOOL_METHOD, payload, {
+      signal: controller.signal, timeoutMs: Math.min(5000, call.expiresAt - Date.now()),
+    }), controller.signal)) return { ok: false, error: { code: 'execution-denied',
+      message: 'The Host did not confirm this request’s original execution context; no browser tool was dispatched.' } }
     const sharingAtDispatch = pageSharingRevision
     let answer = await dispatch()
     if (!targetAllowed()) return staleTarget()
@@ -1305,7 +1317,7 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
   void result.then(
     async (answer) => {
       if (activeToolCalls.get(call.id) !== activeCall) return
-      if (!targetAllowed()) answer = staleTarget()
+      if (answer.ok && !targetAllowed()) answer = staleTarget()
       // A committed browser_open_tab already rebound affinity; prefer that
       // factual success over a generic cancel that would leave the model wrong.
       if (controller.signal.aborted && !(call.name === 'browser_open_tab' && answer.ok)) {
@@ -1360,7 +1372,10 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
 
 function cancelToolCall(id: string): void {
   const call = activeToolCalls.get(id)
-  if (call !== undefined && !call.committed) call.controller.abort()
+  if (call !== undefined) {
+    if (!call.committed || call.managed) call.executionFence.revoke()
+    if (!call.committed) call.controller.abort()
+  }
 }
 
 async function revokeUnrestrictedAccess(): Promise<void> {
@@ -1380,6 +1395,7 @@ async function revokeUnrestrictedAccess(): Promise<void> {
 function cancelAllToolCalls(): void {
   targetLeases.revokeAll()
   for (const call of activeToolCalls.values()) {
+    call.executionFence.revoke()
     if (!call.committed) call.controller.abort()
   }
   activeToolCalls.clear()

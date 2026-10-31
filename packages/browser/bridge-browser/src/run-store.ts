@@ -189,13 +189,28 @@ export class BrowserRunStore {
       if (sessionId !== undefined && execution.sessionId !== sessionId) throw new BrowserRunStoreError('execution-session-mismatch')
       return execution
     }
+    this.assertDispatchAuthority(undefined, sessionId)
+    return undefined
+  }
+
+  /** Revalidate the captured Host object from another async chain, never wire ids. */
+  assertDispatchAuthority(execution: BrowserRunExecution | undefined, sessionId?: string): void {
+    this.assertOpen()
+    if (this.writeFaulted) throw new BrowserRunStoreError('storage-unavailable')
+    if (execution !== undefined) {
+      const context = [...this.executions].find(item => item.execution === execution)
+      if (context === undefined || !context.active || context.controller.signal.aborted) throw new BrowserRunStoreError('execution-context-expired')
+      try { this.executionRun(execution.runId, execution.controlRevision) }
+      catch (error) { context.controller.abort(error); throw error }
+      if (sessionId !== undefined && execution.sessionId !== sessionId) throw new BrowserRunStoreError('execution-session-mismatch')
+      return
+    }
     for (const [, run] of this.domain.table('runs').entries()) {
       if (sessionId !== undefined && sessionId !== run.sessionId) continue
       this.assertTransportReconciled(run.sessionId, 'managed')
       if (run.recoveryRequired || summarizeActionFacts(run.facts).pendingReconciliation.length > 0) throw new BrowserRunStoreError('reconciliation-required')
       if (!isTerminal(run.state) && run.state !== 'queued') throw new BrowserRunStoreError('execution-context-required')
     }
-    return undefined
   }
 
   private executionRun(runId: RunId, controlRevision: number, pending: 'all' | 'managed' | 'none' = 'none'): BrowserRunRecord {

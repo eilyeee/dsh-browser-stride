@@ -15,6 +15,17 @@ async function setup() {
 }
 
 describe('trusted Host run execution scopes', () => {
+  it('revalidates only the original Host object, never a copy of wire ids', async () => {
+    const { store, run } = await setup()
+    let captured!: NonNullable<ReturnType<typeof store.executionFor>>
+    await store.withExecution(run.runId, 0, () => {
+      captured = store.executionFor()!
+      expect(() => store.assertDispatchAuthority(captured, run.sessionId)).not.toThrow()
+      expect(() => store.assertDispatchAuthority({ ...captured }, run.sessionId)).toThrow('execution-context-expired')
+      expect(() => store.assertDispatchAuthority(captured, 'other-session')).toThrow('execution-session-mismatch')
+    })
+    expect(() => store.assertDispatchAuthority(captured, run.sessionId)).toThrow('execution-context-expired')
+  })
   it('revokes a new run when a late uncertain fact arrives for an older run in the same session', async () => {
     const { store, run } = await setup()
     const stopping = await store.control(run.runId, run.version, 'stop')
