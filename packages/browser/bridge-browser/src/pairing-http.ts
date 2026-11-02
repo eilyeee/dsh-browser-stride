@@ -15,7 +15,7 @@ function respond(res: ServerResponse, status: number, value: unknown): void {
 }
 
 /** Public admission creates only a bounded request; it never authorizes a browser. */
-export function createPairingRequestRoute(requests: PairingRequests): WebRoute {
+export function createPairingRequestRoute(requests: PairingRequests, self?: { store: PairingStore; server: BridgeServer }): WebRoute {
   return {
     kind: 'exact', path: PAIRING_REQUEST_PATH,
     handler: async (req, res) => {
@@ -33,7 +33,16 @@ export function createPairingRequestRoute(requests: PairingRequests): WebRoute {
         const input = await body(req)
         if (typeof input !== 'object' || input === null || Array.isArray(input)) throw new Error('invalid-request')
         const request = input as Record<string, unknown>
-        if (request.action === 'request') {
+        if (request.action === 'unpair') {
+          if (self === undefined) { respond(res, 404, { error: 'unpair-unavailable' }); return }
+          if (typeof request.installationId !== 'string' || typeof request.credential !== 'string') throw new Error('invalid-request')
+          const id = request.installationId
+          const revoked = await self.store.revokeCredential(id, request.credential, () => {
+            requests.revokeInstallation(id)
+            self.server.revokeInstallation(id)
+          })
+          respond(res, revoked ? 200 : 403, revoked ? { revoked: true } : { error: 'credential-required' })
+        } else if (request.action === 'request') {
           if (request.protocolVersion !== BRIDGE_PROTOCOL_VERSION) {
             respond(res, 409, { error: typeof request.protocolVersion === 'number' && request.protocolVersion > BRIDGE_PROTOCOL_VERSION
               ? 'protocol-upgrade-host' : 'protocol-upgrade-extension' })

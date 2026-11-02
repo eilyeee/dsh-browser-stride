@@ -298,6 +298,29 @@ describe('real Loader composition', () => {
     expect((await stale.closed).code).toBe(4002)
   })
 
+  it('accepts self-unpairing only with the current installation credential and closes its socket', async () => {
+    const { port } = await loadComposition()
+    const client = await connectReady(port)
+    const hello = client.frames.find(frame => frame.t === 'hello.ok')
+    const credential = hello?.t === 'hello.ok' ? hello.credential! : ''
+    const endpoint = `http://127.0.0.1:${port}/ext/bridge-pairing-request`
+    const unpair = (token: string, id = 'composition-installation-123456', origin?: string) => fetch(endpoint, {
+      method: 'POST', headers: { 'content-type': 'application/json', ...(origin ? { origin } : {}) },
+      body: JSON.stringify({ action: 'unpair', installationId: id, credential: token }),
+    })
+    expect((await unpair(TOKEN)).status).toBe(403)
+    expect((await unpair(credential, 'another-installation-123456')).status).toBe(403)
+    expect((await unpair(credential, undefined, 'https://example.com')).status).toBe(403)
+    expect(client.ws.readyState).toBe(WebSocket.OPEN)
+    const response = await unpair(credential, undefined, `chrome-extension://${'a'.repeat(32)}`)
+    expect(await response.json()).toEqual({ revoked: true })
+    expect((await client.closed).code).toBe(4000)
+    expect((await unpair(credential)).status).toBe(403)
+    const stale = await connect(port)
+    send(stale.ws, { t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: credential, installationId: 'composition-installation-123456', caps: { textOnly: true, snapshotMaxChars: 32000, maxInteractiveItems: 60 } })
+    expect((await stale.closed).code).toBe(4002)
+  })
+
   it.each(['native', 'migrated'] as const)('supersedes a %s followed page through the durable inbox without waking an idle Agent', async (snapshotKind) => {
     const { ctx, port } = await loadComposition()
     const client = await connectReady(port)

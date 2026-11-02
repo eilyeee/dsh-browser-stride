@@ -24,10 +24,11 @@ no release version has been assigned yet.
 
 ### Added
 
-- The bound-page banner provides **Unbind page**, preserving the page, conversation
-  and DSH pairing. Running tasks must first be paused or stopped. Explicit
-  revocation survives extension reloads, cancels pending browser approvals and
-  fences late callbacks; model tools cannot restore it. Rebinding stays explicit.
+- Extension settings provide **Unpair DSH**: stop reconnecting, remove the local
+  credential and, when reachable, revoke that installation on the Host. The
+  disconnected state survives browser restarts and requires explicit pairing to
+  reconnect. Offline unpairing reports that Host revocation is unconfirmed.
+  Open pages and conversations are preserved; there is no page-unbinding button.
 
 - DSH Web's explicit `/browser <goal>` command creates a waiting task without
   waking its Agent. The extension's trusted **Bind and start** action reserves

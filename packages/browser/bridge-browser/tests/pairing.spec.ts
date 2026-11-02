@@ -17,6 +17,23 @@ async function store(now?: () => number): Promise<{ file: string; pairing: Pairi
 }
 
 describe('installation pairing authority', () => {
+  it('self-revokes only the exact current credential and closes it before queued enrollment', async () => {
+    const { file, pairing } = await store()
+    const id = 'installation-111111111111'
+    const old = (await pairing.authenticate(id, pairing.issue().code))!.credential!
+    const current = (await pairing.authenticate(id, pairing.issue().code))!.credential!
+    let closed = 0
+    expect(await pairing.revokeCredential(id, old, () => { closed++ })).toBe(false)
+    expect(await pairing.revokeCredential('installation-222222222222', current, () => { closed++ })).toBe(false)
+    const revoked = pairing.revokeCredential(id, current, () => { closed++ })
+    const enrolled = pairing.enroll(id).then(value => { expect(closed).toBe(1); return value })
+    expect(await revoked).toBe(true)
+    const fresh = await enrolled
+    expect(closed).toBe(1)
+    expect(await new PairingStore(file).authenticate(id, current)).toBeUndefined()
+    expect(await pairing.authenticate(id, fresh!)).toEqual({})
+  })
+
   it('consumes a code once, stores only a hash, and survives a restart', async () => {
     const { file, pairing } = await store()
     const { code } = pairing.issue()

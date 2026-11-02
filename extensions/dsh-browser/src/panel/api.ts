@@ -51,6 +51,8 @@ interface StatusMessage {
   type: 'status'
   state: BridgeState
   caps: BridgeCaps | null
+  connectionDisconnected?: boolean
+  hasCredential?: boolean
 }
 
 interface EventMessage {
@@ -90,7 +92,7 @@ interface SessionResumeHintMessage {
   sessionId: string | null
 }
 
-type BackgroundMessage = RpcResultMessage | RespondResultMessage | SettingsResultMessage | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | (Omit<TabAffinityRebindResultMessage, 'type'> & { type: 'browser-run.retarget.result' | 'tab-affinity.unbind.result' }) | SelectionMessage | SessionResumeHintMessage | { type: 'browser-pairing'; status: BrowserPairingStatus }
+type BackgroundMessage = RpcResultMessage | RespondResultMessage | SettingsResultMessage | (Omit<SettingsResultMessage, 'type'> & { type: 'browser-pairing.unpair.result' }) | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | (Omit<TabAffinityRebindResultMessage, 'type'> & { type: 'browser-run.retarget.result' | 'tab-affinity.unbind.result' }) | SelectionMessage | SessionResumeHintMessage | { type: 'browser-pairing'; status: BrowserPairingStatus }
 
 /** Structured gateway failure retained for product-level error handling. */
 export class PanelRpcError extends Error {
@@ -116,10 +118,11 @@ function panelRpcError(failure: RpcFailurePayload | undefined, fallbackMessage: 
 export interface PanelApi {
   startBrowserPairing(bridgeUrl: string): Promise<void>
   cancelBrowserPairing(): Promise<void>
+  unpairBrowser(): Promise<void>
   onBrowserPairing(callback: (status: BrowserPairingStatus) => void): () => void
   rpc<T = unknown>(method: string, payload?: unknown): Promise<T>
   respond(rpcId: string, result: RespondResult): Promise<unknown>
-  onStatus(callback: (state: BridgeState, caps: BridgeCaps | null) => void): () => void
+  onStatus(callback: (state: BridgeState, caps: BridgeCaps | null, connection?: { connectionDisconnected?: boolean; hasCredential?: boolean }) => void): () => void
   onEvent(callback: (frame: ServerFrame) => void): () => void
   onApprovalRequest(callback: (request: ApprovalRequest) => void): () => void
   onApprovalResolved(callback: (id: string) => void): () => void
@@ -156,7 +159,7 @@ export function connectPanel(): PanelApi {
     resolve: () => void
     reject: (error: Error) => void
   }>()
-  const statusListeners = new Set<(state: BridgeState, caps: BridgeCaps | null) => void>()
+  const statusListeners = new Set<Parameters<PanelApi['onStatus']>[0]>()
   const pairingListeners = new Set<(status: BrowserPairingStatus) => void>()
   const eventListeners = new Set<(frame: ServerFrame) => void>()
   const approvalListeners = new Set<(request: ApprovalRequest) => void>()
@@ -201,6 +204,7 @@ export function connectPanel(): PanelApi {
           ?? (getUiLocale() === 'zh' ? '回答提交失败' : 'Failed to send the answer')))
         break
       }
+      case 'browser-pairing.unpair.result':
       case 'settings.result': {
         const entry = pendingSettings.get(msg.id)
         if (entry === undefined) return
@@ -212,7 +216,10 @@ export function connectPanel(): PanelApi {
         break
       }
       case 'status':
-        for (const listener of statusListeners) listener(msg.state, msg.caps)
+        for (const listener of statusListeners) {
+          if (msg.connectionDisconnected === undefined && msg.hasCredential === undefined) listener(msg.state, msg.caps)
+          else listener(msg.state, msg.caps, { connectionDisconnected: msg.connectionDisconnected, hasCredential: msg.hasCredential })
+        }
         break
       case 'event':
         for (const listener of eventListeners) listener(msg.frame)
@@ -358,6 +365,18 @@ export function connectPanel(): PanelApi {
   return {
     startBrowserPairing(bridgeUrl) { return send({ type: 'browser-pairing.start', bridgeUrl }) },
     cancelBrowserPairing() { return send({ type: 'browser-pairing.cancel' }) },
+    unpairBrowser() {
+      const id = crypto.randomUUID()
+      return new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => { pendingSettings.delete(id); reject(new PanelRpcError('timeout', getUiLocale() === 'zh' ? '解绑结果尚未确认，请核对连接状态' : 'Unpairing was not confirmed. Check the connection status.')) }, 15000)
+        const entry = { resolve: () => { clearTimeout(timer); resolve() }, reject: (error: Error) => { clearTimeout(timer); reject(error) } }
+        pendingSettings.set(id, entry)
+        void send({ type: 'browser-pairing.unpair', id }, { kind: 'settings', id }).catch((error: unknown) => {
+          if (pendingSettings.get(id) !== entry) return
+          pendingSettings.delete(id); entry.reject(connectionError(error))
+        })
+      })
+    },
     onBrowserPairing(callback) { pairingListeners.add(callback); return () => { pairingListeners.delete(callback) } },
     rpc<T>(method: string, payload?: unknown): Promise<T> {
       const id = crypto.randomUUID()

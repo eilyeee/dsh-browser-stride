@@ -157,6 +157,58 @@ afterEach(() => {
 })
 
 describe('background bridge lifecycle', () => {
+  it.each([true, false])('unpairs DSH locally even when remote revocation succeeds=%s and only resumes after explicit pairing', async remoteRevoked => {
+    const credential = 'c'.repeat(64)
+    const { readBridgeCredential, readBridgeDisconnected } = await import('../src/background/credential-store.ts')
+    const h = mockChrome({ localGet: async () => ({ dshSettings: { bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge', token: credential } }) })
+    const discoveryFetch = fetch
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+    const panel = panelPort(); h.onConnect.emit(panel.port)
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const socket = FakeWebSocket.instances[0]!
+    socket.open(); await Promise.resolve()
+    socket.receive({ t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps: { textOnly: true, snapshotMaxChars: 32000, maxInteractiveItems: 60 } })
+    await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'status', state: 'connected' })))
+    const revoke = vi.fn(async (_url: string, init?: RequestInit) => {
+      expect(JSON.parse(init!.body as string)).toMatchObject({ action: 'unpair', credential })
+      if (!remoteRevoked) throw new Error('offline')
+      return Response.json({ revoked: true })
+    })
+    vi.stubGlobal('fetch', revoke)
+    panel.onMessage.emit({ type: 'browser-pairing.unpair', id: 'disconnect' })
+    await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith({ type: 'browser-pairing.unpair.result', id: 'disconnect', ok: true, result: { remoteRevoked } }))
+    expect(socket.readyState).toBe(FakeWebSocket.CLOSED)
+    expect(await readBridgeCredential()).toBeUndefined()
+    expect(await readBridgeDisconnected()).toBe(true)
+    expect(revoke).toHaveBeenCalledTimes(1)
+    expect(panel.postMessage.mock.calls.filter(([message]) => message.type === 'status').at(-1)![0])
+      .toMatchObject({ connectionDisconnected: true, hasCredential: false })
+    panel.onDisconnect.emit()
+    const next = panelPort(); h.onConnect.emit(next.port)
+    h.alarms.onAlarm.emit({ name: 'bridge-keepalive' } as chrome.alarms.Alarm)
+    await new Promise(resolve => setTimeout(resolve, 30))
+    expect(FakeWebSocket.instances).toHaveLength(1)
+    vi.stubGlobal('fetch', discoveryFetch)
+    next.onMessage.emit({ type: 'settings', id: 'fresh', settings: { token: 'd'.repeat(64) } })
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2))
+    expect(await readBridgeDisconnected()).toBe(false)
+    next.onDisconnect.emit(); FakeWebSocket.instances[1]!.close()
+  })
+
+  it('does not migrate an old public credential or connect after a worker restart while unpaired', async () => {
+    const { writeBridgeCredential } = await import('../src/background/credential-store.ts')
+    await writeBridgeCredential('', 'disable')
+    const h = mockChrome({ localGet: async () => ({ dshSettings: { token: 'old-credential', bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge' } }) })
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+    const panel = panelPort(); h.onConnect.emit(panel.port)
+    await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'status', connectionDisconnected: true, hasCredential: false })))
+    expect(FakeWebSocket.instances).toHaveLength(0)
+    expect(fetch).not.toHaveBeenCalled()
+    panel.onDisconnect.emit()
+  })
+
   it.each([false, true])('does not let an already-started tab creation restore revoked authority after a fresh binding=%s', async rebind => {
     let finish!: () => void
     const hold = new Promise<void>(resolve => { finish = resolve })

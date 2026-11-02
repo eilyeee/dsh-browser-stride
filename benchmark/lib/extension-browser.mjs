@@ -106,7 +106,7 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
       target,
       executablePath,
       /** Keep installation data while replacing the whole browser/worker lifetime. */
-      async restart() {
+      async restart({ connected = true } = {}) {
         const targetUrl = target.url()
         await context.close()
         context = await launch()
@@ -117,7 +117,7 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
         panel.setDefaultTimeout(actionTimeoutMs)
         await panel.goto(`chrome-extension://${extensionId}/panel/index.html`)
         await panel.waitForSelector('header.topbar', { timeout: 15000 })
-        await panel.locator('.connection .dot.connected').waitFor({ state: 'visible', timeout: connectTimeoutMs })
+        if (connected) await panel.locator('.connection .dot.connected').waitFor({ state: 'visible', timeout: connectTimeoutMs })
         worker = context.serviceWorkers().find(value => new URL(value.url()).host === extensionId)
           ?? await context.waitForEvent('serviceworker', { timeout: 15000 })
         await panel.evaluate(() => { window.__dshBenchmarkPort = chrome.runtime.connect({ name: 'dsh-panel' }) })

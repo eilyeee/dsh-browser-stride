@@ -50,13 +50,13 @@ import {
 import type { ServerFrame } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 import { BRIDGE_CONFIG_PATH, BRIDGE_PATH } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 import { BridgeClient, type BridgeState } from './bridge.ts'
-import { readBridgeCredential, writeBridgeCredential } from './credential-store.ts'
+import { readBridgeCredential, readBridgeDisconnected, writeBridgeCredential } from './credential-store.ts'
 import { needsWriteTurn, WriteQueue } from './write-queue.ts'
 import { executeRecordedTool } from './execution-receipts.ts'
 import { ToolExecutionFence } from './execution-authority.ts'
 import { RunTargetRegistry, type RunTargetBinding } from './run-targets.ts'
 import { localBridgeUrl } from './bridge-address.ts'
-import { requestBrowserPairing, type BrowserPairingStatus } from './pairing-client.ts'
+import { requestBrowserPairing, revokeBrowserPairing, type BrowserPairingStatus } from './pairing-client.ts'
 import { createRpc, BridgeRpcError } from './rpc.ts'
 import { TargetLeaseRegistry, type ToolTargetLease, type ToolTargetIdentity } from './target-leases.ts'
 import {
@@ -182,6 +182,12 @@ type StoredTabAffinity = { detached?: true; detachedSessions?: string[] } & (
   | { lost: true; sessionTabs?: Record<string, AffinityTab>; focusedSessionId?: string })
 
 let settings: Settings = { ...SETTINGS_DEFAULTS }
+let connectionDisconnected = false
+let connectionControlRevision = 0
+let unpairing = false
+let activeBridgeUrl: string | undefined
+let activePairing: { url: string; credential: string; installationId: string } | undefined
+let activeInstallationId = ''
 let unrestrictedAccessActive = SETTINGS_DEFAULTS.unrestrictedBrowserAccess
 let unrestrictedAccessRevision = 0
 let pageSharingRevision = 0
@@ -289,8 +295,9 @@ async function loadSettings(): Promise<Settings> {
   }
   const stored = await chrome.storage.local.get(STORAGE_KEY)
   const previous = stored[STORAGE_KEY] as Partial<Settings> | undefined
-  let credential = await readBridgeCredential()
-  if (credential === undefined && typeof previous?.token === 'string' && previous.token !== '') {
+  connectionDisconnected = await readBridgeDisconnected()
+  let credential = connectionDisconnected ? undefined : await readBridgeCredential()
+  if (!connectionDisconnected && credential === undefined && typeof previous?.token === 'string' && previous.token !== '') {
     credential = previous.token
     await writeBridgeCredential(credential)
   }
@@ -304,7 +311,9 @@ async function loadSettings(): Promise<Settings> {
   return loaded
 }
 
-async function persistSettings(next: Partial<Settings>): Promise<void> {
+async function persistSettings(next: Partial<Settings>, enableConnection = false): Promise<void> {
+  if (next.token !== undefined && unpairing) throw new Error('Connection removal is in progress')
+  const controlRevision = connectionControlRevision
   const changesUnrestrictedAccess = typeof next.unrestrictedBrowserAccess === 'boolean'
   const accessRevision = changesUnrestrictedAccess ? ++unrestrictedAccessRevision : unrestrictedAccessRevision
   const updated = normalizeSettings({ ...settings, ...next })
@@ -329,7 +338,16 @@ async function persistSettings(next: Partial<Settings>): Promise<void> {
   const persisted = updated
   const write = settingsPersistence.then(async () => {
     await accessTransition
-    if (next.token !== undefined) await writeBridgeCredential(persisted.token)
+    if (next.token !== undefined) {
+      if (controlRevision !== connectionControlRevision || unpairing) throw new Error('Connection settings were superseded')
+      await writeBridgeCredential(persisted.token, enableConnection ? 'enable' : undefined,
+        () => controlRevision === connectionControlRevision && !unpairing)
+      if (enableConnection && controlRevision === connectionControlRevision && !unpairing) {
+        const resume = connectionDisconnected
+        connectionDisconnected = false
+        if (resume && panelPorts.size > 0) armBridgeKeepalive()
+      }
+    }
     const { token: _secret, ...publicSettings } = persisted
     await chrome.storage.local.set({ [STORAGE_KEY]: publicSettings })
   })
@@ -396,7 +414,8 @@ function disarmBridgeKeepalive(): void {
 }
 
 function broadcastStatus(): void {
-  const payload = { type: 'status', state: bridge?.state ?? ('stopped' as BridgeState), caps }
+  const payload = { type: 'status', state: bridge?.state ?? ('stopped' as BridgeState), caps,
+    connectionDisconnected, hasCredential: settings.token !== '' }
   for (const port of panelPorts) {
     try { port.postMessage(payload) } catch { /* port already closed */ }
   }
@@ -460,7 +479,7 @@ function resetSelectionDedupe(sources: readonly SelectionSource[]): void {
 function selectionSharingEnabled(): boolean {
   // Until storage answers, `settings` still holds the defaults. Reporting the
   // default here would arm watchers for a user whose saved choice is `off`.
-  return settingsLoaded && (unrestrictedAccessEnabled() || settings.sharePageContent !== 'off')
+  return settingsLoaded && !connectionDisconnected && !unpairing && (unrestrictedAccessEnabled() || settings.sharePageContent !== 'off')
 }
 
 /** Whether unrestricted access is enabled and no earlier grant is still being revoked. */
@@ -1480,14 +1499,14 @@ function cancelAllToolCalls(): void {
 async function startBridge(): Promise<void> {
   const revision = ++bridgeStartRevision
   await affinityReady
-  if (panelPorts.size === 0) return
+  if (panelPorts.size === 0 || connectionDisconnected || unpairing) return
   let url = settings.bridgeUrl
   if (url === '') {
     url = await discoverBridge(() => revision === bridgeStartRevision && panelPorts.size > 0) ?? ''
   }
   // Discovery is asynchronous. A panel may have closed or a newer settings
   // update may have started while its fetches were in flight.
-  if (revision !== bridgeStartRevision || panelPorts.size === 0) return
+  if (revision !== bridgeStartRevision || panelPorts.size === 0 || connectionDisconnected || unpairing) return
   if (url === '') {
     bridge?.stop()
     bridge = null
@@ -1505,7 +1524,7 @@ async function startBridge(): Promise<void> {
   }
   url = localUrl
   const installationId = settings.token === '' ? '' : await ensureInstallationId()
-  if (revision !== bridgeStartRevision || panelPorts.size === 0) return
+  if (revision !== bridgeStartRevision || panelPorts.size === 0 || connectionDisconnected || unpairing) return
   if (bridge === null) {
     const client = new BridgeClient({
       onStateChange: (state) => {
@@ -1529,20 +1548,27 @@ async function startBridge(): Promise<void> {
         // rpc.result is settled by the rpc facade (wrapped below).
       },
       onHelloOk: async (negotiated, credential, presentedToken) => {
+        if (connectionDisconnected || unpairing) throw new Error('Connection was removed')
+        const controlRevision = connectionControlRevision
+        const pairing = { url: activeBridgeUrl, installationId: activeInstallationId }
         if (credential !== undefined) {
           if (!/^[a-f0-9]{64}$/.test(credential) || settings.token !== presentedToken) {
             throw new Error('Pairing was superseded or returned an invalid credential')
           }
           await persistSettings({ token: credential })
         }
+        if (connectionDisconnected || unpairing || controlRevision !== connectionControlRevision) throw new Error('Connection was removed')
+        if (pairing.url !== undefined && presentedToken !== undefined) activePairing = { url: pairing.url, credential: credential ?? presentedToken, installationId: pairing.installationId }
         caps = negotiated
         broadcastStatus()
         void pushBudgetToControlledTab(negotiated)
       },
-    }, probeBridge, () => panelPorts.size > 0)
+    }, probeBridge, () => panelPorts.size > 0 && !connectionDisconnected && !unpairing)
     bridge = client
     rpc = createRpc(client)
   }
+  activeBridgeUrl = url
+  activeInstallationId = installationId
   bridge.start(url, settings.token, installationId)
 }
 
@@ -1563,6 +1589,10 @@ function cancelBrowserPairing(port?: chrome.runtime.Port): void {
 }
 
 async function pairBrowser(port: chrome.runtime.Port, address: string): Promise<void> {
+  if (unpairing) {
+    try { port.postMessage({ type: 'browser-pairing', status: { phase: 'failed', error: 'pairing-busy' } }) } catch { /* panel closed */ }
+    return
+  }
   if (pairingJob !== undefined) {
     if (pairingJob.port !== port) {
       try { port.postMessage({ type: 'browser-pairing', status: { phase: 'failed', error: 'pairing-busy' } }) } catch { /* panel closed */ }
@@ -1591,7 +1621,7 @@ async function pairBrowser(port: chrome.runtime.Port, address: string): Promise<
       throw new Error('pairing-cancelled')
     }
     send({ phase: 'saving' })
-    await persistSettings({ bridgeUrl: address === '' ? '' : local, token: credential })
+    await persistSettings({ bridgeUrl: address === '' ? '' : local, token: credential }, true)
     // A completed credential commit survives closing the panel, just like a
     // manual pairing. Only a live panel may initiate its new connection.
     if (!job.controller.signal.aborted && panelPorts.has(port)) await startBridge()
@@ -1599,6 +1629,51 @@ async function pairBrowser(port: chrome.runtime.Port, address: string): Promise<
   } catch (error) {
     send({ phase: 'failed', error: job.controller.signal.aborted ? 'pairing-cancelled' : error instanceof Error ? error.message : 'host-unavailable' })
   } finally { if (pairingJob === job) pairingJob = undefined }
+}
+
+/** Unpairing is local revocation first; an offline Host cannot make us reconnect. */
+async function unpairBrowser(): Promise<{ remoteRevoked: boolean }> {
+  if (unpairing) throw new Error('Connection removal is already in progress')
+  unpairing = true
+  const notify = (status: BrowserPairingStatus) => { for (const port of panelPorts) {
+    try { port.postMessage({ type: 'browser-pairing', status }) } catch { /* panel closed */ }
+  } }
+  notify({ phase: 'unpairing' })
+  try {
+    await settingsReady.catch(() => {})
+    const captured = bridge?.connected ? activePairing : undefined
+    const credential = captured?.credential ?? settings.token
+    let address = captured?.url ?? (settings.bridgeUrl || activeBridgeUrl)
+    connectionControlRevision += 1
+    bridgeStartRevision += 1
+    connectionDisconnected = true
+    const pairing = pairingJob
+    pairing?.controller.abort()
+    if (pairingJob === pairing) pairingJob = undefined
+    bridge?.stop()
+    cancelAllToolCalls()
+    cancelPendingApprovals()
+    settings = { ...settings, token: '' }
+    activePairing = undefined
+    caps = null
+    disarmBridgeKeepalive()
+    syncSelectionWatch()
+    broadcastStatus()
+    // Atomic credential deletion + disabled marker also wins over old handshakes.
+    await writeBridgeCredential('', 'disable')
+    await settingsPersistence.catch(() => {})
+    await persistSettings({})
+    if (credential === '') { notify({ phase: 'unpaired', remoteRevoked: false }); return { remoteRevoked: false } }
+    const installationId = captured?.installationId ?? await ensureInstallationId().catch(() => undefined)
+    if (address === undefined) {
+      const deadline = Date.now() + 2500
+      address = await discoverBridge(() => Date.now() < deadline)
+    }
+    const remoteRevoked = address !== undefined && installationId !== undefined && await revokeBrowserPairing(address, installationId, credential)
+    notify({ phase: 'unpaired', remoteRevoked })
+    return { remoteRevoked }
+  } catch (error) { notify({ phase: 'failed', error: 'unpair-failed' }); throw error }
+  finally { unpairing = false; broadcastStatus() }
 }
 
 // ---- Content script messages ----
@@ -1645,9 +1720,12 @@ chrome.runtime.onConnect.addListener((port) => {
   void settingsReady.then(syncSelectionWatch)
   void settingsReady.then(() => {
     if (!panelPorts.has(port)) return
+    broadcastStatus()
+    if (connectionDisconnected) { disarmBridgeKeepalive(); return }
     if (bridge === null || bridge.state === 'stopped') return startBridge()
   })
-  try { port.postMessage({ type: 'status', state: bridge?.state ?? ('stopped' as BridgeState), caps }) } catch { /* port closed */ }
+  try { port.postMessage({ type: 'status', state: bridge?.state ?? ('stopped' as BridgeState), caps,
+    connectionDisconnected, hasCredential: settings.token !== '' }) } catch { /* port closed */ }
   void affinityReady.then(async () => {
     await syncActiveTab()
     try { port.postMessage({ type: 'tab-affinity', state: tabAffinity.snapshot() }) } catch { /* port closed */ }
@@ -1725,6 +1803,17 @@ chrome.runtime.onConnect.addListener((port) => {
       case 'browser-pairing.cancel':
         cancelBrowserPairing(port)
         break
+      case 'browser-pairing.unpair': {
+        const id = (message as { id?: unknown }).id
+        if (typeof id !== 'string') break
+        void unpairBrowser().then(result => {
+          try { port.postMessage({ type: 'browser-pairing.unpair.result', id, ok: true, result }) } catch { /* panel closed */ }
+        }, () => {
+          try { port.postMessage({ type: 'browser-pairing.unpair.result', id, ok: false,
+            error: { message: getUiLocale() === 'zh' ? '连接凭据未能完全清除，请重试' : 'Connection credentials could not be fully cleared. Try again.' } }) } catch { /* panel closed */ }
+        })
+        break
+      }
       case 'rpc': {
         const rpcMsg = message as { id: string; method: string; payload?: unknown }
         if ([BRIDGE_RUN_RETARGET_METHOD, BRIDGE_TASK_START_METHOD, BRIDGE_TASK_APPROVAL_METHOD].includes(rpcMsg.method)) {
@@ -1788,7 +1877,7 @@ chrome.runtime.onConnect.addListener((port) => {
         void settingsReady.then(async () => {
           try {
             const previousConnection = { bridgeUrl: settings.bridgeUrl, token: settings.token }
-            await persistSettings(settingsMsg.settings)
+            await persistSettings(settingsMsg.settings, typeof settingsMsg.settings.token === 'string' && settingsMsg.settings.token.trim() !== '')
             const connectionChanged = settings.bridgeUrl !== previousConnection.bridgeUrl
               || settings.token !== previousConnection.token
             if (panelPorts.size > 0) {
@@ -2012,7 +2101,8 @@ chrome.runtime.onConnect.addListener((port) => {
       }
       case 'request-status':
         try {
-          port.postMessage({ type: 'status', state: bridge?.state ?? ('stopped' as BridgeState), caps })
+          port.postMessage({ type: 'status', state: bridge?.state ?? ('stopped' as BridgeState), caps,
+            connectionDisconnected, hasCredential: settings.token !== '' })
           port.postMessage({ type: 'tab-affinity', state: tabAffinity.snapshot() })
           const statusWindowId = panelWindows.get(port)
           if (statusWindowId !== undefined) {

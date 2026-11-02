@@ -94,6 +94,21 @@ export class PairingStore {
     })
   }
 
+  /** Revoke only the exact saved credential; a rotated grant is a different owner. */
+  revokeCredential(installationId: string, credential: string, disconnected: () => void): Promise<boolean> {
+    return this.exclusive(async () => {
+      if (!validInstallationId(installationId) || !/^[a-f0-9]{64}$/.test(credential)) return false
+      const records = await this.load()
+      const previous = records[installationId]
+      if (previous === undefined || !verifyToken(previous.credentialHash, hashCredential(credential))) return false
+      delete records[installationId]
+      try { await this.save(records) } catch (error) { records[installationId] = previous; throw error }
+      // Close the revoked grant before another enrollment/authentication can finish.
+      disconnected()
+      return true
+    })
+  }
+
   private exclusive<T>(work: () => Promise<T>): Promise<T> {
     const result = this.tail.then(work, work)
     this.tail = result.then(() => undefined, () => undefined)

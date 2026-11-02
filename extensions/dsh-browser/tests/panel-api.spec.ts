@@ -11,6 +11,25 @@ afterEach(() => {
 })
 
 describe('panel protocol', () => {
+  it('correlates DSH unpairing and never retries an uncertain timeout', async () => {
+    vi.useFakeTimers()
+    let receive: ((message: unknown) => void) | undefined
+    const postMessage = vi.fn()
+    vi.stubGlobal('chrome', { runtime: { connect: vi.fn(() => ({ postMessage,
+      onMessage: { addListener: (callback: (message: unknown) => void) => { receive = callback } }, onDisconnect: { addListener: vi.fn() } })) } })
+    const api = connectPanel()
+    const first = api.unpairBrowser()
+    const request = postMessage.mock.calls[0]![0]
+    expect(request).toMatchObject({ type: 'browser-pairing.unpair' })
+    receive?.({ type: 'browser-pairing.unpair.result', id: 'foreign', ok: true })
+    receive?.({ type: 'browser-pairing.unpair.result', id: request.id, ok: true })
+    await first
+    const second = api.unpairBrowser().catch(error => error)
+    await vi.advanceTimersByTimeAsync(15000)
+    expect(await second).toMatchObject({ code: 'timeout' })
+    expect(postMessage).toHaveBeenCalledTimes(2)
+  })
+
   it('correlates page unbinding and times out without replay', async () => {
     vi.useFakeTimers()
     let receive: ((message: unknown) => void) | undefined

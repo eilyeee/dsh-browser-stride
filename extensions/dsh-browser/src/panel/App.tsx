@@ -391,14 +391,10 @@ export function TabAffinityBanner({
   state,
   copy,
   onDecision,
-  onUnbind,
-  unbinding,
 }: {
   state: TabAffinityState | null
   copy: PanelCopy
   onDecision: (decision: TabAffinityDecision) => void
-  onUnbind: () => void
-  unbinding: boolean
 }): React.JSX.Element | null {
   if (state === null || state.status === 'unbound') return null
   const controlled = tabLabel(state.controlled, state.detached ? copy.tabHandoff.unboundTab : copy.tabHandoff.closedTab)
@@ -438,26 +434,22 @@ export function TabAffinityBanner({
       </div>}
       <p>{body}</p>
       <div className="tab-affinity-actions">
-        {handoff && <button className="keep" disabled={unbinding} onClick={() => onDecision('keep')}>{copy.tabHandoff.keep}</button>}
+        {handoff && <button className="keep" onClick={() => onDecision('keep')}>{copy.tabHandoff.keep}</button>}
         {!following && state.active !== null && (
-          <button className="follow" disabled={unbinding} onClick={event => { if (!state.detached || event.nativeEvent.isTrusted) onDecision('follow') }}>
+          <button className="follow" onClick={event => { if (!state.detached || event.nativeEvent.isTrusted) onDecision('follow') }}>
             {lost ? copy.tabHandoff.useCurrent : handoff ? copy.tabHandoff.follow : copy.tabHandoff.followCurrent}
           </button>
         )}
         {handoff && (
-          <button className="keep-always" disabled={unbinding} onClick={() => onDecision('keep-always')}>
+          <button className="keep-always" onClick={() => onDecision('keep-always')}>
             {copy.tabHandoff.keepAlways}
           </button>
         )}
         {!handoff && !lost && state.pinned && (
-          <button className="keep-always" disabled={unbinding} onClick={() => onDecision('ask-again')}>
+          <button className="keep-always" onClick={() => onDecision('ask-again')}>
             {copy.tabHandoff.askAgain}
           </button>
         )}
-        {state.controlled !== null && <button type="button" className="unbind" disabled={unbinding}
-          onClick={event => { if (event.nativeEvent.isTrusted) onUnbind() }}>
-          {unbinding ? copy.tabHandoff.unbinding : copy.tabHandoff.unbind}
-        </button>}
       </div>
     </section>
   )
@@ -640,6 +632,8 @@ export function App(): React.JSX.Element {
   const [settings, setSettings] = useState<PanelSettings | null>(null)
   const [pairingStatus, setPairingStatus] = useState<BrowserPairingStatus>({ phase: 'idle' })
   const pairingBusy = ['requesting', 'pending', 'saving'].includes(pairingStatus.phase)
+  const unpairingConnection = pairingStatus.phase === 'unpairing'
+  const [hasConnectionCredential, setHasConnectionCredential] = useState(false)
   useEffect(() => api.onBrowserPairing(status => setPairingStatus(current =>
     current.phase === 'idle' && status.error === 'connection-lost' ? current : status)), [api])
   const [rows, setRows] = useState<Row[]>([])
@@ -660,8 +654,6 @@ export function App(): React.JSX.Element {
   const [showTextSize, setShowTextSize] = useState(false)
   const [approvalQueue, setApprovalQueue] = useState<ApprovalRequest[]>([])
   const [tabAffinity, setTabAffinity] = useState<TabAffinityState | null>(null)
-  const [unbindingPage, setUnbindingPage] = useState(false)
-  const unbindingPageRef = useRef(false)
   const [trustedOriginInput, setTrustedOriginInput] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [showSessionPicker, setShowSessionPicker] = useState(false)
@@ -824,10 +816,16 @@ export function App(): React.JSX.Element {
   // 状态无法可靠观察到"连接已重置"，因此在这里按消息粒度判定。
   const [sessionEpoch, setSessionEpoch] = useState(0)
   const lastStateRef = useRef<BridgeState | null>(null)
+  const disconnectedRef = useRef(false)
   useEffect(() => {
-    const offStatus = api.onStatus((next, nextCaps) => {
+    const offStatus = api.onStatus((next, nextCaps, connection) => {
       setState(next)
       setCaps(nextCaps)
+      if (typeof connection?.hasCredential === 'boolean') setHasConnectionCredential(connection.hasCredential)
+      if (typeof connection?.connectionDisconnected === 'boolean') {
+        if (connection.connectionDisconnected && !disconnectedRef.current) setSettings(current => current === null ? current : { ...current, token: '' })
+        disconnectedRef.current = connection.connectionDisconnected
+      }
       const previous = lastStateRef.current
       lastStateRef.current = next
       if (previous !== null && next !== previous && next === 'stopped') {
@@ -1905,16 +1903,6 @@ export function App(): React.JSX.Element {
     }
   }
 
-  async function unbindPage(): Promise<void> {
-    if (tabAffinity === null || unbindingPageRef.current) return
-    const sid = sessionRef.current
-    unbindingPageRef.current = true
-    setUnbindingPage(true)
-    try { await api.unbindTabAffinity(tabAffinity.revision, sid) }
-    catch (cause) { if (sessionRef.current === sid) setError(cause instanceof Error ? cause.message : String(cause)) }
-    finally { unbindingPageRef.current = false; setUnbindingPage(false) }
-  }
-
   function addTrustedOrigin(): void {
     const origin = normalizeWebOrigin(trustedOriginInput)
     if (origin === null) return
@@ -1977,16 +1965,24 @@ export function App(): React.JSX.Element {
             <small>{copy.settings.bridgeHelp}</small>
             <input
               value={settings?.bridgeUrl ?? ''}
-              disabled={pairingBusy}
+              disabled={pairingBusy || unpairingConnection}
               onChange={(e) => setSettings((prev) => prev === null ? prev : { ...prev, bridgeUrl: e.target.value })}
               placeholder={copy.settings.bridgePlaceholder}
             />
           </label>
           <section className="pairing-section" aria-label={copy.settings.pair}>
             <p>{copy.settings.pairingHelp}</p>
-            <button type="button" className="primary" disabled={pairingBusy || state === 'connected'} onClick={() => {
+            <button type="button" className="primary" disabled={pairingBusy || unpairingConnection || state === 'connected'} onClick={() => {
               void api.startBrowserPairing(settings?.bridgeUrl ?? '').catch(() => setPairingStatus({ phase: 'failed', error: 'connection-lost' }))
             }}>{copy.settings.pair}</button>
+            <button type="button" className="secondary" disabled={pairingBusy || unpairingConnection || (!hasConnectionCredential && state !== 'connected' && pairingStatus.error !== 'unpair-failed')}
+              onClick={event => {
+                if (!event.nativeEvent.isTrusted) return
+                setPairingStatus({ phase: 'unpairing' })
+                void api.unpairBrowser().then(() => { setSettings(current => current === null ? current : { ...current, token: '' }) },
+                  () => setPairingStatus({ phase: 'failed', error: 'unpair-failed' }))
+              }}>{unpairingConnection ? copy.settings.unpairing : copy.settings.unpair}</button>
+            <p>{copy.settings.unpairHelp}</p>
             {pairingBusy && <button type="button" className="secondary" disabled={pairingStatus.phase === 'saving'} onClick={() => { void api.cancelBrowserPairing() }}>{copy.settings.pairingCancel}</button>}
             {pairingStatus.phase === 'pending' && <div role="status">
               <p>{copy.settings.pairingWaiting}</p>
@@ -1995,6 +1991,7 @@ export function App(): React.JSX.Element {
             </div>}
             {pairingStatus.phase === 'saving' && <p role="status">{copy.settings.pairingSaving}</p>}
             {pairingStatus.phase === 'saved' && <p role="status">{copy.settings.pairingSaved}</p>}
+            {pairingStatus.phase === 'unpaired' && <p role="status">{pairingStatus.remoteRevoked ? copy.settings.unpaired : copy.settings.unpairLocalOnly}</p>}
             {pairingStatus.phase === 'failed' && <p role="alert">{copy.settings.pairingError(pairingStatus.error ?? '')}</p>}
           </section>
           <label>
@@ -2002,7 +1999,7 @@ export function App(): React.JSX.Element {
             <small>{copy.settings.tokenHelp}</small>
             <input
               type="password"
-              disabled={pairingBusy}
+              disabled={pairingBusy || unpairingConnection}
               value={settings?.token ?? ''}
               onChange={(e) => setSettings((prev) => prev === null ? prev : { ...prev, token: e.target.value })}
               placeholder={copy.settings.tokenPlaceholder}
@@ -2192,7 +2189,7 @@ export function App(): React.JSX.Element {
           ))}
         </section>
         <div className="settings-actions">
-          <button className="primary" disabled={pairingBusy} onClick={saveSettings}>{copy.settings.save}</button>
+          <button className="primary" disabled={pairingBusy || unpairingConnection} onClick={saveSettings}>{copy.settings.save}</button>
           <button className="secondary" onClick={() => {
             void api.cancelBrowserPairing().catch(() => {})
             setShowSettings(false)
@@ -2238,7 +2235,7 @@ export function App(): React.JSX.Element {
           onStep={(direction) => changeUiScale(stepUiScale(uiScaleRef.current, direction))}
           onReset={() => changeUiScale(DEFAULT_UI_SCALE)} />
       )}
-      <TabAffinityBanner state={tabAffinity} copy={copy} onDecision={decideTabAffinity} onUnbind={() => { void unbindPage() }} unbinding={unbindingPage} />
+      <TabAffinityBanner state={tabAffinity} copy={copy} onDecision={decideTabAffinity} />
       {showSessionPicker && (
         <section className="session-picker" aria-label={copy.app.sessions}>
           <div className="session-picker-head">

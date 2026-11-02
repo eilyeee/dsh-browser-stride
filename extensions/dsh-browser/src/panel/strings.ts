@@ -82,6 +82,11 @@ export interface PanelCopy {
     pairingSaving: string
     pairingSaved: string
     pairingCancel: string
+    unpair: string
+    unpairing: string
+    unpairHelp: string
+    unpaired: string
+    unpairLocalOnly: string
     pairingOpenHost: string
     pairingError: (code: string) => string
     pageSharing: string
@@ -325,6 +330,11 @@ const EN: PanelCopy = {
     pairingSaving: 'Saving the connection…',
     pairingSaved: 'Connection saved. The extension reconnects automatically.',
     pairingCancel: 'Cancel pairing',
+    unpair: 'Unpair DSH',
+    unpairing: 'Unpairing…',
+    unpairHelp: 'Disconnect and remove this browser’s saved credential. Pair again to reconnect.',
+    unpaired: 'This browser has been unpaired from DSH.',
+    unpairLocalOnly: 'The local connection and credential were removed. DSH has not confirmed removal of its pairing record.',
     pairingOpenHost: 'Open DSH',
     pairingError: (code) => ({
       'pairing-denied': 'Pairing was denied in DSH.',
@@ -335,6 +345,7 @@ const EN: PanelCopy = {
       'protocol-upgrade-extension': 'Update and reload this extension before pairing.',
       'update-host': 'Update the DSH Bridge to a version supporting pairing requests.',
       'already-connected': 'This browser is already connected.',
+      'unpair-failed': 'The connection credential could not be fully removed. Retry unpairing.',
       'connection-lost': 'Background connection lost. Request pairing again.',
     } as Record<string, string>)[code] ?? 'Pairing failed. Check the local DSH address and retry.',
     pageSharing: 'Page content sharing',
@@ -578,6 +589,11 @@ const ZH: PanelCopy = {
     pairingSaving: '正在保存连接…',
     pairingSaved: '连接已保存，以后会自动重连。',
     pairingCancel: '取消配对',
+    unpair: '解绑 DSH',
+    unpairing: '正在解绑…',
+    unpairHelp: '断开连接并清除本机配对凭据；再次连接需要重新配对。',
+    unpaired: '已解除此浏览器与 DSH 的配对。',
+    unpairLocalOnly: '本机连接及凭据已清除，DSH 尚未确认删除配对记录。',
     pairingOpenHost: '打开 DSH',
     pairingError: (code) => ({
       'pairing-denied': 'DSH 已拒绝本次配对。',
@@ -588,6 +604,7 @@ const ZH: PanelCopy = {
       'protocol-upgrade-extension': '请先更新并重新加载此扩展。',
       'update-host': '请更新 DSH Bridge，以支持配对请求。',
       'already-connected': '此浏览器已经连接。',
+      'unpair-failed': '连接凭据未能完全清除，请重试解绑。',
       'connection-lost': '后台连接已断开，请重新发起配对。',
     } as Record<string, string>)[code] ?? '配对失败，请检查本机 DSH 地址后重试。',
     pageSharing: '页面内容共享',

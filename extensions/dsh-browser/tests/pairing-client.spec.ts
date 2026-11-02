@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
-import { requestBrowserPairing, type BrowserPairingStatus } from '../src/background/pairing-client.ts'
+import { requestBrowserPairing, revokeBrowserPairing, type BrowserPairingStatus } from '../src/background/pairing-client.ts'
 
 const bridge = 'ws://127.0.0.1:3080/ext/bridge'
 const installation = 'synthetic-installation-1111'
@@ -8,6 +8,23 @@ const requestId = '11111111-1111-4111-8111-111111111111'
 const pending = () => ({ requestId, verificationCode: 'AABBCCDD', expiresAt: Date.now() + 60_000 })
 
 describe('background pairing client', () => {
+  it('sends self-revocation only to a literal local Host and reports offline or rejected revocation honestly', async () => {
+    const post = vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({ revoked: true }))
+    try {
+      expect(await revokeBrowserPairing('ws://evil.example/ext/bridge', installation, 'c'.repeat(64))).toBe(false)
+      expect(post).not.toHaveBeenCalled()
+      expect(await revokeBrowserPairing(bridge, installation, 'c'.repeat(64))).toBe(true)
+      expect(post).toHaveBeenCalledWith(new URL('http://127.0.0.1:3080/ext/bridge-pairing-request'), expect.objectContaining({
+        method: 'POST', credentials: 'omit', redirect: 'error', cache: 'no-store',
+        body: JSON.stringify({ action: 'unpair', installationId: installation, credential: 'c'.repeat(64) }),
+      }))
+      post.mockResolvedValue(Response.json({ revoked: true }, { status: 403 }))
+      expect(await revokeBrowserPairing(bridge, installation, 'c'.repeat(64))).toBe(false)
+      post.mockRejectedValue(new Error('offline'))
+      expect(await revokeBrowserPairing(bridge, installation, 'c'.repeat(64))).toBe(false)
+    } finally { post.mockRestore() }
+  })
+
   it('keeps proof and credentials out of panel status and never uses browser cookies', async () => {
     const messages: BrowserPairingStatus[] = []
     const payloads: Record<string, unknown>[] = []

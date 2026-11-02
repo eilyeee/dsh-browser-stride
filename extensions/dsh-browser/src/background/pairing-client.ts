@@ -2,10 +2,25 @@ import { BRIDGE_PAIRING_REQUEST_PATH, BRIDGE_PROTOCOL_VERSION } from '@eilyeee/d
 import { localBridgeUrl } from './bridge-address.ts'
 
 export interface BrowserPairingStatus {
-  phase: 'idle' | 'requesting' | 'pending' | 'saving' | 'saved' | 'failed'
+  phase: 'idle' | 'requesting' | 'pending' | 'saving' | 'saved' | 'failed' | 'unpairing' | 'unpaired'
   verificationCode?: string
   hostUrl?: string
   error?: string
+  remoteRevoked?: boolean
+}
+
+/** Self-revocation never uses the Host administrator token or a page-provided address. */
+export async function revokeBrowserPairing(bridgeUrl: string, installationId: string, credential: string): Promise<boolean> {
+  const local = localBridgeUrl(bridgeUrl)
+  if (local === undefined || !/^[a-f0-9]{64}$/.test(credential)) return false
+  const url = new URL(local.replace(/^ws:/, 'http:'))
+  url.pathname = BRIDGE_PAIRING_REQUEST_PATH
+  try {
+    const response = await fetch(url, { method: 'POST', redirect: 'error', cache: 'no-store', credentials: 'omit',
+      headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'unpair', installationId, credential }), signal: AbortSignal.timeout(3000) })
+    const value = await response.json()
+    return response.ok && value?.revoked === true
+  } catch { return false }
 }
 
 function pause(signal: AbortSignal): Promise<void> {
