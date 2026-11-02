@@ -41,10 +41,13 @@ export const BRIDGE_SESSION_PURGE_METHOD = 'bridge.session.purge'
 /** Read-only metadata and explicit panel controls for existing Host-owned runs. */
 export const BRIDGE_RUN_LIST_METHOD = 'bridge.browserRuns.list'
 export const BRIDGE_RUN_CONTROL_METHOD = 'bridge.browserRuns.control'
+export const BRIDGE_RUN_RETARGET_METHOD = 'bridge.browserRuns.retarget'
 export const BROWSER_RUN_LIST_LIMIT = 20
 export const BROWSER_RUN_STATES = ['queued', 'running', 'blocked', 'paused', 'stopping', 'stopped', 'completed', 'failed'] as const
 export type PanelRunControl = 'pause' | 'stop'
 export interface BrowserRunSummary {
+  /** Optional capability: absent on older compatible Hosts. */
+  canRetarget?: boolean
   runId: string
   sessionId: string
   state: typeof BROWSER_RUN_STATES[number]

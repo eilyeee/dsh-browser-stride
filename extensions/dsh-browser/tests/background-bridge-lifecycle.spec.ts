@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { BRIDGE_PROTOCOL_VERSION } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
+import { BRIDGE_PROTOCOL_VERSION, BRIDGE_RUN_RETARGET_METHOD } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { wireToolCall, confirmTestTool } from './wire-tool-call.ts'
 import { PAGE_SESSION_CONTEXT_STORAGE_KEY } from '../src/background/session-continuity.ts'
@@ -155,6 +155,36 @@ afterEach(() => {
 })
 
 describe('background bridge lifecycle', () => {
+  it('creates native handoff pins only through the dedicated selected-session path and rejects a changed initial document', async () => {
+    const fixture = mockChrome({ localGet: async () => ({ dshSettings: { bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge', unrestrictedBrowserAccess: true } }) })
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+    const panel = panelPort(); fixture.onConnect.emit(panel.port)
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const socket = FakeWebSocket.instances[0]!
+    socket.open(); await Promise.resolve()
+    socket.receive({ t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps: { textOnly: true, snapshotMaxChars: 32000, maxInteractiveItems: 60 } })
+    panel.onMessage.emit({ type: 'session.active', sessionId: 'handoff-session', isNew: true })
+    await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity', state: expect.objectContaining({ controlled: expect.objectContaining({ tabId: 1 }) }) })))
+    panel.onMessage.emit({ type: 'rpc', id: 'generic', method: BRIDGE_RUN_RETARGET_METHOD, payload: {} })
+    expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'rpc.result', id: 'generic', ok: false }))
+    expect(socket.sent).not.toContainEqual(expect.objectContaining({ t: 'rpc', method: BRIDGE_RUN_RETARGET_METHOD }))
+    const state = panel.postMessage.mock.calls.map(([message]) => message as { type: string; state?: { revision: number } }).filter(message => message.type === 'tab-affinity').at(-1)!.state!
+    panel.onMessage.emit({ type: 'browser-run.retarget', id: 'select', sessionId: 'handoff-session', runId: 'run_selected', expectedVersion: 2, controlRevision: 1,
+      affinityRevision: state.revision, targetBinding: 'forged-panel-value' })
+    await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'rpc', method: BRIDGE_RUN_RETARGET_METHOD })))
+    const rpc = socket.sent.find(value => (value as { method?: string }).method === BRIDGE_RUN_RETARGET_METHOD) as { id: string; payload: { targetBinding: string } }
+    expect(rpc.payload.targetBinding).toMatch(/^page_/)
+    expect(rpc.payload.targetBinding).not.toBe('forged-panel-value')
+    fixture.onCommitted.emit({ tabId: 1, frameId: 0 })
+    socket.receive({ t: 'rpc.result', id: rpc.id, ok: true, result: { runId: 'run_selected', sessionId: 'handoff-session', controlRevision: 3, state: 'running', targetBinding: rpc.payload.targetBinding } })
+    await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'browser-run.retarget.result', id: 'select', ok: true })))
+    socket.receive({ t: 'tool.call', id: 'changed-handoff-document', name: 'browser_press', args: { key: 'Enter' }, sessionId: 'handoff-session',
+      execution: { kind: 'run', runId: 'run_selected', controlRevision: 3 }, targetBinding: rpc.payload.targetBinding, expiresAt: Date.now() + 10000 })
+    await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'changed-handoff-document', ok: false, error: expect.objectContaining({ code: 'execution-denied' }) })))
+    expect(vi.mocked(chrome.tabs.sendMessage).mock.calls.some(([, message]) => (message as { type?: string; action?: string }).type === 'DSH_ACTION'
+      && (message as { action?: string }).action === 'browser_press')).toBe(false)
+  })
   it('rejects a content script attempting to open the privileged panel channel', async () => {
     const chromeMock = mockChrome()
     vi.stubGlobal('WebSocket', FakeWebSocket)

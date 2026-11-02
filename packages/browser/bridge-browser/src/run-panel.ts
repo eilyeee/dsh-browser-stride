@@ -1,4 +1,4 @@
-/** Panel controls expose metadata only; creation, resume and facts stay Host-owned. */
+/** Metadata and pause/stop controls; native target handoff is handled by the server. */
 import { z } from 'zod'
 import { asRunId, asSessionId } from './contracts/ids.ts'
 import { summarizeActionFacts } from './contracts/outcome.ts'
@@ -26,9 +26,10 @@ function reconciliationRequired(store: RunPanelStore, sessionId: string): boolea
       && (row.state === 'unresolved' || (row.state === 'returned' && row.receipt?.ok === false)))
 }
 
-function summary(run: BrowserRunRecord, requiresReconciliation: boolean): BrowserRunSummary {
+function summary(run: BrowserRunRecord, requiresReconciliation: boolean, pendingWrites: boolean): BrowserRunSummary {
   return { runId: run.runId, sessionId: run.sessionId, state: run.state, version: run.version,
     controlRevision: run.controlRevision, updatedAt: run.updatedAt, recoveryRequired: run.recoveryRequired, requiresReconciliation,
+    canRetarget: run.state === 'paused' && !run.recoveryRequired && !requiresReconciliation && !pendingWrites,
     controls: [...(run.state === 'running' || run.state === 'queued' ? ['pause' as const] : []),
       ...(!isTerminal(run.state) && run.state !== 'stopping' ? ['stop' as const] : [])] }
 }
@@ -42,7 +43,8 @@ export async function browserRunPanelRpc(store: RunPanelStore | undefined, metho
     const records = store.list(asSessionId(sessionId)).sort((a, b) => priority(a) - priority(b)
       || b.updatedAt - a.updatedAt || a.runId.localeCompare(b.runId))
     const uncertain = reconciliationRequired(store, sessionId)
-    return { items: records.slice(0, BROWSER_RUN_LIST_LIMIT).map(run => summary(run, uncertain)), total: records.length }
+    const pending = store.dispatches.list(sessionId).some(row => row.effect === 'write' && (row.state === 'prepared' || row.state === 'sent_unconfirmed'))
+    return { items: records.slice(0, BROWSER_RUN_LIST_LIMIT).map(run => summary(run, uncertain, pending)), total: records.length }
   }
   if (method === BRIDGE_RUN_CONTROL_METHOD) {
     const parsed = controlPayload.safeParse(payload)
@@ -51,7 +53,8 @@ export async function browserRunPanelRpc(store: RunPanelStore | undefined, metho
     const run = store.get(asRunId(runId))
     if (run === undefined || run.sessionId !== sessionId) throw new RunPanelError('not-found')
     const changed = await store.control(run.runId, expectedVersion, control, signal)
-    return { item: summary(changed, reconciliationRequired(store, sessionId)) }
+    const pending = store.dispatches.list(sessionId).some(row => row.effect === 'write' && (row.state === 'prepared' || row.state === 'sent_unconfirmed'))
+    return { item: summary(changed, reconciliationRequired(store, sessionId), pending) }
   }
   throw new RunPanelError('bad-request')
 }

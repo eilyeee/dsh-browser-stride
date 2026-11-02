@@ -35,6 +35,7 @@
 import {
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
   BRIDGE_CONFIRM_TOOL_METHOD,
+  BRIDGE_RUN_RETARGET_METHOD,
   isPageBrowserTool,
   isRunTabMutation,
   isRespondResult,
@@ -1297,7 +1298,7 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
   const dispatchAndCheckpoint = async (): Promise<ToolAnswer> => {
     if (call.execution.kind === 'run') {
       if (isRunTabMutation(call.name)) return { ok: false, error: { code: 'execution-denied',
-        message: 'Run-bound tab creation, follow and close require a trusted target handoff, which is not yet supported.' } }
+        message: 'Run-bound tab creation, follow and close are unavailable. Pause the task and use its selected-page continuation control.' } }
       if (isPageBrowserTool(call.name)) {
         if (target === undefined || 'ok' in target) return target ?? affinityFailure('missing')
         runTarget = runTargets.join(call.execution, call.sessionId!, target, call.targetBinding)
@@ -1311,6 +1312,7 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
       signal: controller.signal, timeoutMs: Math.min(5000, call.expiresAt - Date.now()),
     }), controller.signal)) return { ok: false, error: { code: 'execution-denied',
       message: 'The Host did not confirm this request’s original execution context; no browser tool was dispatched.' } }
+    if (runTarget !== undefined && !runTarget.accept()) return staleTarget()
     const sharingAtDispatch = pageSharingRevision
     let answer = await dispatch()
     if (!targetAllowed()) return staleTarget()
@@ -1581,6 +1583,7 @@ chrome.runtime.onConnect.addListener((port) => {
     controller: AbortController
     timer: ReturnType<typeof setTimeout>
   }>()
+  const runRetargets = new Map<string, { controller: AbortController; timer: ReturnType<typeof setTimeout> }>()
   panelPorts.add(port)
   if (wasIdle) armBridgeKeepalive()
   void settingsReady.then(syncSelectionWatch)
@@ -1597,6 +1600,48 @@ chrome.runtime.onConnect.addListener((port) => {
     if (typeof message !== 'object' || message === null) return
     const msg = message as { type?: string }
     switch (msg.type) {
+      case 'browser-run.retarget': {
+        const request = message as { id?: unknown; runId?: unknown; sessionId?: unknown; expectedVersion?: unknown; controlRevision?: unknown; affinityRevision?: unknown }
+        if (typeof request.id !== 'string') break
+        const id = request.id
+        const sid = validSessionId(request.sessionId)
+        const runId = validSessionId(request.runId)
+        const version = request.expectedVersion
+        const revision = request.controlRevision
+        const reply = (ok: boolean, code = 'handoff-failed'): void => {
+          try { port.postMessage({ type: 'browser-run.retarget.result', id, ok,
+            ...(!ok ? { error: { code, message: 'Task target change was not confirmed. Refresh task status before another action.' } } : {}) }) } catch { /* panel closed */ }
+        }
+        if (sid === undefined || runId === undefined || typeof version !== 'number' || !Number.isSafeInteger(version) || version < 0
+          || typeof revision !== 'number' || !Number.isSafeInteger(revision + 2) || revision < 0 || !Number.isSafeInteger(revision)
+          || runRetargets.size !== 0) { reply(false); break }
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), 15_000)
+        runRetargets.set(id, { controller, timer })
+        const boundRpc = rpc
+        const current = () => panelPorts.has(port) && panelActiveSessions.get(port) === sid && tabAffinity.focusedSession() === sid
+          && tabAffinity.snapshot().revision === request.affinityRevision
+        void (async () => {
+          if (!current() || boundRpc === null || bridge?.connected !== true) throw new Error('stale selection')
+          const target = captureToolTarget(sid)
+          if ('ok' in target) throw new Error('target unavailable')
+          const live = await prepareToolTarget(target, sid, controller.signal)
+          if ('ok' in live || !current() || !target.current() || controller.signal.aborted) throw new Error('target changed')
+          const prepared = runTargets.prepare({ kind: 'run', runId, controlRevision: revision + 2 }, sid, target)
+          if (prepared === undefined) throw new Error('target unavailable')
+          const result = await boundRpc.request(BRIDGE_RUN_RETARGET_METHOD, { runId, sessionId: sid,
+            expectedVersion: version, controlRevision: revision, targetBinding: prepared.id }, { signal: controller.signal, timeoutMs: 12_000 })
+          if (typeof result !== 'object' || result === null) throw new Error('invalid result')
+          const value = result as { runId?: unknown; sessionId?: unknown; controlRevision?: unknown; state?: unknown; targetBinding?: unknown }
+          if (value.runId !== runId || value.sessionId !== sid || value.controlRevision !== revision + 2
+            || value.state !== 'running' || value.targetBinding !== prepared.id) throw new Error('invalid result')
+          reply(true)
+        })().catch(error => reply(false, error instanceof BridgeRpcError ? error.code : 'handoff-failed')).finally(() => {
+          clearTimeout(timer)
+          if (runRetargets.get(id)?.controller === controller) runRetargets.delete(id)
+        })
+        break
+      }
       case 'browser-pairing.start': {
         const address = (message as { bridgeUrl?: unknown }).bridgeUrl
         if (typeof address === 'string' && address.length <= 512 && (address === '' || localBridgeUrl(address) !== undefined)) {
@@ -1611,6 +1656,11 @@ chrome.runtime.onConnect.addListener((port) => {
         break
       case 'rpc': {
         const rpcMsg = message as { id: string; method: string; payload?: unknown }
+        if (rpcMsg.method === BRIDGE_RUN_RETARGET_METHOD) {
+          try { port.postMessage({ type: 'rpc.result', id: rpcMsg.id, ok: false,
+            error: { code: 'forbidden', message: 'Use the selected-page task control.' } }) } catch { /* panel closed */ }
+          break
+        }
         const rpcSessionId = typeof rpcMsg.payload === 'object' && rpcMsg.payload !== null
           ? (rpcMsg.payload as { sessionId?: string }).sessionId
           : undefined
@@ -1853,6 +1903,8 @@ chrome.runtime.onConnect.addListener((port) => {
   })
   port.onDisconnect.addListener(() => {
     cancelBrowserPairing(port)
+    for (const job of runRetargets.values()) { clearTimeout(job.timer); job.controller.abort() }
+    runRetargets.clear()
     for (const operation of tabAffinityRebinds.values()) {
       clearTimeout(operation.timer)
       operation.controller.abort(new TabAffinityRebindError('cancelled', getUiLocale() === 'zh'

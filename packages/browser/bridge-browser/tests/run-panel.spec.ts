@@ -17,6 +17,25 @@ async function setup() {
 }
 
 describe('panel browser-run metadata and controls', () => {
+  it('offers paused target handoff only after writes settle successfully', async () => {
+    const { store, run } = await setup()
+    await store.control(run.runId, run.version, 'pause')
+    const read = () => browserRunPanelRpc(store, BRIDGE_RUN_LIST_METHOD, { sessionId }, signal())
+    expect(await read()).toMatchObject({ items: [{ canRetarget: true }] })
+    await store.dispatches.prepare({ requestId: 'pending-handoff-write', connectionId: 'synthetic', sessionId,
+      name: 'browser_click', args: {}, expiresAt: Date.now() + 60_000 })
+    expect(await read()).toMatchObject({ items: [{ canRetarget: false }] })
+    await store.dispatches.markSent('pending-handoff-write')
+    expect(await read()).toMatchObject({ items: [{ canRetarget: false }] })
+    await store.dispatches.settle('pending-handoff-write', { state: 'returned', receipt: { ok: true } })
+    expect(await read()).toMatchObject({ items: [{ canRetarget: true }] })
+    await store.dispatches.prepare({ requestId: 'failed-handoff-write', connectionId: 'synthetic', sessionId,
+      name: 'browser_click', args: {}, expiresAt: Date.now() + 60_000 })
+    await store.dispatches.markSent('failed-handoff-write')
+    await store.dispatches.settle('failed-handoff-write', { state: 'returned', receipt: { ok: false, errorCode: 'action-failed' } })
+    expect(await read()).toMatchObject({ items: [{ canRetarget: false, requiresReconciliation: true }] })
+  })
+
   it('projects only bounded metadata for the requested session, without criteria or page evidence', async () => {
     const { store, run } = await setup()
     await store.recordFact(run.runId, run.version, { actionId: asActionId('synthetic-fact'), requestDigest: 'a'.repeat(64) as RequestDigest,
@@ -26,7 +45,7 @@ describe('panel browser-run metadata and controls', () => {
     const result = await browserRunPanelRpc(store, BRIDGE_RUN_LIST_METHOD, { sessionId }, signal()) as BrowserRunList
     expect(result.items).toHaveLength(1)
     expect(result.items[0]).toMatchObject({ runId: run.runId, controls: ['pause', 'stop'], state: 'running', version: 2 })
-    expect(Object.keys(result.items[0]).sort()).toEqual(['runId', 'sessionId', 'state', 'version', 'controlRevision', 'updatedAt', 'recoveryRequired', 'requiresReconciliation', 'controls'].sort())
+    expect(Object.keys(result.items[0]).sort()).toEqual(['runId', 'sessionId', 'state', 'version', 'controlRevision', 'updatedAt', 'recoveryRequired', 'requiresReconciliation', 'controls', 'canRetarget'].sort())
     expect(JSON.stringify(result)).not.toMatch(/synthetic-private|criterion|evidence|requestDigest/)
   })
 

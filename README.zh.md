@@ -64,7 +64,7 @@ Host 托管的页面操作会固定在该运行/控制版本首次确认的标�
 
 ## 开发与验证
 
-可信 Host 插件可通过 `ctx.browserRuns` 持久化运行状态与动作事实，并用 `withExecution` 将浏览器调用绑定到运行和控制版本。暂停、停止和控制版本变化会撤销旧执行上下文；账本记录所属运行与传输回执。侧栏可查看、暂停和请求停止已有 Host 运行；任务创建和恢复仍由可信 Host 代码负责。业务结果验证、账号/租户识别和自动恢复仍未实现。详见 [Bridge 文档](packages/browser/bridge-browser/README.zh.md)。
+可信 Host 插件可通过 `ctx.browserRuns` 持久化运行状态与动作事实，并用 `withExecution` 将浏览器调用绑定到运行和控制版本。暂停、停止和控制版本变化会撤销旧执行上下文；账本记录所属运行与传输回执。侧栏可查看、暂停和请求停止已有 Host 运行。符合条件的暂停任务可先在会话上方绑定目标页面，再点击「在已绑定页面继续」。Host 先登记原生目标，再将任务标记为运行中；执行器须进入新的上下文才能继续。普通聊天不会自动创建或接手运行。业务结果验证、账号/租户识别和自动恢复仍未实现。详见 [Bridge 文档](packages/browser/bridge-browser/README.zh.md)。
 
 ```sh
 pnpm run typecheck

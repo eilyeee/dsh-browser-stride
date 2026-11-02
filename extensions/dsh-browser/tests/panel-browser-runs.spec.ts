@@ -22,6 +22,15 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => { root.unmount() }); vi.useRealTimers(); vi.restoreAllMocks() })
 
 describe('browser task panel boundaries', () => {
+  it('requires a selected native view and a real click for target handoff', async () => {
+    const paused = { ...item('session-a', 'paused'), canRetarget: true }
+    const rpc = vi.fn(async () => list(paused))
+    const retargetRun = vi.fn(async () => {})
+    await act(async () => { root.render(createElement(BrowserRuns, { api: { rpc: rpc as PanelApi['rpc'], retargetRun }, targetRevision: 4, sessionId: 'session-a', connected: true, copy: PANEL_COPY.en.runs })) })
+    expect(document.querySelector('.run-retarget')).not.toBeNull()
+    await act(async () => { document.querySelector<HTMLButtonElement>('.run-retarget')!.click() })
+    expect(retargetRun).not.toHaveBeenCalled()
+  })
   it('continues polling after an empty session later receives a managed task', async () => {
     vi.useFakeTimers()
     const rpc = vi.fn().mockResolvedValueOnce({ items: [], total: 0 }).mockResolvedValue(list())
@@ -35,6 +44,8 @@ describe('browser task panel boundaries', () => {
     list(item('foreign-session')),
     list({ ...item(), version: -1 }),
     list({ ...item(), controls: ['resume'] } as unknown as BrowserRunSummary),
+    list({ ...item(), canRetarget: true }),
+    list({ ...item('session-a', 'paused'), canRetarget: true, requiresReconciliation: true }),
     list({ ...item('session-a', 'completed'), controls: ['stop'] }),
     { items: [item(), item()], total: 2 },
   ])('rejects foreign, stale-shaped or unsupported metadata', value => {

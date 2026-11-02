@@ -64,7 +64,7 @@ Host-managed page operations stay on the first confirmed tab and binding generat
 
 ## Development
 
-Trusted Host plugins can persist run state and action facts through `ctx.browserRuns` and bind browser calls to a run/control revision using `withExecution`. Pause, stop and control changes revoke old contexts; the ledger records the owning run and transport receipts. The side panel can show, pause and request stopping existing Host-owned runs; task creation and resume are still Host-only. Business-result verification, account/tenant identification and automatic recovery remain unimplemented. See the [Bridge documentation](packages/browser/bridge-browser/README.md).
+Trusted Host plugins can persist run state and action facts through `ctx.browserRuns` and bind browser calls to a run/control revision using `withExecution`. Pause, stop and control changes revoke old contexts; the ledger records the owning run and transport receipts. The side panel can show, pause and request stopping existing Host-owned runs. For an eligible paused run, bind the intended page above the conversation, then click **Continue on selected page**. The Host reserves that native target before marking the run running; its executor must enter a fresh context to continue. Ordinary chat does not create or pick up runs automatically. Business-result verification, account/tenant identification and automatic recovery remain unimplemented. See the [Bridge documentation](packages/browser/bridge-browser/README.md).
 
 ```sh
 pnpm run typecheck

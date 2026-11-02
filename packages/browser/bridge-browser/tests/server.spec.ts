@@ -5,7 +5,7 @@ import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import WebSocket from 'ws'
 import { BridgeServer, BridgeToolError, isLoopbackAddress, messageToText, payloadCode, payloadMessage } from '../src/server.ts'
-import { isPageBrowserTool, BRIDGE_CONFIRM_TOOL_METHOD, BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, BRIDGE_SESSION_PURGE_METHOD, BRIDGE_RUN_LIST_METHOD, BRIDGE_RUN_CONTROL_METHOD, type BridgeFrame } from '../src/protocol.ts'
+import { isPageBrowserTool, BRIDGE_CONFIRM_TOOL_METHOD, BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, BRIDGE_SESSION_PURGE_METHOD, BRIDGE_RUN_LIST_METHOD, BRIDGE_RUN_CONTROL_METHOD, BRIDGE_RUN_RETARGET_METHOD, type BridgeFrame } from '../src/protocol.ts'
 import { SessionPurgeError } from '../src/session-purge.ts'
 import type { BrowserHostApi, HostEventFrame } from '../src/host-api.ts'
 import { createRunStorage } from './helpers/run-storage.ts'
@@ -130,6 +130,48 @@ async function connectedLedger(scoped = false, autoConfirm = true) {
 }
 
 describe('recorded tool dispatch', () => {
+  it('reserves a selected target before paused handoff publishes its running revision', async () => {
+    const h = await connectedLedger(true)
+    const queued = await h.storage.store.create({ sessionId: asSessionId('handoff-session'), requiredCriteriaIds: ['saved'] })
+    const run = await h.storage.store.transition(queued.runId, queued.version, 'running')
+    const paused = await h.storage.store.control(run.runId, run.version, 'pause')
+    const payload = { sessionId: run.sessionId, runId: run.runId, expectedVersion: paused.version, controlRevision: paused.controlRevision, targetBinding: 'page_user_selected' }
+    send(h.ws, { t: 'rpc', id: 'handoff', method: BRIDGE_RUN_RETARGET_METHOD, payload })
+    await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === 'handoff'))
+    expect(h.frames).toContainEqual(expect.objectContaining({ id: 'handoff', ok: true,
+      result: expect.objectContaining({ state: 'running', controlRevision: 3, targetBinding: 'page_user_selected' }) }))
+    const resumed = h.storage.store.get(run.runId)!
+    await h.storage.store.withExecution(run.runId, resumed.controlRevision, async () => {
+      const result = h.bridge.requestTool('browser_snapshot', {}, new AbortController().signal)
+      await waitFor(() => h.frames.some(frame => frame.t === 'tool.call'))
+      const call = h.frames.find(frame => frame.t === 'tool.call')! as Extract<BridgeFrame, { t: 'tool.call' }>
+      expect(call.targetBinding).toBe('page_user_selected')
+      await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === `confirm-${call.id}`))
+      send(h.ws, { t: 'tool.result', id: call.id, action: call.action, ok: true, result: {} })
+      await result
+    })
+    send(h.ws, { t: 'rpc', id: 'duplicate-handoff', method: BRIDGE_RUN_RETARGET_METHOD, payload })
+    await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === 'duplicate-handoff'))
+    expect(h.frames).toContainEqual(expect.objectContaining({ id: 'duplicate-handoff', ok: false }))
+    expect(h.storage.store.get(run.runId)).toEqual(resumed)
+    expect(h.callMock).not.toHaveBeenCalled()
+  })
+
+  it('refuses foreign, stale or uncertain handoffs without changing the task', async () => {
+    const h = await connectedLedger(true)
+    const queued = await h.storage.store.create({ sessionId: asSessionId('handoff-refused'), requiredCriteriaIds: ['saved'] })
+    const run = await h.storage.store.transition(queued.runId, queued.version, 'running')
+    const paused = await h.storage.store.control(run.runId, run.version, 'pause')
+    await h.ledger.prepare({ requestId: 'handoff-unknown', connectionId: 'synthetic', sessionId: run.sessionId, name: 'browser_press', args: {}, expiresAt: Date.now() + 60000 })
+    const base = { sessionId: run.sessionId, runId: run.runId, expectedVersion: paused.version, controlRevision: paused.controlRevision, targetBinding: 'page_selected' }
+    for (const [index, payload] of [{ ...base, sessionId: 'foreign' }, { ...base, expectedVersion: 0 }, base].entries()) {
+      const id = `handoff-refused-${index}`
+      send(h.ws, { t: 'rpc', id, method: BRIDGE_RUN_RETARGET_METHOD, payload })
+      await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === id))
+      expect(h.frames).toContainEqual(expect.objectContaining({ id, ok: false }))
+    }
+    expect(h.storage.store.get(run.runId)).toEqual(paused)
+  })
   it('pins the first native target across calls, permits a new revision, and refuses borrowing across connections', async () => {
     const h = await connectedLedger(true, false)
     const queued = await h.storage.store.create({ sessionId: asSessionId('target-session'), requiredCriteriaIds: ['saved'] })
@@ -201,7 +243,7 @@ describe('recorded tool dispatch', () => {
     const queued = await h.storage.store.create({ sessionId: asSessionId('target-tab-tools'), requiredCriteriaIds: ['saved'] })
     const run = await h.storage.store.transition(queued.runId, queued.version, 'running')
     await h.storage.store.withExecution(run.runId, 0, () => {
-      expect(() => h.bridge.requestTool(name, {}, new AbortController().signal)).toThrow('trusted target handoff')
+      expect(() => h.bridge.requestTool(name, {}, new AbortController().signal)).toThrow(BridgeToolError)
       expect(h.ledger.list()).toEqual([])
       expect(h.frames.some(frame => frame.t === 'tool.call')).toBe(false)
     })

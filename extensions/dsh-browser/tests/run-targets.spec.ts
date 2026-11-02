@@ -13,6 +13,35 @@ function fixture(capacity = 5000) {
   return { targets, runs, capture, select: (tab: Partial<ToolTargetIdentity>) => { selected = { ...selected, ...tab } } }
 }
 describe('run target pins', () => {
+  it('requires the exact prepared target before a handoff can enter browser dispatch', () => {
+    const { runs, capture, targets, select } = fixture()
+    const prepared = runs.prepare(scope, 'session-a', capture())!
+    expect(runs.join(scope, 'session-a', capture())).toBeUndefined()
+    expect(runs.join(scope, 'session-a', capture(), 'foreign')).toBeUndefined()
+    const accepted = runs.join(scope, 'session-a', capture(), prepared.id)!
+    expect(accepted.accept()).toBe(true)
+    targets.invalidateDocument(1)
+    select({ url: 'https://example.test/next' })
+    expect(accepted.current()).toBe(true)
+  })
+  it('does not follow a document change before prepared-target confirmation', () => {
+    const { runs, capture, targets } = fixture()
+    const prepared = runs.prepare(scope, 'session-a', capture())!
+    const pending = runs.join(scope, 'session-a', capture(), prepared.id)!
+    targets.invalidateDocument(1)
+    expect(pending.accept()).toBe(false)
+    expect(pending.current()).toBe(false)
+    expect(runs.join(scope, 'session-a', capture(), prepared.id)).toBeDefined()
+    expect(runs.join(scope, 'session-a', capture(), prepared.id)!.accept()).toBe(false)
+  })
+  it('cannot restore prepared handoffs after owner replacement or move them into another revision', () => {
+    const { runs, capture } = fixture()
+    const prepared = runs.prepare(scope, 'session-a', capture())!
+    expect(runs.join({ ...scope, controlRevision: 1 }, 'session-a', capture(), prepared.id)).toBeUndefined()
+    runs.revokeAll()
+    expect(prepared.current()).toBe(false)
+    expect(runs.join(scope, 'session-a', capture(), prepared.id)).toBeUndefined()
+  })
   it('keeps the original tab across observed navigation while fencing an older document request', () => {
     const { runs, targets, capture, select } = fixture()
     const before = capture()

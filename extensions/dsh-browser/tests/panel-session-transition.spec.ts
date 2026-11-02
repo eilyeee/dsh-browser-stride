@@ -66,7 +66,8 @@ describe('panel session transitions', () => {
       onSessionResumeHint: vi.fn((callback) => { onResumeHint = callback; return unsubscribe }),
       respondToApproval: vi.fn(async () => {}),
       resolveTabAffinity: vi.fn(async () => {}),
-      rebindTabAffinity: vi.fn(async () => {}),
+      retargetRun: vi.fn(async () => {}),
+    rebindTabAffinity: vi.fn(async () => {}),
       clearSelection: vi.fn(async () => {}),
       registerWindow: vi.fn(async () => {}),
       setActiveSession: vi.fn()

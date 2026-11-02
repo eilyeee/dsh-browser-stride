@@ -3,8 +3,8 @@ import { BRIDGE_RUN_LIST_METHOD, BRIDGE_RUN_CONTROL_METHOD, type BrowserRunList,
 import { PanelRpcError, type PanelApi } from './api.ts'
 import { parseBrowserRuns, type BrowserRunCopy } from './browser-runs.ts'
 
-export function BrowserRuns({ api, sessionId, connected, copy }: {
-  api: Pick<PanelApi, 'rpc'>; sessionId: string | null; connected: boolean; copy: BrowserRunCopy
+export function BrowserRuns({ api, sessionId, connected, copy, targetRevision }: {
+  api: Pick<PanelApi, 'rpc'> & Partial<Pick<PanelApi, 'retargetRun'>>; targetRevision?: number; sessionId: string | null; connected: boolean; copy: BrowserRunCopy
 }) {
   const [view, setView] = useState<{ sessionId: string; data: BrowserRunList } | null>(null)
   const [loadError, setLoadError] = useState(false)
@@ -40,14 +40,17 @@ export function BrowserRuns({ api, sessionId, connected, copy }: {
     return () => { ++generation.current; clearTimeout(timer) }
   }, [api, sessionId, connected, refresh])
 
-  async function control(event: MouseEvent<HTMLButtonElement>, run: BrowserRunSummary, action: PanelRunControl) {
+  async function control(event: MouseEvent<HTMLButtonElement>, run: BrowserRunSummary, action: PanelRunControl | 'retarget') {
     if (!event.nativeEvent.isTrusted || controlling.current || !connected || sessionId === null || run.sessionId !== sessionId) return
     controlling.current = true
     const current = ++generation.current // Invalidate reads started before this control.
     setPending(run.runId)
     setNotice(null)
     try {
-      await api.rpc(BRIDGE_RUN_CONTROL_METHOD, { sessionId, runId: run.runId, expectedVersion: run.version, control: action })
+      if (action === 'retarget') {
+        if (targetRevision === undefined || !run.canRetarget || api.retargetRun === undefined) return
+        await api.retargetRun({ sessionId, runId: run.runId, expectedVersion: run.version, controlRevision: run.controlRevision, affinityRevision: targetRevision })
+      } else await api.rpc(BRIDGE_RUN_CONTROL_METHOD, { sessionId, runId: run.runId, expectedVersion: run.version, control: action })
     } catch (error) {
       if (generation.current === current) setNotice({ sessionId, code: error instanceof PanelRpcError ? error.code : 'unknown' })
     } finally {
@@ -83,8 +86,11 @@ export function BrowserRuns({ api, sessionId, connected, copy }: {
         </div>
         {(run.recoveryRequired || run.requiresReconciliation) && <p>{copy.reconcileHelp}</p>}
         {run.state === 'paused' && <p>{copy.pausedHelp}</p>}
+        {run.canRetarget && <p>{copy.retargetHelp}</p>}
         {run.state === 'stopping' && <p>{copy.stoppingHelp}</p>}
-        {run.controls.length > 0 && <div className="browser-run-actions">
+        {(run.controls.length > 0 || run.canRetarget) && <div className="browser-run-actions">
+          {run.canRetarget && api.retargetRun !== undefined && <button type="button" className="secondary run-retarget"
+            disabled={pending !== null || targetRevision === undefined} onClick={event => { void control(event, run, 'retarget') }}>{copy.retarget}</button>}
           {run.controls.map(action => <button key={action} type="button" className="secondary"
             disabled={pending !== null} onClick={event => { void control(event, run, action) }}>
             {action === 'pause' ? copy.pause : copy.stop}

@@ -2260,7 +2260,8 @@ export function App(): React.JSX.Element {
               )}
         </section>
       )}
-      <BrowserRuns api={api} sessionId={sessionRef.current} connected={state === 'connected' && !sessionChanging} copy={copy.runs} />
+      <BrowserRuns api={api} sessionId={sessionRef.current} connected={state === 'connected' && !sessionChanging} copy={copy.runs}
+        {...(tabAffinity !== null && (tabAffinity.status === 'following' || tabAffinity.status === 'background') && tabAffinity.controlled !== null ? { targetRevision: tabAffinity.revision } : {})} />
       <div className="messages-pane">
       <div className="messages" ref={scrollRef} onScroll={syncScrollBottom}>
         {rows.length === 0 && streamRow === null && !working && (

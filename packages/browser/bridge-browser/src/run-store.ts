@@ -276,6 +276,23 @@ export class BrowserRunStore {
     })
   }
 
+  /** Trusted target handoff: reserve its native pin before publishing running. */
+  retargetPaused(runId: RunId, expectedVersion: number, expectedRevision: number, attachTarget: (revision: number) => void, signal?: AbortSignal): Promise<BrowserRunRecord> {
+    return this.exclusive(async () => {
+      if (signal?.aborted) throw new BrowserRunStoreError('cancelled')
+      const run = this.current(runId, expectedVersion)
+      if (run.state !== 'paused') throw new BrowserRunStoreError('invalid-state')
+      if (run.controlRevision !== expectedRevision) throw new BrowserRunStoreError('stale-control-revision')
+      this.assertReconciled(run)
+      this.assertSessionAvailable(run)
+      // One explicit operation performs target_changed and resume together.
+      const revision = nextControlRevision(nextControlRevision(run.controlRevision, 'target_changed'), 'resume')
+      if (!Number.isSafeInteger(revision)) throw new BrowserRunStoreError('invalid-state')
+      attachTarget(revision)
+      return this.save({ ...run, state: 'running', controlRevision: revision })
+    })
+  }
+
   /** Trusted Host facts only. Tool text must never be converted to verified. */
   recordFact(runId: RunId, expectedVersion: number, fact: ActionFact): Promise<BrowserRunRecord> {
     const parsed = factSchema.parse(JSON.parse(canonicalize(fact)))

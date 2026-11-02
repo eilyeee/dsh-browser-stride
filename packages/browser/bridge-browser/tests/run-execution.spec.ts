@@ -15,6 +15,49 @@ async function setup() {
 }
 
 describe('trusted Host run execution scopes', () => {
+  it('publishes a resumed revision only after its trusted target is reserved, without reviving old scopes', async () => {
+    const { store, run } = await setup()
+    await store.withExecution(run.runId, 0, async () => {
+      const old = store.executionFor()!
+      const paused = await store.control(run.runId, run.version, 'pause')
+      let attached = false
+      const resumed = await store.retargetPaused(run.runId, paused.version, paused.controlRevision, revision => {
+        expect(store.get(run.runId)?.state).toBe('paused')
+        expect(revision).toBe(3)
+        attached = true
+      })
+      expect(attached).toBe(true)
+      expect(resumed).toMatchObject({ state: 'running', controlRevision: 3, version: paused.version + 1 })
+      expect(old.signal.aborted).toBe(true)
+      expect(() => store.executionFor()).toThrow('execution-context-expired')
+      await store.withExecution(run.runId, 3, () => expect(store.executionFor()?.controlRevision).toBe(3))
+      await expect(store.retargetPaused(run.runId, paused.version, paused.controlRevision, () => {})).rejects.toMatchObject({ code: 'stale-version' })
+    })
+  })
+  it('keeps a paused run unchanged if native target reservation fails or was cancelled', async () => {
+    const { store, run } = await setup()
+    const paused = await store.control(run.runId, run.version, 'pause')
+    await expect(store.retargetPaused(run.runId, paused.version, paused.controlRevision, () => { throw new Error('native target unavailable') })).rejects.toThrow('native target unavailable')
+    expect(store.get(run.runId)).toEqual(paused)
+    const controller = new AbortController(); controller.abort()
+    await expect(store.retargetPaused(run.runId, paused.version, paused.controlRevision, () => {}, controller.signal)).rejects.toMatchObject({ code: 'cancelled' })
+    await expect(store.retargetPaused(run.runId, paused.version, 0, () => {})).rejects.toMatchObject({ code: 'stale-control-revision' })
+    expect(store.get(run.runId)).toEqual(paused)
+  })
+  it.each(['prepared', 'unresolved', 'failed'])('blocks handoff while a %s write needs settlement', async state => {
+    const { store, run } = await setup()
+    await store.dispatches.prepare({ requestId: 'handoff-pending', connectionId: 'synthetic', sessionId: run.sessionId,
+      name: 'browser_press', args: {}, expiresAt: Date.now() + 60000 })
+    if (state !== 'prepared') {
+      await store.dispatches.markSent('handoff-pending')
+      await store.dispatches.settle('handoff-pending', state === 'failed' ? { state: 'returned', receipt: { ok: false, errorCode: 'action-failed' } } : { state: 'unresolved', reason: 'cancelled' })
+    }
+    const paused = await store.control(run.runId, run.version, 'pause')
+    let attached = false
+    await expect(store.retargetPaused(run.runId, paused.version, paused.controlRevision, () => { attached = true })).rejects.toMatchObject({ code: 'reconciliation-required' })
+    expect(attached).toBe(false)
+    expect(store.get(run.runId)).toEqual(paused)
+  })
   it('revalidates only the original Host object, never a copy of wire ids', async () => {
     const { store, run } = await setup()
     let captured!: NonNullable<ReturnType<typeof store.executionFor>>

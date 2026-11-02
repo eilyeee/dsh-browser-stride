@@ -22,7 +22,8 @@ import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer } from 'ws'
 import type { BrowserHostApi } from './host-api.ts'
-import { canonicalize, makeActionId } from './contracts/ids.ts'
+import { canonicalize, makeActionId, asRunId } from './contracts/ids.ts'
+import { z } from 'zod'
 import { toolCommandMaterial } from './tool-identity.ts'
 import type { ToolActionIdentity, ToolDispatchConfirmation } from './protocol.ts'
 import { transportReceipt, type BrowserDispatchLedger, type DispatchSettlement } from './dispatch-ledger.ts'
@@ -35,6 +36,7 @@ import {
   sameToolConfirmation,
   isPageBrowserTool,
   isRunTabMutation,
+  BRIDGE_RUN_RETARGET_METHOD,
   PROTOCOL_MISMATCH_CLOSE_CODE,
   isReadOnlyBrowserTool,
   HELLO_TIMEOUT_MS,
@@ -119,7 +121,7 @@ export interface BridgeServerDeps {
   /** Production always provides the durable ledger; optional for transport-only unit fixtures. */
   dispatches?: Pick<BrowserDispatchLedger, 'prepare' | 'markSent' | 'settle' | 'get'>
   /** Trusted Host async execution scopes; never caller/model-supplied ids. */
-  runs?: Pick<BrowserRunStore, 'executionFor' | 'assertDispatchAuthority'> & RunPanelStore
+  runs?: Pick<BrowserRunStore, 'executionFor' | 'assertDispatchAuthority' | 'retargetPaused'> & RunPanelStore
   /**
    * Test seam: force the remote address seen by the privilege gate. The
    * sandbox cannot bind arbitrary loopback literals, so the non-loopback
@@ -232,7 +234,7 @@ export class BridgeServer {
     try { execution = this.deps.runs?.executionFor(sessionId) }
     catch { throw new BridgeToolError('action-failed', 'Browser run execution context is missing, expired or not permitted to dispatch. Re-establish the run context before further actions.') }
     if (execution !== undefined) {
-      if (isRunTabMutation(name)) throw new BridgeToolError('execution-denied', 'Run-bound tab creation, follow and close require a trusted target handoff, which is not yet supported.')
+      if (isRunTabMutation(name)) throw new BridgeToolError('execution-denied', 'Run-bound tab creation, follow and close are unavailable. Pause the task and use its selected-page continuation control.')
       if (this.deps.dispatches === undefined) throw new BridgeToolError('internal', 'Run-scoped browser dispatch requires a durable ledger')
       sessionId = execution.sessionId
       signal = AbortSignal.any([signal, execution.signal])
@@ -592,6 +594,31 @@ export class BridgeServer {
     // An ordered call may have waited while another connection replaced its
     // owner. It must never borrow the new connection's identity or signal.
     if (this.current !== conn || conn.abort.signal.aborted) return
+    if (frame.method === BRIDGE_RUN_RETARGET_METHOD) {
+      try {
+        const id = z.string().min(1).max(200).refine(value => value.trim() === value)
+        const counter = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER)
+        const payload = z.strictObject({ runId: id, sessionId: id, expectedVersion: counter,
+          controlRevision: counter, targetBinding: id }).parse(frame.payload)
+        const runs = this.deps.runs
+        if (runs === undefined) throw new Error('unavailable')
+        const run = runs.get(asRunId(payload.runId))
+        if (run === undefined || run.sessionId !== payload.sessionId) throw new Error('foreign run')
+        const changed = await runs.retargetPaused(run.runId, payload.expectedVersion, payload.controlRevision, revision => {
+          if (this.current !== conn || conn.abort.signal.aborted) throw new Error('connection changed')
+          const previous = this.runTargets.get(run.runId)
+          if (previous !== undefined && previous.controlRevision >= revision) throw new Error('target revision consumed')
+          if (previous === undefined && this.runTargets.size >= 5000) throw new Error('target cache full')
+          this.runTargets.set(run.runId, { sessionId: run.sessionId, controlRevision: revision, connectionId: conn.connectionId, id: payload.targetBinding })
+        }, conn.abort.signal)
+        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true, result: { runId: changed.runId,
+          sessionId: changed.sessionId, version: changed.version, controlRevision: changed.controlRevision,
+          state: changed.state, targetBinding: payload.targetBinding } })
+      } catch (error) {
+        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false, error: browserRunPanelFailure(error) })
+      }
+      return
+    }
     if (frame.method === BRIDGE_CONFIRM_TOOL_METHOD) {
       const payload = frame.payload
       const pending = isToolDispatchConfirmation(payload) ? this.pendingTools.get(payload.id) : undefined

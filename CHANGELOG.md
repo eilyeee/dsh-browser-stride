@@ -18,11 +18,20 @@ no release version has been assigned yet.
 
 ### Added
 
+- Eligible paused runs can continue on the page explicitly bound by the user.
+  A trusted panel click checks the displayed binding revision; the worker reserves
+  an opaque native target and the Host registers it before publishing the new
+  running revision. Pending, unresolved or failed writes and recovery-required
+  records block handoff. Old execution contexts remain revoked, and the executor
+  must enter a fresh context. The selected document is fenced until the first
+  execution confirmation. The optional `canRetarget` capability keeps wire v4
+  compatibility; uncertain replies are refreshed without automatic retries.
+
 - Wire protocol v4 pins managed page operations to the first confirmed native
   tab/binding for a run/control revision. Known pins enter command digests;
   rebinds, tab lifetime/window changes and connection replacement cannot renew
   them. A fresh trusted revision can select a new target. Managed open/follow/close
-  are refused until trusted target handoff is supported; unscoped tools retain
+  tools remain refused; unscoped tools retain
   their existing permission paths. Account/tenant identification is not implemented.
 
 - The v3 confirmation flow (extended by v4) requires explicit legacy/run scopes, includes run/control
@@ -40,7 +49,7 @@ no release version has been assigned yet.
 - The side panel displays bounded metadata for existing Host-owned browser runs,
   with version-checked pause/stop controls and explicit stopping acknowledgement.
   Synthetic clicks, foreign-session controls and queued controls from replaced
-  connections are refused. Creation, resume and facts stay Host-only; automatic
+  connections are refused. Creation and facts stay Host-only; automatic
   reconciliation remains unimplemented.
 
 - Trusted Host `withExecution` contexts bind real browser dispatch to a run and
@@ -76,7 +85,8 @@ no release version has been assigned yet.
   state, version-checked controls and immutable action facts. Reopening fences
   unfinished execution contexts and refuses automatic resume. Browser tools
   use explicit Host scopes; the panel reads metadata and controls existing runs.
-  Task creation, resume and action facts remain Host-only.
+  Task creation and action facts remain Host-only; the panel now also supports
+  explicit selected-page continuation for eligible paused runs.
 - The Host rejects unversioned and incompatible extension handshakes before
   authentication, preserving its current connection and unconsumed pairing code.
 - The extension rejects incompatible Host handshakes before accepting a new

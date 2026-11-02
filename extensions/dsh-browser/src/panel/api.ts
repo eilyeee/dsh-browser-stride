@@ -90,7 +90,7 @@ interface SessionResumeHintMessage {
   sessionId: string | null
 }
 
-type BackgroundMessage = RpcResultMessage | RespondResultMessage | SettingsResultMessage | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | SelectionMessage | SessionResumeHintMessage | { type: 'browser-pairing'; status: BrowserPairingStatus }
+type BackgroundMessage = RpcResultMessage | RespondResultMessage | SettingsResultMessage | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | (Omit<TabAffinityRebindResultMessage, 'type'> & { type: 'browser-run.retarget.result' }) | SelectionMessage | SessionResumeHintMessage | { type: 'browser-pairing'; status: BrowserPairingStatus }
 
 /** Structured gateway failure retained for product-level error handling. */
 export class PanelRpcError extends Error {
@@ -128,6 +128,7 @@ export interface PanelApi {
   onSessionResumeHint(callback: (sessionId: string | null) => void): () => void
   respondToApproval(id: string, decision: ApprovalDecision): Promise<void>
   resolveTabAffinity(revision: number, decision: TabAffinityDecision, sessionId: string | null): Promise<void>
+  retargetRun(payload: { runId: string; sessionId: string; expectedVersion: number; controlRevision: number; affinityRevision: number }): Promise<void>
   rebindTabAffinity(): Promise<void>
   /** Clear all selection state, or only the exact selection supplied. */
   clearSelection(selection?: PageSelection): Promise<void>
@@ -230,12 +231,13 @@ export function connectPanel(): PanelApi {
         for (const listener of selectionListeners) listener(selection)
         break
       }
+      case 'browser-run.retarget.result':
       case 'tab-affinity.rebind.result': {
         const entry = pendingRebinds.get(msg.id)
         if (entry === undefined) return
         pendingRebinds.delete(msg.id)
         if (msg.ok) entry.resolve()
-        else entry.reject(new Error(msg.error?.message
+        else entry.reject(new PanelRpcError(msg.error?.code ?? 'handoff-failed', msg.error?.message
           ?? (getUiLocale() === 'zh' ? '无法绑定当前标签页' : 'Failed to bind the current tab')))
         break
       }
@@ -423,6 +425,22 @@ export function connectPanel(): PanelApi {
     },
     resolveTabAffinity(revision, decision, sessionId) {
       return send({ type: 'tab-affinity.response', revision, decision, sessionId })
+    },
+    retargetRun(payload) {
+      const id = crypto.randomUUID()
+      return new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pendingRebinds.delete(id)
+          reject(new PanelRpcError('timeout', 'Task target change was not confirmed; refresh its status.'))
+        }, 17_000)
+        const entry = { resolve: () => { clearTimeout(timer); resolve() }, reject: (error: Error) => { clearTimeout(timer); reject(error) } }
+        pendingRebinds.set(id, entry)
+        void send({ type: 'browser-run.retarget', id, ...payload }, { kind: 'rebind', id }).catch((cause: unknown) => {
+          if (pendingRebinds.get(id) !== entry) return
+          pendingRebinds.delete(id)
+          entry.reject(connectionError(cause))
+        })
+      })
     },
     rebindTabAffinity() {
       const id = crypto.randomUUID()

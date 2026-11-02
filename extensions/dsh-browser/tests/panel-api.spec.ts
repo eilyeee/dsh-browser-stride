@@ -11,6 +11,21 @@ afterEach(() => {
 })
 
 describe('panel protocol', () => {
+  it('times out an unconfirmed target handoff without replaying it', async () => {
+    vi.useFakeTimers()
+    let receive: ((value: unknown) => void) | undefined
+    const postMessage = vi.fn()
+    vi.stubGlobal('chrome', { runtime: { connect: vi.fn(() => ({ postMessage,
+      onMessage: { addListener: (callback: (value: unknown) => void) => { receive = callback } }, onDisconnect: { addListener: vi.fn() } })) } })
+    const api = connectPanel()
+    const result = api.retargetRun({ runId: 'run-a', sessionId: 'session-a', expectedVersion: 2, controlRevision: 1, affinityRevision: 3 }).catch(error => error)
+    const message = postMessage.mock.calls[0][0] as { id: string }
+    await vi.advanceTimersByTimeAsync(17000)
+    expect(await result).toMatchObject({ code: 'timeout' })
+    receive?.({ type: 'browser-run.retarget.result', id: message.id, ok: true })
+    expect(await result).toMatchObject({ code: 'timeout' })
+    expect(postMessage).toHaveBeenCalledTimes(1)
+  })
   it('accepts session trust while retaining the previous permanent-trust wire value', () => {
     expect(isApprovalDecision('always-allow-reads')).toBe(true)
     expect(isApprovalDecision('trust-session')).toBe(true)
