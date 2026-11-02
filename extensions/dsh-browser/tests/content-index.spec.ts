@@ -3,8 +3,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 const LISTENER_KEY = '__dshBrowserContentScriptListener__'
 const WATCHER_KEY = '__dshBrowserSelectionWatcher__'
+const LIFECYCLE_KEY = '__dshBrowserLifecycleListener__'
 
 afterEach(() => {
+  const listener = (globalThis as Record<string, unknown>)[LIFECYCLE_KEY] as EventListener | undefined
+  if (listener !== undefined) for (const event of ['pagehide', 'pageshow', 'popstate', 'hashchange']) window.removeEventListener(event, listener)
+  delete (globalThis as Record<string, unknown>)[LIFECYCLE_KEY]
   Reflect.deleteProperty(navigator, 'userActivation')
   delete (globalThis as Record<string, unknown>)[LISTENER_KEY]
   delete (globalThis as Record<string, unknown>)[WATCHER_KEY]
@@ -13,6 +17,17 @@ afterEach(() => {
 })
 
 describe('content script registration', () => {
+  it('ignores the first pageshow while preserving back-forward cache revocation', async () => {
+    const sendMessage = vi.fn(async () => undefined)
+    vi.stubGlobal('chrome', { runtime: { onMessage: { addListener: vi.fn(), removeListener: vi.fn() }, sendMessage } })
+    await import('../src/content/index.ts')
+    sendMessage.mockClear()
+    window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: false }))
+    expect(sendMessage).not.toHaveBeenCalled()
+    window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }))
+    expect(sendMessage).toHaveBeenCalledWith({ type: 'DSH_DOCUMENT_CHANGED' })
+  })
+
   it('replaces a stale listener when content.js is injected again', async () => {
     const addListener = vi.fn()
     const removeListener = vi.fn()

@@ -80,6 +80,8 @@ async function waitForPhase(phase) {
   const deadline = Date.now() + 30_000
   while (Date.now() < deadline) {
     try {
+      const outcome = await readFile(result, 'utf8').then(JSON.parse).catch(() => undefined)
+      if (outcome?.ok === false) throw new Error(`Browser probe failed: ${outcome.error}`)
       const progress = JSON.parse(await readFile(`${result}.phase`, 'utf8'))
       if (progress.phase === phase) return progress
     } catch (error) {
@@ -635,7 +637,9 @@ try {
   assert.equal(await card.getByText('已暂停', { exact: true }).count(), 1, 'synthetic clicks must not transfer target authority')
   await retarget.click()
 
-  await waitForPhase('stop-ready')
+  await waitForPhase('stop-ready').catch(async error => {
+    throw new Error(`${error.message}; task controls: ${await card.innerText()}; panel session matches test: ${await browser.panel.locator('.app').getAttribute('data-session-id') === session.sessionId}`)
+  })
   await card.getByText('运行中', { exact: true }).waitFor()
   await card.getByRole('button', { name: '停止任务', exact: true }).click()
   await card.getByText('停止中', { exact: true }).waitFor()

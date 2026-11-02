@@ -92,7 +92,9 @@ interface SessionResumeHintMessage {
   sessionId: string | null
 }
 
-type BackgroundMessage = RpcResultMessage | RespondResultMessage | SettingsResultMessage | (Omit<SettingsResultMessage, 'type'> & { type: 'browser-pairing.unpair.result' }) | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | (Omit<TabAffinityRebindResultMessage, 'type'> & { type: 'browser-run.retarget.result' | 'tab-affinity.unbind.result' }) | SelectionMessage | SessionResumeHintMessage | { type: 'browser-pairing'; status: BrowserPairingStatus }
+export interface PageAccessStatus { activeGranted: boolean; controlledGranted: boolean; controlledTabId: number | null }
+
+type BackgroundMessage = ({ type: 'page-access' } & PageAccessStatus) | RpcResultMessage | RespondResultMessage | SettingsResultMessage | (Omit<SettingsResultMessage, 'type'> & { type: 'browser-pairing.unpair.result' | 'page-access.revoke.result' }) | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | (Omit<TabAffinityRebindResultMessage, 'type'> & { type: 'browser-run.retarget.result' | 'tab-affinity.unbind.result' }) | SelectionMessage | SessionResumeHintMessage | { type: 'browser-pairing'; status: BrowserPairingStatus }
 
 /** Structured gateway failure retained for product-level error handling. */
 export class PanelRpcError extends Error {
@@ -119,6 +121,8 @@ export interface PanelApi {
   startBrowserPairing(bridgeUrl: string): Promise<void>
   cancelBrowserPairing(): Promise<void>
   unpairBrowser(): Promise<void>
+  onPageAccess(callback: (status: PageAccessStatus) => void): () => void
+  revokePageAccess(tabId: number): Promise<void>
   onBrowserPairing(callback: (status: BrowserPairingStatus) => void): () => void
   rpc<T = unknown>(method: string, payload?: unknown): Promise<T>
   respond(rpcId: string, result: RespondResult): Promise<unknown>
@@ -159,6 +163,7 @@ export function connectPanel(): PanelApi {
     resolve: () => void
     reject: (error: Error) => void
   }>()
+  const pageAccessListeners = new Set<(status: PageAccessStatus) => void>()
   const statusListeners = new Set<Parameters<PanelApi['onStatus']>[0]>()
   const pairingListeners = new Set<(status: BrowserPairingStatus) => void>()
   const eventListeners = new Set<(frame: ServerFrame) => void>()
@@ -204,6 +209,7 @@ export function connectPanel(): PanelApi {
           ?? (getUiLocale() === 'zh' ? '回答提交失败' : 'Failed to send the answer')))
         break
       }
+      case 'page-access.revoke.result':
       case 'browser-pairing.unpair.result':
       case 'settings.result': {
         const entry = pendingSettings.get(msg.id)
@@ -215,6 +221,9 @@ export function connectPanel(): PanelApi {
           : (getUiLocale() === 'zh' ? '保存设置失败' : 'Failed to save settings')))
         break
       }
+      case 'page-access':
+        for (const listener of pageAccessListeners) listener(msg)
+        break
       case 'status':
         for (const listener of statusListeners) {
           if (msg.connectionDisconnected === undefined && msg.hasCredential === undefined) listener(msg.state, msg.caps)
@@ -363,6 +372,19 @@ export function connectPanel(): PanelApi {
   }
 
   return {
+    onPageAccess(callback) { pageAccessListeners.add(callback); return () => { pageAccessListeners.delete(callback) } },
+    revokePageAccess(tabId) {
+      const id = crypto.randomUUID()
+      return new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => { pendingSettings.delete(id); reject(new PanelRpcError('timeout', 'Page access revocation was not confirmed')) }, 10000)
+        const entry = { resolve: () => { clearTimeout(timer); resolve() }, reject: (error: Error) => { clearTimeout(timer); reject(error) } }
+        pendingSettings.set(id, entry)
+        void send({ type: 'page-access.revoke', id, tabId }, { kind: 'settings', id }).catch((error: unknown) => {
+          if (pendingSettings.get(id) !== entry) return
+          pendingSettings.delete(id); entry.reject(connectionError(error))
+        })
+      })
+    },
     startBrowserPairing(bridgeUrl) { return send({ type: 'browser-pairing.start', bridgeUrl }) },
     cancelBrowserPairing() { return send({ type: 'browser-pairing.cancel' }) },
     unpairBrowser() {

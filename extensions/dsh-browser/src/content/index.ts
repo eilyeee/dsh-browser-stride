@@ -40,6 +40,14 @@ export interface ToolResult {
 function onMessage(message: unknown, _sender: chrome.runtime.MessageSender, sendResponse: (response: ToolResult) => void): true | undefined {
   if (typeof message !== 'object' || message === null) return
   const msg = message as { type?: string }
+  if (msg.type === 'DSH_PING') { sendResponse({ ok: true }); return }
+  if (msg.type === 'DSH_DEACTIVATE') {
+    selectionWatcher.dispose()
+    resetDeltaState(ids)
+    chrome.runtime.onMessage.removeListener(onMessage)
+    sendResponse({ ok: true })
+    return
+  }
   if (msg.type === 'DSH_BUDGET') {
     const incoming = (message as { budget?: Partial<SnapshotBudget> }).budget
     if (incoming !== undefined) {
@@ -93,7 +101,7 @@ function onMessage(message: unknown, _sender: chrome.runtime.MessageSender, send
 const contentGlobal = globalThis as typeof globalThis & {
   [CONTENT_SCRIPT_LISTENER]?: ContentListener
   [CONTENT_SELECTION_WATCHER]?: { dispose: () => void }
-  [CONTENT_LIFECYCLE_LISTENER]?: () => void
+  [CONTENT_LIFECYCLE_LISTENER]?: (event?: Event) => void
 }
 const previousListener = contentGlobal[CONTENT_SCRIPT_LISTENER]
 if (previousListener !== undefined) {
@@ -106,8 +114,15 @@ const previousLifecycle = contentGlobal[CONTENT_LIFECYCLE_LISTENER]
 if (previousLifecycle !== undefined) {
   for (const event of ['pagehide', 'pageshow', 'popstate', 'hashchange']) window.removeEventListener(event, previousLifecycle)
 }
-const clearReferences = (): void => { resetDeltaState(ids) }
+const clearReferences = (event?: Event): void => {
+  if (event?.type === 'pageshow' && !(event as PageTransitionEvent).persisted) return
+  resetDeltaState(ids)
+  void chrome.runtime.sendMessage({ type: 'DSH_DOCUMENT_CHANGED' }).catch(() => {})
+}
 for (const event of ['pagehide', 'pageshow', 'popstate', 'hashchange']) window.addEventListener(event, clearReferences)
+const navigation = (window as unknown as { navigation?: EventTarget }).navigation
+if (previousLifecycle !== undefined) navigation?.removeEventListener('currententrychange', previousLifecycle)
+navigation?.addEventListener('currententrychange', clearReferences)
 contentGlobal[CONTENT_LIFECYCLE_LISTENER] = clearReferences
 contentGlobal[CONTENT_SCRIPT_LISTENER] = onMessage
 contentGlobal[CONTENT_SELECTION_WATCHER] = selectionWatcher

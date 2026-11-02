@@ -128,6 +128,7 @@ export interface TabManagementContext {
   /** Controlled tab for the calling session, when one still exists. */
   controlledTabId?: number
   /** Rebind subsequent tools to one existing tab without activating it. */
+  allowsTab?: (tab: chrome.tabs.Tab) => boolean
   followTab?: (tab: chrome.tabs.Tab) => void | Promise<void>
   /** Mark the point after which a state-changing operation cannot be withdrawn. */
   commitAction?: () => void
@@ -146,11 +147,11 @@ function isInjectablePage(url: string | undefined): boolean {
 }
 
 /** Inject the packaged content script once per tab, coalescing concurrent recovery attempts. */
-async function injectContentScript(tabId: number): Promise<void> {
+async function injectContentScript(tabId: number, frames: TabFrame[]): Promise<void> {
   let pending = pendingInjections.get(tabId)
   if (pending === undefined) {
     pending = chrome.scripting.executeScript({
-      target: { tabId, allFrames: true },
+      target: { tabId, frameIds: frames.map(frame => frame.frameId) },
       files: [CONTENT_SCRIPT_FILE],
     }).then(() => undefined)
     pendingInjections.set(tabId, pending)
@@ -591,7 +592,7 @@ function tabManagementApproval(call: ToolCall, tab?: chrome.tabs.Tab): ApprovalP
     return {
       kind: 'read',
       action: call.name,
-      summary: locale === 'zh' ? '读取所有已打开标签页的标题和链接' : 'Read the titles and URLs of all open tabs',
+      summary: locale === 'zh' ? '读取已授权标签页的标题和链接' : 'Read titles and URLs of authorized tabs',
       origins: [],
       canTrust: false,
     }
@@ -645,7 +646,7 @@ async function dispatchTabManagementTool(
     const tabs = await chrome.tabs.query({})
     if (isCancelled(call, signal)) return cancelled()
     const records = tabs
-      .filter((tab): tab is chrome.tabs.Tab & { id: number } => tab.id !== undefined)
+      .filter((tab): tab is chrome.tabs.Tab & { id: number } => tab.id !== undefined && context.allowsTab?.(tab) !== false)
       .sort((left, right) => left.windowId - right.windowId || left.index - right.index)
       .map((tab) => ({
         tabId: tab.id,
@@ -658,7 +659,7 @@ async function dispatchTabManagementTool(
       }))
     return {
       ok: true,
-      result: { text: wrapUntrustedContent(JSON.stringify({ tabs: records }, null, 2), budget.maxChars) },
+      result: { text: wrapUntrustedContent(JSON.stringify({ tabs: records, ...(context.allowsTab === undefined ? {} : { scope: 'authorized-tabs' }) }, null, 2), budget.maxChars) },
     }
   }
 
@@ -667,11 +668,13 @@ async function dispatchTabManagementTool(
     return { ok: false, error: { code: 'action-failed', message: 'tabId must be a non-negative safe integer returned by browser_list_tabs.' } }
   }
   const before = await findTab(tabId)
+  if (before !== undefined && context.allowsTab?.(before) === false) return unavailable('This tab needs explicit authorization through the DSH Stride toolbar icon.')
   if (before === undefined) return unavailable(`Tab ${tabId} is no longer open. Call browser_list_tabs again.`)
   const approval = tabManagementApproval(call, before)
   const rejected = await authorizeTabManagement(approval, context.unrestrictedAccess, authorize, call, signal)
   if (rejected !== undefined) return rejected
   const current = await findTab(tabId)
+  if (current !== undefined && context.allowsTab?.(current) === false) return unavailable('Page authorization was revoked.')
   if (current === undefined) return unavailable(`Tab ${tabId} closed while approval was pending. Call browser_list_tabs again.`)
   if (tabUrl(current) !== tabUrl(before)) {
     return unavailable(`Tab ${tabId} navigated while approval was pending. Call browser_list_tabs again before retrying.`)
@@ -753,6 +756,7 @@ export async function dispatchToolCall(
   const frames = await listTabFrames(tab.id, tab.url)
   if (isCancelled(call, signal)) return cancelled()
   if (targetStillAllowed?.() === false) return targetChanged()
+  if (frames.length === 0) return unavailable('This page is not accessible. Click the DSH Stride toolbar icon on this tab to authorize it.')
   const frameError = validateFrameTarget(call, frames)
   if (frameError !== undefined) return frameError
   if (!isInjectablePage(tab.url) && !TAB_NATIVE_TOOLS.has(call.name)) {
@@ -806,11 +810,10 @@ export async function dispatchToolCall(
     if (!contentScriptReceiverMissing(error)) {
       return unavailable('The content script stopped responding after the operation was dispatched. Call browser_snapshot before continuing.')
     }
-    // Manifest content scripts do not run retroactively in tabs that were
-    // already open when an unpacked extension was installed or reloaded.
-    // Recover in place so the user never has to refresh and lose page state.
+    // Recover the packaged receiver only on the already-authorized native target.
+    // This also covers same-origin documents loaded after the toolbar grant.
     try {
-      await injectContentScript(tab.id)
+      await injectContentScript(tab.id, executionFrames)
     } catch {
       return await dispatchTabNativeTool(tab.id, tab.url, tab.title, tab.windowId, call, effectiveBudget, signal, targetStillAllowed, tabManagement.commitAction)
         ?? unavailable('The content script could not be loaded on this page. Its DOM does not support browser operations.')
@@ -926,6 +929,7 @@ export async function dispatchOpenTab(
   bindCreatedTab: (tab: chrome.tabs.Tab) => boolean,
   targetStillAllowed: (tabId: number) => boolean,
   commitAction?: () => void,
+  keepUnbound = false,
 ): Promise<ToolAnswer> {
   if (isCancelled(call, signal)) return cancelled()
   const parsed = parseHttpUrl(call.args.url)
@@ -978,6 +982,13 @@ export async function dispatchOpenTab(
         message: error instanceof Error ? error.message : 'Failed to navigate the new browser tab.',
       },
     }
+  }
+
+  if (keepUnbound) {
+    navigationWait.cancel()
+    if (isCancelled(call, signal)) { await removeCreatedTab(tabId); return cancelled() }
+    commitAction?.()
+    return { ok: true, result: { text: `Opened a tab at ${parsed.href}. It has no page access and was not bound. The user must click the DSH Stride toolbar icon on that tab before browser tools can use it.` } }
   }
 
   const ready = await navigationWait.ready

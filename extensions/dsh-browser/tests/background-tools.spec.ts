@@ -140,7 +140,7 @@ describe('dispatchToolCall', () => {
     expect(answer.ok).toBe(true)
     expect((answer.result as { text: string }).text).toContain('page')
     expect(chromeMock.executeScript).toHaveBeenCalledWith({
-      target: { tabId: 7, allFrames: true },
+      target: { tabId: 7, frameIds: [0] },
       files: ['content.js'],
     })
     expect(chromeMock.sendMessage).toHaveBeenCalledTimes(2)

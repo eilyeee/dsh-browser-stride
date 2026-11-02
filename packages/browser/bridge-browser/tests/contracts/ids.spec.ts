@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   asActionId,
   asBrowserInstanceId,
@@ -14,6 +14,9 @@ import {
   computeRequestDigest,
   isElementRefOf,
   makeElementRef,
+  makeActionId,
+  makeObservationId,
+  makeRequestId,
   parseElementRef,
   validateTargetScope,
   type ActionDigestMaterial,
@@ -22,6 +25,18 @@ import {
 } from '../../src/contracts/index.ts'
 
 describe('branded ids', () => {
+  it('mints cryptographic UUIDs in HTTP content contexts without randomUUID', () => {
+    const getRandomValues = globalThis.crypto.getRandomValues.bind(globalThis.crypto)
+    vi.stubGlobal('crypto', { getRandomValues })
+    try {
+      const first = makeObservationId(), second = makeObservationId()
+      expect(first).toMatch(/^obs_[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/)
+      expect(second).not.toBe(first)
+      expect(makeActionId()).toMatch(/^act_/)
+      expect(makeRequestId()).toMatch(/^req_/)
+    } finally { vi.unstubAllGlobals() }
+  })
+
   it('rejects empty and whitespace-only string ids', () => {
     expect(() => asRunId('')).toThrow(TypeError)
     expect(() => asRunId('   ')).toThrow(TypeError)

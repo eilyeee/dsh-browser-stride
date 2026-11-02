@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { chromium, findChromiumExecutable } from './chromium.mjs'
 
-export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl, pairingCode, deferPairing = false, trustedOrigin, connectTimeoutMs = 30_000, actionTimeoutMs = 8_000 }) {
+export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl, pairingCode, deferPairing = false, trustedOrigin, connectTimeoutMs = 30_000, actionTimeoutMs = 8_000, chromiumArgs = [] }) {
   if (!deferPairing && (typeof pairingCode !== 'string' || !/^[a-f0-9]{32}$/u.test(pairingCode))) {
     throw new Error('a fresh extension pairing code is required')
   }
@@ -24,6 +24,8 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
       args: [
         `--disable-extensions-except=${extensionDir}`,
         `--load-extension=${extensionDir}`,
+        '--enable-unsafe-extension-debugging',
+        ...chromiumArgs,
         '--disable-background-networking',
         '--disable-component-update',
       ],
@@ -34,6 +36,9 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
     let worker = context.serviceWorkers()[0]
     if (worker === undefined) worker = await context.waitForEvent('serviceworker', { timeout: 30_000 })
     const extensionId = new URL(worker.url()).host
+    // Tests provide one full extension panel page below. Disable a duplicate
+    // native sidebar view; the toolbar action still grants real activeTab access.
+    await worker.evaluate(() => chrome.sidePanel.setOptions({ enabled: false }))
     stage = 'opening benchmark target tab'
     let target = await context.newPage()
     target.setDefaultTimeout(actionTimeoutMs)
@@ -81,6 +86,29 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
         })
       })
     }, { configuredBridgeUrl: bridgeUrl, configuredPairingCode: pairingCode, configuredOrigin: trustedOrigin, timeoutMs: connectTimeoutMs, deferred: deferPairing })
+    async function authorizePage(page = target) {
+      await page.bringToFront()
+      const cdp = await context.browser().newBrowserCDPSession()
+      try {
+        // The browser's native extension action grants activeTab. A worker or
+        // panel message cannot substitute for this user gesture.
+        const { targetInfos } = await cdp.send('Target.getTargets', { filter: [{ type: 'tab', exclude: false }, { exclude: true }] })
+        const tab = targetInfos.find(value => value.url === page.url())
+        if (tab === undefined) throw new Error('No native tab target for the authorization gesture')
+        await cdp.send('Extensions.triggerAction', { id: extensionId, targetId: tab.targetId })
+        const deadline = Date.now() + 10000
+        while (Date.now() < deadline) {
+          const allowed = await worker.evaluate(async expected => {
+            const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true })
+            const grants = (await chrome.storage.session.get('dshPageAccess')).dshPageAccess?.grants ?? []
+            return tab?.url === expected && grants.some(grant => grant.tabId === tab.id && grant.origin === new URL(expected).origin && grant.groupId !== undefined)
+          }, page.url())
+          if (allowed) return
+          await page.waitForTimeout(50)
+        }
+        throw new Error('Native page authorization did not finish')
+      } finally { await cdp.detach() }
+    }
     stage = 'waiting for extension bridge connection'
     try {
       if (!deferPairing) await panel.locator('.connection .dot.connected').waitFor({ state: 'visible', timeout: connectTimeoutMs })
@@ -105,11 +133,15 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
       panel,
       target,
       executablePath,
+      authorizePage,
       /** Keep installation data while replacing the whole browser/worker lifetime. */
       async restart({ connected = true } = {}) {
         const targetUrl = target.url()
         await context.close()
         context = await launch()
+        const restartedWorker = context.serviceWorkers().find(value => new URL(value.url()).host === extensionId)
+          ?? await context.waitForEvent('serviceworker', { timeout: 15000 })
+        await restartedWorker.evaluate(() => chrome.sidePanel.setOptions({ enabled: false }))
         target = await context.newPage()
         target.setDefaultTimeout(actionTimeoutMs)
         await target.goto(targetUrl, { waitUntil: 'domcontentloaded' })
@@ -127,9 +159,11 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
       async prepare(url) {
         await target.goto(url, { waitUntil: 'domcontentloaded' })
         await target.bringToFront()
+        await authorizePage(target)
         await target.waitForTimeout(200)
       },
       async bindSession(sessionId, targetPage = target) {
+        await authorizePage(targetPage)
         await targetPage.bringToFront()
         await panel.evaluate(({ session, timeoutMs }) => new Promise((resolveBinding, rejectBinding) => {
           const port = window.__dshBenchmarkPort

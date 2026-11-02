@@ -29,6 +29,7 @@ export interface PanelCopy {
     labels: Record<string, string>
     overflow: (shown: string[], total: number) => string
   }
+  pageAccess: { required: string; granted: string; revoke: string; failed: string }
   tabHandoff: {
     eyebrow: string
     assistant: string
@@ -277,6 +278,7 @@ const EN: PanelCopy = {
     },
     overflow: (shown, total) => `${shown.join(' → ')} → ${total - shown.length} more`,
   },
+  pageAccess: { required: 'Click the DSH Stride toolbar icon on a page to authorize that tab. Switching tabs does not grant access.', granted: 'Authorized pages appear in the DSH 控制 group. Moving a page into the group does not authorize it.', revoke: 'Stop controlling this page', failed: 'Page access could not be removed. Try again.' },
   tabHandoff: {
     eyebrow: 'Page handoff',
     assistant: 'Assistant',
@@ -353,8 +355,8 @@ const EN: PanelCopy = {
     sharingAuto: 'Share automatically (default)',
     sharingAsk: 'Ask every time',
     sharingOff: 'Off',
-    unrestrictedBrowserAccess: 'Allow unrestricted browser control',
-    unrestrictedBrowserAccessHelp: 'Let the model read every HTTP(S) page, inspect all open tab titles and URLs, and perform actions—including following and closing tabs—without confirmation. Browser-protected page content remains inaccessible.',
+    unrestrictedBrowserAccess: 'Skip action confirmations on authorized pages',
+    unrestrictedBrowserAccessHelp: 'Allow actions without confirmation only on tabs you explicitly authorize with the toolbar icon. This cannot grant access to other tabs.',
     approvalNotifications: 'Browser approval notifications',
     approvalNotificationsHelp: 'Notify you when an approval arrives while the side panel is closed',
     autoResumeSession: "Resume this page's conversation",
@@ -536,6 +538,7 @@ const ZH: PanelCopy = {
     },
     overflow: (shown, total) => `${shown.join(' → ')} 等${total}个工具`,
   },
+  pageAccess: { required: '请在目标页面点击工具栏上的 DSH Stride 图标授权此页。切换标签页不会自动授权。', granted: '已授权页面会加入「DSH 控制」分组。手动拖入分组不会自动授权。', revoke: '停止控制此页', failed: '未能撤销页面授权，请重试。' },
   tabHandoff: {
     eyebrow: '页面交接',
     assistant: '助手',
@@ -612,8 +615,8 @@ const ZH: PanelCopy = {
     sharingAuto: '自动共享（默认）',
     sharingAsk: '每次询问',
     sharingOff: '关闭',
-    unrestrictedBrowserAccess: '允许模型完全控制浏览器',
-    unrestrictedBrowserAccessHelp: '模型无需确认即可读取所有 HTTP(S) 页面、查看全部已打开标签页的标题和链接，并执行包括跟随、关闭标签页在内的所有操作。浏览器受保护页面的内容仍不可访问。',
+    unrestrictedBrowserAccess: '已授权页面内免确认操作',
+    unrestrictedBrowserAccessHelp: '仅对你通过工具栏图标授权的标签页免除操作确认，不会授予其他页面的访问权限。',
     approvalNotifications: '浏览器审批通知',
     approvalNotificationsHelp: '侧栏关闭时收到审批请求，通过系统通知提醒你',
     autoResumeSession: '续接当前页面会话',

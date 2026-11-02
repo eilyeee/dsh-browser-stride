@@ -233,7 +233,7 @@ export function isElementRefOf(ref: ElementRef | string, observationId: Observat
  * @returns a fresh action id.
  */
 export function makeActionId(): ActionId {
-  return `act_${globalThis.crypto.randomUUID()}` as ActionId
+  return `act_${secureUuid()}` as ActionId
 }
 
 /**
@@ -241,7 +241,7 @@ export function makeActionId(): ActionId {
  * @returns a fresh observation id.
  */
 export function makeObservationId(): ObservationId {
-  return `obs_${globalThis.crypto.randomUUID()}` as ObservationId
+  return `obs_${secureUuid()}` as ObservationId
 }
 
 /**
@@ -249,7 +249,7 @@ export function makeObservationId(): ObservationId {
  * @returns a fresh request id.
  */
 export function makeRequestId(): RequestId {
-  return `req_${globalThis.crypto.randomUUID()}` as RequestId
+  return `req_${secureUuid()}` as RequestId
 }
 
 /** The target an action is allowed to touch, plus the run state it must match. */
@@ -425,4 +425,14 @@ export async function computeRequestDigest(material: ActionDigestMaterial): Prom
   const hash = await globalThis.crypto.subtle.digest('SHA-256', bytes)
   const hex = Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, '0')).join('')
   return hex as RequestDigest
+}
+
+/** Content scripts on plain HTTP pages have getRandomValues but no randomUUID. */
+function secureUuid(): string {
+  if (typeof globalThis.crypto.randomUUID === 'function') return globalThis.crypto.randomUUID()
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16))
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80
+  const hex = [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }

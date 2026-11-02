@@ -1,5 +1,8 @@
 // @vitest-environment jsdom
 
+import { authorizedExamplePages } from './page-access-fixture.ts'
+import { PAGE_ACCESS_KEY } from '../src/background/page-access.ts'
+
 import { BRIDGE_PROTOCOL_VERSION } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { wireToolCall, confirmTestTool } from './wire-tool-call.ts'
@@ -131,7 +134,7 @@ describe('tool-driven session checkpoints', () => {
           set: vi.fn(async () => {}),
         },
         session: {
-          get: vi.fn(async (key: string) => ({ [key]: sessionData[key] })),
+          get: vi.fn(async (key: string) => key === PAGE_ACCESS_KEY ? authorizedExamplePages() : ({ [key]: sessionData[key] })),
           set: vi.fn(async (items: Record<string, unknown>) => { Object.assign(sessionData, items) }),
           remove: vi.fn(async (key: string) => { delete sessionData[key] }),
         },

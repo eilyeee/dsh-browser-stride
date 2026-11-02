@@ -24,6 +24,17 @@ no release version has been assigned yet.
 
 ### Added
 
+- Page access uses a native toolbar click and temporary `activeTab` permission.
+  Broad website, tab-history and automatic content-script permissions are removed;
+  only local DSH communication retains a loopback host permission. Authorized tabs
+  appear in the blue **DSH 控制** group, separately in each window. Dragging a tab
+  into a group grants no access; leaving it or choosing **Stop controlling this
+  page** revokes Stride control. Cross-origin navigation and browser restarts
+  require another toolbar click. Action-confirmation bypass stays inside authorized
+  tabs, and model-created tabs remain unbound until the user authorizes them.
+- Observation identifiers also work on plain HTTP pages where `randomUUID` is
+  unavailable, using cryptographic `getRandomValues` without a weak fallback.
+
 - Extension settings provide **Unpair DSH**: stop reconnecting, remove the local
   credential and, when reachable, revoke that installation on the Host. The
   disconnected state survives browser restarts and requires explicit pairing to

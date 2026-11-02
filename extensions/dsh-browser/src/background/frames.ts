@@ -30,7 +30,7 @@ const MAIN_FRAME_SHARE = 0.8
  */
 export async function listTabFrames(tabId: number, mainUrl: string | undefined): Promise<TabFrame[]> {
   try {
-    const discovered = await chrome.webNavigation.getAllFrames({ tabId })
+    const discovered = await chrome.webNavigation?.getAllFrames({ tabId })
     if (discovered !== null && discovered !== undefined && discovered.length > 0) {
       return sortTabFrames(discovered.map((frame) => ({
         frameId: frame.frameId,
@@ -43,7 +43,22 @@ export async function listTabFrames(tabId: number, mainUrl: string | undefined):
     // A main-frame message still gives a useful result while the frame tree is
     // unavailable during a navigation or in older test/browser environments.
   }
-  return [{ frameId: 0, parentFrameId: -1, url: mainUrl ?? '' }]
+  // With activeTab, native injection results enumerate only accessible documents.
+  // Chrome can reject an all-frame request containing a cross-origin iframe;
+  // recover the authorized main frame without widening site permissions.
+  try {
+    const probe = (allFrames: boolean) => chrome.scripting.executeScript({
+      target: { tabId, allFrames }, func: () => location.href,
+    })
+    const results = await probe(true).catch(() => probe(false))
+    const nativeMainUrl = results.find(item => item.frameId === 0)?.result
+    const mainOrigin = new URL(mainUrl ?? (typeof nativeMainUrl === 'string' ? nativeMainUrl : '')).origin
+    const frames = results.filter(item => typeof item.result === 'string' && new URL(item.result).origin === mainOrigin)
+      .map(item => ({ frameId: item.frameId, parentFrameId: item.frameId === 0 ? -1 : 0,
+        ...(item.documentId === undefined ? {} : { documentId: item.documentId }), url: item.result as string }))
+    if (frames.some(frame => frame.frameId === 0)) return sortTabFrames(frames)
+  } catch { /* Missing native activeTab access must not turn into page access. */ }
+  return []
 }
 
 /** Sort parents before descendants without rebuilding the frame graph per comparison. */

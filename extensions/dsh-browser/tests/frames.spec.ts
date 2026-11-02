@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest'
-import { allocateFrameBudgets, sortTabFrames, type TabFrame } from '../src/background/frames.ts'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { allocateFrameBudgets, listTabFrames, sortTabFrames, type TabFrame } from '../src/background/frames.ts'
 
 function frames(count: number): TabFrame[] {
   return Array.from({ length: count }, (_, frameId) => ({
@@ -56,5 +56,29 @@ describe('sortTabFrames', () => {
 
     expect(sortTabFrames(input).map((frame) => frame.frameId)).toEqual([0, 2, 4, 9])
     expect(input.map((frame) => frame.frameId)).toEqual([9, 4, 0, 2])
+  })
+})
+
+
+afterEach(() => vi.unstubAllGlobals())
+describe('activeTab frame discovery', () => {
+  it('uses native injection identities and excludes cross-origin frames without broad navigation access', async () => {
+    vi.stubGlobal('chrome', { scripting: { executeScript: vi.fn(async () => [
+      { frameId: 0, documentId: 'main', result: 'https://example.com/' },
+      { frameId: 3, documentId: 'child', result: 'https://example.com/child' },
+      { frameId: 4, documentId: 'foreign', result: 'https://other.example/' },
+    ]) } })
+    expect(await listTabFrames(1, undefined)).toHaveLength(2)
+    expect(await listTabFrames(1, 'https://example.com/')).toEqual([
+      { frameId: 0, parentFrameId: -1, documentId: 'main', url: 'https://example.com/' },
+      { frameId: 3, parentFrameId: 0, documentId: 'child', url: 'https://example.com/child' },
+    ])
+  })
+  it('falls back only to a successfully injected main document and denies an inaccessible page', async () => {
+    const inject = vi.fn().mockRejectedValueOnce(new Error('cross-origin child')).mockResolvedValueOnce([{ frameId: 0, documentId: 'main', result: 'https://example.com/' }])
+    vi.stubGlobal('chrome', { scripting: { executeScript: inject } })
+    expect(await listTabFrames(1, 'https://example.com/')).toHaveLength(1)
+    inject.mockRejectedValue(new Error('no activeTab permission'))
+    expect(await listTabFrames(2, 'https://example.com/')).toEqual([])
   })
 })

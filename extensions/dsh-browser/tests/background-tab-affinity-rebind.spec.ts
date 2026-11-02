@@ -1,5 +1,8 @@
 // @vitest-environment jsdom
 
+import { authorizedExamplePages } from './page-access-fixture.ts'
+import { PAGE_ACCESS_KEY } from '../src/background/page-access.ts'
+
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 function chromeEvent<T extends unknown[]>() {
@@ -73,7 +76,7 @@ function mockChrome() {
         set: vi.fn(async () => {}),
       },
       session: {
-        get: vi.fn(async () => ({})),
+        get: vi.fn(async (key: string) => key === PAGE_ACCESS_KEY ? authorizedExamplePages() : {}),
         set: vi.fn(async () => {}),
         remove: vi.fn(async () => {}),
       },

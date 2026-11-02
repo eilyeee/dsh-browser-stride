@@ -1,5 +1,8 @@
 // @vitest-environment jsdom
 
+import { authorizedExamplePages } from './page-access-fixture.ts'
+import { PAGE_ACCESS_KEY } from '../src/background/page-access.ts'
+
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PAGE_SESSION_CONTEXT_STORAGE_KEY } from '../src/background/session-continuity.ts'
 
@@ -69,7 +72,7 @@ function mockChrome(initialTabs: chrome.tabs.Tab[], storedContext?: unknown) {
     storage: {
       local: { get: vi.fn(async () => ({})), set: vi.fn(async () => {}) },
       session: {
-        get: vi.fn(async (key: string) => ({ [key]: sessionData[key] })),
+        get: vi.fn(async (key: string) => key === PAGE_ACCESS_KEY ? authorizedExamplePages([...new Set([...initialTabs.map(tab => tab.id!), 2])]) : ({ [key]: sessionData[key] })),
         set: sessionSet,
         remove: vi.fn(async (key: string) => { delete sessionData[key] }),
       },

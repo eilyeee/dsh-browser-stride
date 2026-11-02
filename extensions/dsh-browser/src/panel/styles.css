@@ -2881,3 +2881,7 @@ textarea:focus-visible {
 .browser-runs button { border: 1px solid var(--line); border-radius: 8px; background: var(--canvas); color: var(--ink); font: inherit; padding: 6px 10px; cursor: pointer; }
 .browser-runs button:disabled { opacity: 0.5; cursor: default; }
 .browser-run-actions { justify-content: flex-end; margin-top: 8px; }
+
+.page-access-notice { margin: 8px 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); font-size: calc(12px * var(--ui-scale)); color: var(--ink-muted); }
+.page-access-notice p { margin: 0; line-height: 1.5; }
+.page-access-notice button { margin-top: 8px; }

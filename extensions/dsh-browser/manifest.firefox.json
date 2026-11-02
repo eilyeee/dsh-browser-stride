@@ -20,16 +20,14 @@
   },
   "permissions": [
     "storage",
-    "tabs",
     "activeTab",
     "scripting",
-    "webNavigation",
     "alarms",
-    "notifications"
+    "notifications",
+    "tabGroups"
   ],
   "host_permissions": [
-    "http://*/*",
-    "https://*/*"
+    "http://127.0.0.1/*"
   ],
   "background": {
     "scripts": [
@@ -53,20 +51,6 @@
       "48": "assets/icons/icon48.png"
     }
   },
-  "content_scripts": [
-    {
-      "matches": [
-        "http://*/*",
-        "https://*/*"
-      ],
-      "js": [
-        "content.js"
-      ],
-      "run_at": "document_idle",
-      "all_frames": true,
-      "match_about_blank": true
-    }
-  ],
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'; connect-src ws://127.0.0.1:* http://127.0.0.1:*"
   },

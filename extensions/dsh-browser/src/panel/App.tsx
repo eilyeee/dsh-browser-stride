@@ -14,7 +14,7 @@ import type { BridgeCaps } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 import type { ServerFrame } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 import type { BridgeState } from '../background/bridge.ts'
 import type { AffinityTab, TabAffinityDecision, TabAffinityState } from '../background/tab-affinity.ts'
-import { connectPanel, PanelRpcError, type PanelApi, type PanelSettings } from './api.ts'
+import { connectPanel, PanelRpcError, type PanelApi, type PanelSettings, type PageAccessStatus } from './api.ts'
 import { renderMarkdown } from './markdown.ts'
 import whaleUrl from '../../assets/icons/deepseek-256.png'
 import type { ApprovalDecision, ApprovalRequest } from '../security/approval.ts'
@@ -391,10 +391,12 @@ export function TabAffinityBanner({
   state,
   copy,
   onDecision,
+  activeAuthorized = true,
 }: {
   state: TabAffinityState | null
   copy: PanelCopy
   onDecision: (decision: TabAffinityDecision) => void
+  activeAuthorized?: boolean
 }): React.JSX.Element | null {
   if (state === null || state.status === 'unbound') return null
   const controlled = tabLabel(state.controlled, state.detached ? copy.tabHandoff.unboundTab : copy.tabHandoff.closedTab)
@@ -436,7 +438,7 @@ export function TabAffinityBanner({
       <div className="tab-affinity-actions">
         {handoff && <button className="keep" onClick={() => onDecision('keep')}>{copy.tabHandoff.keep}</button>}
         {!following && state.active !== null && (
-          <button className="follow" onClick={event => { if (!state.detached || event.nativeEvent.isTrusted) onDecision('follow') }}>
+          <button className="follow" disabled={!activeAuthorized} onClick={event => { if (!state.detached || event.nativeEvent.isTrusted) onDecision('follow') }}>
             {lost ? copy.tabHandoff.useCurrent : handoff ? copy.tabHandoff.follow : copy.tabHandoff.followCurrent}
           </button>
         )}
@@ -633,6 +635,8 @@ export function App(): React.JSX.Element {
   const [pairingStatus, setPairingStatus] = useState<BrowserPairingStatus>({ phase: 'idle' })
   const pairingBusy = ['requesting', 'pending', 'saving'].includes(pairingStatus.phase)
   const unpairingConnection = pairingStatus.phase === 'unpairing'
+  const [pageAccess, setPageAccess] = useState<PageAccessStatus>({ activeGranted: false, controlledGranted: false, controlledTabId: null })
+  useEffect(() => api.onPageAccess(setPageAccess), [api])
   const [hasConnectionCredential, setHasConnectionCredential] = useState(false)
   useEffect(() => api.onBrowserPairing(status => setPairingStatus(current =>
     current.phase === 'idle' && status.error === 'connection-lost' ? current : status)), [api])
@@ -2235,7 +2239,13 @@ export function App(): React.JSX.Element {
           onStep={(direction) => changeUiScale(stepUiScale(uiScaleRef.current, direction))}
           onReset={() => changeUiScale(DEFAULT_UI_SCALE)} />
       )}
-      <TabAffinityBanner state={tabAffinity} copy={copy} onDecision={decideTabAffinity} />
+      <section className="page-access-notice" role="status">
+        <p>{pageAccess.controlledGranted || pageAccess.activeGranted ? copy.pageAccess.granted : copy.pageAccess.required}</p>
+        {pageAccess.controlledGranted && pageAccess.controlledTabId !== null && <button type="button" className="secondary" onClick={event => {
+          if (event.nativeEvent.isTrusted) void api.revokePageAccess(pageAccess.controlledTabId!).catch(() => setError(copy.pageAccess.failed))
+        }}>{copy.pageAccess.revoke}</button>}
+      </section>
+      <TabAffinityBanner state={tabAffinity} copy={copy} onDecision={decideTabAffinity} activeAuthorized={pageAccess.activeGranted} />
       {showSessionPicker && (
         <section className="session-picker" aria-label={copy.app.sessions}>
           <div className="session-picker-head">
@@ -2279,8 +2289,8 @@ export function App(): React.JSX.Element {
         </section>
       )}
       <BrowserRuns api={api} sessionId={sessionRef.current} connected={state === 'connected' && !sessionChanging} copy={copy.runs}
-        {...(tabAffinity?.active !== undefined && tabAffinity.active !== null ? { startRevision: tabAffinity.revision } : {})}
-        {...(tabAffinity !== null && (tabAffinity.status === 'following' || tabAffinity.status === 'background') && tabAffinity.controlled !== null ? { targetRevision: tabAffinity.revision } : {})} />
+        {...(pageAccess.activeGranted && tabAffinity?.active !== undefined && tabAffinity.active !== null ? { startRevision: tabAffinity.revision } : {})}
+        {...(pageAccess.controlledGranted && tabAffinity !== null && (tabAffinity.status === 'following' || tabAffinity.status === 'background') && tabAffinity.controlled !== null ? { targetRevision: tabAffinity.revision } : {})} />
       <div className="messages-pane">
       <div className="messages" ref={scrollRef} onScroll={syncScrollBottom}>
         {rows.length === 0 && streamRow === null && !working && (

@@ -19,7 +19,8 @@
     "stride:baseline": "node scripts/stride-baseline.mjs",
     "pair:browser": "node scripts/pair-browser.mjs",
     "stride:baseline:json": "node scripts/stride-baseline.mjs --json --no-write",
-    "test:smoke-task": "node scripts/smoke-browser-task.mjs"
+    "test:smoke-task": "node scripts/smoke-browser-task.mjs",
+    "test:smoke-page-access": "node scripts/smoke-page-access.mjs"
   },
   "dependencies": {
     "@deepseek-ai/cordis-plugin-group": "1.0.5",

@@ -53,6 +53,8 @@ describe('panel session transitions', () => {
     panelApi = {
       startBrowserPairing: vi.fn(async () => {}),
       cancelBrowserPairing: vi.fn(async () => {}),
+      onPageAccess: vi.fn(() => () => {}),
+      revokePageAccess: vi.fn(async () => {}),
       unpairBrowser: vi.fn(async () => {}),
       onBrowserPairing: vi.fn(() => unsubscribe),
       rpc: async <T = unknown>(method: string, payload?: unknown): Promise<T> =>
