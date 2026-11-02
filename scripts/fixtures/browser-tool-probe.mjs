@@ -117,7 +117,16 @@ export function apply(ctx, config) {
       assert.match(navigated, /Navigation completed/)
       await writeFile(`${config.result}.phase`, JSON.stringify({ phase: 'auto-navigated' }), { mode: 0o600 })
       await waitFor(() => exists(`${config.trigger}.auto-verified`), 'new-tab control browser verification')
-      await writeFile(config.result, JSON.stringify({ ok: true, calls: callNumber, recorded: records.length, blocked, automaticCalls: 4 }), { mode: 0o600 })
+      await waitFor(() => exists(`${config.trigger}.cleanup-fault`), 'new-tab cleanup fault injection')
+      const fault = JSON.parse(await readFile(`${config.trigger}.cleanup-fault`, 'utf8'))
+      const failed = await ctx.tools.execute({ callId: `stride-browser-smoke-${++callNumber}`,
+        name: 'browser_open_tab', arguments: { url: fault.url, active: false }, agent, signal: controller.signal })
+      assert.equal(failed.isError, true)
+      assert.match(failed.error.message, /Tab closure is unconfirmed/)
+      assert.doesNotMatch(failed.error.message, /was closed/)
+      await writeFile(`${config.result}.phase`, JSON.stringify({ phase: 'cleanup-failed' }), { mode: 0o600 })
+      await waitFor(() => exists(`${config.trigger}.cleanup-verified`), 'new-tab cleanup browser verification')
+      await writeFile(config.result, JSON.stringify({ ok: true, calls: callNumber, recorded: records.length, blocked, automaticCalls: 4, cleanupFaults: 1 }), { mode: 0o600 })
     } catch (error) {
       await writeFile(config.result, JSON.stringify({ ok: false, error: String(error) }), { mode: 0o600 })
     }

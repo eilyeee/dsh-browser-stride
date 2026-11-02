@@ -54,7 +54,7 @@ import { readBridgeCredential, readBridgeDisconnected, writeBridgeCredential } f
 import { needsWriteTurn, WriteQueue } from './write-queue.ts'
 import { executeRecordedTool } from './execution-receipts.ts'
 import { ToolExecutionFence } from './execution-authority.ts'
-import { PageAccess } from './page-access.ts'
+import { PageAccess, type CreatedPageAccess } from './page-access.ts'
 import { debuggerPages, sendPageMessage } from './debugger-pages.ts'
 import { RunTargetRegistry, type RunTargetBinding } from './run-targets.ts'
 import { localBridgeUrl } from './bridge-address.ts'
@@ -1317,6 +1317,7 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
   const automaticRevision = automaticAccessRevision
   const automaticOpen = call.name === 'browser_open_tab' && automaticAccessActive
   const automaticAllowed = () => automaticAccessActive && automaticAccessRevision === automaticRevision
+  let openedPageAccess: CreatedPageAccess | undefined
   let settle!: () => void
   const callRpc = rpc
   let executionFence: ToolExecutionFence | undefined
@@ -1341,7 +1342,7 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
   const targetAllowed = (): boolean => (!automaticOpen || automaticAllowed()) && (call.name !== 'browser_list_tabs' || admittedPages.current()) && pageLease() && !tabAffinity.isDetached(call.sessionId) && isCurrentCall() && executionFence?.current() === true && (runTarget === undefined || runTarget.current()) && (activeCall.targetLease === undefined
     || (activeCall.committed ? activeCall.targetLease.sameBinding() : activeCall.targetLease.current()))
   const commitAction = (): void => {
-    if (!targetAllowed()) throw new Error('Browser target lease expired before dispatch')
+    if (!targetAllowed() || (automaticOpen && openedPageAccess?.current() !== true)) throw new Error('Browser target lease expired before dispatch')
     activeCall.committed = true
   }
   const rollbackActionCommit = (): void => {
@@ -1410,18 +1411,19 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
           budget,
           (prompt) => automaticOpen && automaticAllowed() ? Promise.resolve('approved') : authorize(prompt, target.windowId),
           controller.signal,
-          (tab) => bindOpenedTab(tab, call.sessionId, targetAllowed, { active: call.args.active !== false }),
-          (tabId) => targetAllowed() && tabAffinity.allowsTarget(tabId, call.sessionId),
+          (tab) => bindOpenedTab(tab, call.sessionId, () => targetAllowed() && (!automaticOpen || openedPageAccess?.current() === true), { active: call.args.active !== false }),
+          (tabId) => targetAllowed() && (!automaticOpen || openedPageAccess?.current() === true) && tabAffinity.allowsTarget(tabId, call.sessionId),
           commitAction,
           !automaticOpen,
           automaticOpen ? async tabId => {
             if (!targetAllowed() || controller.signal.aborted) throw new Error('The open request is no longer current.')
-            await pageAccess.grantCreated(tabId, automaticAllowed, controller.signal)
-            if (!targetAllowed() || controller.signal.aborted) {
-              await pageAccess.revoke(tabId)
+            await pageAccess.grantCreated(tabId, automaticAllowed, controller.signal, access => { openedPageAccess = access })
+            if (!targetAllowed() || controller.signal.aborted || openedPageAccess?.current() !== true) {
+              await openedPageAccess?.release()
               throw new Error('The open request is no longer current.')
             }
           } : undefined,
+          tabId => openedPageAccess ?? { current: () => false, release: async () => {}, canClose: () => pageAccess.unclaimed(tabId) },
         ))
     : (target === undefined || 'ok' in target ? Promise.resolve(target ?? affinityFailure('missing'))
       : prepareToolTarget(target, call.sessionId, controller.signal)).then((prepared) => 'ok' in prepared

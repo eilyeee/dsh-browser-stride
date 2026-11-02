@@ -69,12 +69,39 @@ export class DebuggerPages {
     this.allowed(tabId, session)
     return answer
   }
-  async attachCreated(tabId: number, current: () => boolean): Promise<void> {
+  async attachCreated(tabId: number, current: () => boolean, signal?: AbortSignal, timeoutMs = 8000): Promise<void> {
     if (chrome.debugger === undefined || !current() || this.has(tabId)) throw new Error('Automatic page control is unavailable.')
     const session: Session = { current, worlds: new Map() }
     this.sessions.set(tabId, session)
     try {
-      await chrome.debugger.attach({ tabId }, '1.3')
+      const deadline = Date.now() + timeoutMs
+      let attached = false
+      let lastError: unknown
+      while (!signal?.aborted && Date.now() < deadline) {
+        this.allowed(tabId, session)
+        const tab = await chrome.tabs.get(tabId)
+        this.allowed(tabId, session)
+        if (signal?.aborted) break
+        if (/^https?:\/\//i.test(tab.url ?? '')) {
+          try { await chrome.debugger.attach({ tabId }, '1.3'); attached = true; break }
+          catch (error) {
+            this.allowed(tabId, session)
+            // A transitioning new-tab renderer can still reject attachment.
+            // Completed-page refusals and explicit policy errors are final;
+            // native cancellation removes this session and cannot reattach.
+            if (!(error instanceof Error) || !/^Cannot attach to this target\.?$/.test(error.message)
+              || (tab.status !== 'loading' && tab.pendingUrl === undefined)) throw error
+            lastError = error
+          }
+        } else if (!/^https?:\/\//i.test(tab.pendingUrl ?? '')
+          && tab.url !== 'about:blank' && !/^chrome:\/\/(?:newtab|new-tab-page)\//.test(tab.url ?? '')) {
+          throw new Error('Only HTTP(S) pages can be controlled.')
+        }
+        await new Promise<void>(resolve => { setTimeout(resolve, 50) })
+      }
+      if (!attached) throw signal?.aborted ? new Error('Automatic page control was cancelled.')
+        : lastError ?? new Error('The new HTTP(S) tab was not ready for debugging.')
+      if (signal?.aborted) throw new Error('Automatic page control was cancelled.')
       this.allowed(tabId, session)
       await this.command(tabId, session, 'Page.enable')
       await this.command(tabId, session, 'Runtime.enable')

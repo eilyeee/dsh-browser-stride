@@ -702,13 +702,53 @@ try {
   assert.equal(stoppedAutomatic.granted, false)
   assert.equal(stoppedAutomatic.debuggerAttached, false)
   await writeFile(`${trigger}.auto-verified`, '', { mode: 0o600 })
+  const failedOpenUrl = `${automaticOrigin}/auto-cleanup-fault`
+  await browser.worker.evaluate(url => {
+    const get = chrome.tabs.get.bind(chrome.tabs), remove = chrome.tabs.remove.bind(chrome.tabs)
+    const fault = { tripped: false, restore: () => { chrome.tabs.get = get; chrome.tabs.remove = remove } }
+    globalThis.__strideCleanupFault = fault
+    chrome.tabs.get = async id => {
+      const tab = await get(id)
+      if (tab.url === url && !fault.tripped) {
+        const cached = (await chrome.storage.session.get('dshPageAccess')).dshPageAccess
+        if (cached?.grants.some(row => row.tabId === id && row.mode === 'debugger' && row.pending !== true && row.groupId !== undefined)) {
+          fault.tripped = true
+          throw new Error('Synthetic post-authorization metadata failure')
+        }
+      }
+      return tab
+    }
+    chrome.tabs.remove = async ids => {
+      if (typeof ids === 'number' && (await get(ids)).url === url) throw new Error('Synthetic tab close failure')
+      return remove(ids)
+    }
+  }, failedOpenUrl)
+  await writeFile(`${trigger}.cleanup-fault`, JSON.stringify({ url: failedOpenUrl }), { mode: 0o600 })
+  await waitForPhase('cleanup-failed')
+  const failedOpenPage = browser.context.pages().find(page => page.url() === failedOpenUrl)
+  assert.ok(failedOpenPage, 'a refused close must leave the synthetic page open')
+  const cleanup = await browser.worker.evaluate(async ({ url, sessionId }) => {
+    const [tab] = await chrome.tabs.query({ url })
+    const cache = await chrome.storage.session.get(['dshPageAccess', 'dshTabAffinity'])
+    let debuggerAttached = true
+    try { await chrome.debugger.sendCommand({ tabId: tab.id }, 'Page.getFrameTree') } catch { debuggerAttached = false }
+    return { faultInjected: globalThis.__strideCleanupFault.tripped, debuggerAttached,
+      granted: cache.dshPageAccess.grants.some(row => row.tabId === tab.id),
+      bound: cache.dshTabAffinity?.sessionTabs?.[sessionId]?.tabId === tab.id }
+  }, { url: failedOpenUrl, sessionId: session.sessionId })
+  assert.deepEqual(cleanup, { faultInjected: true, debuggerAttached: false, granted: false, bound: false })
+  await browser.worker.evaluate(() => { globalThis.__strideCleanupFault.restore(); delete globalThis.__strideCleanupFault })
+  await failedOpenPage.close()
+  await writeFile(`${trigger}.cleanup-verified`, '', { mode: 0o600 })
   const outcome = await waitForResult()
   assert.equal(outcome.ok, true, outcome.error)
-  assert.equal(outcome.calls, 10)
+  assert.equal(outcome.calls, 11)
   assert.equal(outcome.automaticCalls, 4)
+  assert.equal(outcome.cleanupFaults, 1)
   assert.equal(outcome.blocked, 2)
   assert.equal(outcome.recorded, 6)
   console.log('Automatic tab control passed: real Host tools opened, bound, grouped, read and clicked a new page without a toolbar action; trusted stop revoked it')
+  console.log('Failed new-tab cleanup passed: post-authorization read failure plus refused close leaves no page grant, debugger or session binding; closure is reported as unconfirmed')
   await card.getByText('已停止', { exact: true }).waitFor()
   assert.equal(await handoffPage.getByRole('checkbox', { name: '邮件通知', exact: true }).isChecked(), true)
   await browser.panel.getByRole('button', { name: '打开设置', exact: true }).click()

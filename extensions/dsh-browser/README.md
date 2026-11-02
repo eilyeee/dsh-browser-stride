@@ -47,6 +47,8 @@ The Chrome controller evaluates only packaged DOM operations in a separate isola
 
 Preparing the controller does not commit a page write. The original request, target and deadline are checked again immediately before delivery. Evaluations use browser-issued unique context identities so a reused numeric context id cannot select another document after a process change. Restoring manual page grants also requires a native scripting probe: Chrome's tab-metadata permission can expose a URL without granting page access.
 
+If a new page cannot be bound, cleanup first releases that attempt's page grant, then tries to close the tab. A refused close leaves the page unauthorized and is reported as unconfirmed. A user stop or newer toolbar authorization takes ownership away from the old request, so its cleanup cannot revoke that newer grant or close the page.
+
 Firefox does not offer this mode. Managed `/browser` tasks still require trusted selected-page binding and cannot create/follow/close tabs. `pnpm run test:smoke-browser` exercises ordinary real Host tool dispatch into an automatically controlled synthetic page; it does not call a model or establish DSH Desktop integration.
 
 ## Pending page calls

@@ -9,6 +9,15 @@ no release version has been assigned yet.
 
 ### Fixed
 
+- Failed new-tab adoption releases its own page grant independently of browser
+  tab removal, including metadata failures, cancellation and expired admission.
+  Cleanup cannot revoke a newer user grant or close a page after user takeover.
+  A failed native close is reported as unconfirmed rather than successful.
+- Automatic debugger attachment waits for the newly created HTTP(S) tab during
+  navigation. Startup connection rejection is retried only while navigation is
+  pending; completed-page refusals, policy errors and cancellation remain final.
+  Page actions are never replayed by this connection preparation.
+
 - Debugger page operations recheck their original request immediately before
   delivery and commit writes only there, so cancellation or retargeting during
   controller preparation cannot dispatch an old action. Evaluations use unique

@@ -20,17 +20,41 @@ function fixture() {
   })
   const attach = vi.fn(async () => {})
   const detach = vi.fn(async () => {})
-  vi.stubGlobal('chrome', { debugger: { attach, detach, sendCommand: commands,
+  const get = vi.fn(async (): Promise<Pick<chrome.tabs.Tab, 'id' | 'windowId' | 'url' | 'pendingUrl' | 'status'>> => ({ id: 42, windowId: 1, url: 'https://example.test/', status: 'complete' }))
+  vi.stubGlobal('chrome', { tabs: { get }, debugger: { attach, detach, sendCommand: commands,
     onDetach: { addListener: (listener: typeof detached) => { detached = listener } },
     onEvent: { addListener: (listener: typeof event) => { event = listener } } },
   runtime: { getURL: (file: string) => `chrome-extension://synthetic/${file}` } })
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: async () => '/* packaged controller */' })))
   const pages = new DebuggerPages()
-  return { pages, attach, detach, commands, event, navigate: () => { loader = 'document-b' }, disconnect: () => detached({ tabId: 42 }) }
+  return { pages, attach, detach, get, commands, event, navigate: () => { loader = 'document-b' }, disconnect: () => detached({ tabId: 42 }) }
 }
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 describe('new-tab debugger transport', () => {
+  it('waits for the new HTTP(S) tab and retries only an explicit not-ready attachment', async () => {
+    const h = fixture()
+    h.get.mockResolvedValueOnce({ id: 42, windowId: 1, url: 'chrome://newtab/', pendingUrl: 'https://example.test/', status: 'loading' })
+    h.get.mockResolvedValueOnce({ id: 42, windowId: 1, url: 'https://example.test/', status: 'loading' })
+    h.attach.mockRejectedValueOnce(new Error('Cannot attach to this target.'))
+    await h.pages.attachCreated(42, () => true)
+    expect(h.attach).toHaveBeenCalledTimes(2)
+    expect(h.get).toHaveBeenCalledTimes(3)
+    expect(h.commands.mock.calls.filter(([, method]) => method === 'Page.enable')).toHaveLength(1)
+  })
+
+  it.each(['cancel', 'policy', 'restricted-complete'])('never retries attachment after %s withdrawal', async reason => {
+    const h = fixture(), controller = new AbortController()
+    h.attach.mockImplementationOnce(async () => {
+      if (reason === 'cancel') controller.abort()
+      throw new Error(reason === 'policy' ? 'Host access is restricted by policy.' : 'Cannot attach to this target.')
+    })
+    await expect(h.pages.attachCreated(42, () => true, controller.signal)).rejects.toThrow()
+    expect(h.attach).toHaveBeenCalledTimes(1)
+    expect(h.pages.has(42)).toBe(false)
+    expect(h.commands).not.toHaveBeenCalled()
+  })
+
   it.each(['cancel', 'rebind'])('does not commit or deliver a write when %s happens during controller preparation', async reason => {
     const h = fixture()
     await h.pages.attachCreated(42, () => true)

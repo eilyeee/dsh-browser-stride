@@ -24,6 +24,7 @@ import { waitForNextDocumentReady } from './navigation.ts'
 import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
 import { getUiLocale } from '../i18n.ts'
 import { debuggerPages, sendPageMessage, PageDispatchRevoked, type PageDispatch } from './debugger-pages.ts'
+import type { CreatedPageAccess } from './page-access.ts'
 
 /** A tool call from the bridge. */
 export interface ToolCall {
@@ -910,11 +911,14 @@ export function parseHttpUrl(value: unknown): URL | undefined {
   }
 }
 
-async function removeCreatedTab(tabId: number): Promise<void> {
+async function removeCreatedTab(tabId: number, canClose?: () => boolean): Promise<'closed' | 'unconfirmed' | 'retained'> {
+  if (canClose?.() === false) return 'retained'
   try {
     await chrome.tabs.remove(tabId)
+    return 'closed'
   } catch {
-    // The tab may already have been closed by the user or another tool.
+    // The tab may already be closed, or the browser may have refused removal.
+    return 'unconfirmed'
   }
 }
 
@@ -924,8 +928,9 @@ async function removeCreatedTab(tabId: number): Promise<void> {
  *
  * Creates a blank tab first, arms the readiness listener, then navigates so a
  * fast `document_idle` cannot announce readiness before the listener exists.
- * Cancellation before affinity bind rolls the orphan tab back; after bind the
- * open is treated as committed and reported as success even if the call expires.
+ * Failure before affinity bind releases this attempt's grant and attempts to
+ * close its tab, unless user intervention has taken ownership. After bind the
+ * open is committed and reported as success even if the call expires.
  */
 export async function dispatchOpenTab(
   call: ToolCall,
@@ -939,6 +944,7 @@ export async function dispatchOpenTab(
   commitAction?: () => void,
   keepUnbound = false,
   authorizeCreatedTab?: (tabId: number) => Promise<void>,
+  createdTabAccess?: (tabId: number) => CreatedPageAccess,
 ): Promise<ToolAnswer> {
   if (isCancelled(call, signal)) return cancelled()
   const parsed = parseHttpUrl(call.args.url)
@@ -971,9 +977,25 @@ export async function dispatchOpenTab(
     return { ok: false, error: { code: 'action-failed', message: 'Chrome created a tab without an id.' } }
   }
   const tabId = created.id
+  const rollback = async (answer: ToolAnswer): Promise<ToolAnswer> => {
+    // Withdraw control independently of tab removal. A failed close must not
+    // leave an unaccepted page authorized for a later request.
+    let released = true
+    const access = createdTabAccess?.(tabId)
+    try { await access?.release() } catch { released = false }
+    const closed = await removeCreatedTab(tabId, access?.canClose)
+    return { ok: false, error: {
+      code: answer.error?.code ?? 'action-failed',
+      message: [answer.error?.message,
+        ...(released ? [] : ['Page access revocation is unconfirmed.']),
+        closed === 'closed' ? 'The new tab was closed.' : closed === 'retained'
+          ? 'The request no longer owns this tab; no close was attempted.'
+          : 'Tab closure is unconfirmed; the new tab may remain open.',
+      ].filter(Boolean).join(' '),
+    } }
+  }
   if (isCancelled(call, signal)) {
-    await removeCreatedTab(tabId)
-    return cancelled()
+    return rollback(cancelled())
   }
 
   const navigationWait = waitForNextDocumentReady(tabId, 0, undefined, signal)
@@ -983,20 +1005,20 @@ export async function dispatchOpenTab(
     created = updated
   } catch (error: unknown) {
     navigationWait.cancel()
-    await removeCreatedTab(tabId)
-    return {
+    return rollback({
       ok: false,
       error: {
         code: 'action-failed',
         message: error instanceof Error ? error.message : 'Failed to navigate the new browser tab.',
       },
-    }
+    })
   }
 
   if (keepUnbound) {
     navigationWait.cancel()
-    if (isCancelled(call, signal)) { await removeCreatedTab(tabId); return cancelled() }
-    commitAction?.()
+    if (isCancelled(call, signal)) return rollback(cancelled())
+    try { commitAction?.() }
+    catch { return rollback(targetChanged()) }
     return { ok: true, result: { text: `Opened a tab at ${parsed.href}. It has no page access and was not bound. The user must click the DSH Stride toolbar icon on that tab before browser tools can use it.` } }
   }
 
@@ -1008,22 +1030,20 @@ export async function dispatchOpenTab(
       created = await chrome.tabs.get(tabId)
       ready = true
     } catch (error) {
-      await removeCreatedTab(tabId)
       const detail = error instanceof Error ? error.message.slice(0, 300) : 'Automatic control is unavailable.'
-      return isCancelled(call, signal) ? cancelled() : unavailable(`The new tab could not be authorized for automatic control and was closed. ${detail} Check the extension settings and browser debugger status before a new request.`)
+      return rollback(isCancelled(call, signal) ? cancelled() : unavailable(`The new tab could not be authorized for automatic control. ${detail} Check the extension settings and browser debugger status before a new request.`))
     }
   } else ready = await navigationWait.ready
   if (isCancelled(call, signal)) {
-    await removeCreatedTab(tabId)
-    return cancelled()
+    return rollback(cancelled())
   }
-  commitAction?.()
-  if (!bindCreatedTab(created.id === undefined ? { ...created, id: tabId } : created)) {
-    await removeCreatedTab(tabId)
-    return {
-      ok: false,
-      error: { code: 'action-failed', message: 'The new tab could not become the controlled browser target.' },
+  try {
+    commitAction?.()
+    if (!bindCreatedTab(created.id === undefined ? { ...created, id: tabId } : created)) {
+      return rollback({ ok: false, error: { code: 'action-failed', message: 'The new tab could not become the controlled browser target.' } })
     }
+  } catch {
+    return rollback(targetChanged())
   }
 
   // Affinity is committed: further cancellation must not claim the tab was never opened.

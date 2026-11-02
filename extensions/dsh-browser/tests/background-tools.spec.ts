@@ -1077,6 +1077,60 @@ describe('dispatchOpenTab', () => {
     expect(bindCreatedTab).not.toHaveBeenCalled()
   })
 
+  it.each(['commit-revoked', 'metadata-failed', 'cancelled'])('revokes a newly authorized tab when adoption is %s, even if native close fails', async failure => {
+    const { dispatchOpenTab } = await import('../src/background/tools.ts')
+    const controller = new AbortController()
+    const created = { id: 56, windowId: 2, url: 'https://docs.example/' }
+    let granted = false
+    const release = vi.fn(async () => { granted = false })
+    const remove = vi.fn(async () => { throw new Error('Synthetic native close failure') })
+    const bind = vi.fn(() => true)
+    vi.stubGlobal('chrome', {
+      tabs: { create: vi.fn(async () => created), update: vi.fn(async () => created), remove,
+        get: vi.fn(async () => {
+          if (failure === 'metadata-failed') throw new Error('Synthetic metadata failure')
+          if (failure === 'cancelled') controller.abort()
+          return created
+        }) },
+      runtime: { onMessage: { addListener: vi.fn(), removeListener: vi.fn() } },
+    })
+    const answer = await dispatchOpenTab({ id: 'failed-adoption', name: 'browser_open_tab', args: { url: created.url } },
+      2, 'auto', undefined, async () => 'approved', controller.signal, bind, () => true,
+      () => { if (failure === 'commit-revoked') throw new Error('The original request was revoked') },
+      false, async () => { granted = true }, () => ({ current: () => granted, release, canClose: () => true }))
+    expect(answer.ok).toBe(false)
+    expect(granted).toBe(false)
+    expect(release).toHaveBeenCalledOnce()
+    expect(remove).toHaveBeenCalledWith(56)
+    expect(release.mock.invocationCallOrder[0]).toBeLessThan(remove.mock.invocationCallOrder[0]!)
+    expect(bind).not.toHaveBeenCalled()
+    expect(answer.error?.message).toContain('Tab closure is unconfirmed')
+    expect(answer.error?.message).not.toContain('was closed')
+  })
+
+  it('keeps a page when its user authorization changes during cleanup persistence', async () => {
+    const { dispatchOpenTab } = await import('../src/background/tools.ts')
+    const created = { id: 57, windowId: 2, url: 'https://docs.example/' }
+    const remove = vi.fn(async () => {})
+    let finish!: () => void
+    let owned = true
+    const release = vi.fn(() => new Promise<void>(resolve => { finish = resolve }))
+    vi.stubGlobal('chrome', {
+      tabs: { create: vi.fn(async () => created), update: vi.fn(async () => created), remove,
+        get: vi.fn(async () => { throw new Error('Synthetic metadata failure') }) },
+      runtime: { onMessage: { addListener: vi.fn(), removeListener: vi.fn() } },
+    })
+    const pending = dispatchOpenTab({ id: 'user-adopted', name: 'browser_open_tab', args: { url: created.url } },
+      2, 'auto', undefined, async () => 'approved', undefined, () => true, () => true,
+      undefined, false, async () => {}, () => ({ current: () => owned, release, canClose: () => owned }))
+    await vi.waitFor(() => expect(release).toHaveBeenCalled())
+    owned = false; finish()
+    const answer = await pending
+    expect(answer.ok).toBe(false)
+    expect(remove).not.toHaveBeenCalled()
+    expect(answer.error?.message).toContain('no close was attempted')
+  })
+
   it('reports a committed open instead of cancellation after affinity bind', async () => {
     const { dispatchOpenTab } = await import('../src/background/tools.ts')
     const controller = new AbortController()

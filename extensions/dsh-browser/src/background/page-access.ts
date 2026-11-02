@@ -5,6 +5,12 @@ import { debuggerPages } from './debugger-pages.ts'
 export const PAGE_ACCESS_KEY = 'dshPageAccess'
 export const CONTROL_GROUP_TITLE = 'DSH 控制'
 interface Grant { tabId: number; windowId: number; origin: string; nonce: string; groupId?: number; mode?: 'debugger'; pending?: true }
+/** Cleanup belongs to one creation attempt and cannot revoke a newer user grant. */
+export interface CreatedPageAccess {
+  current: () => boolean
+  release: () => Promise<void>
+  canClose: () => boolean
+}
 type Page = Pick<chrome.tabs.Tab, 'id' | 'windowId' | 'url'> & Partial<Pick<chrome.tabs.Tab, 'groupId'>>
 const origin = (url?: string): string | undefined => {
   try { const parsed = new URL(url ?? ''); return /^https?:$/.test(parsed.protocol) ? parsed.origin : undefined } catch { return undefined }
@@ -80,6 +86,7 @@ export class PageAccess {
     }
   }
   has(tabId: number | undefined): boolean { return !this.restoring && tabId !== undefined && this.grants.has(tabId) && this.grants.get(tabId)?.pending !== true }
+  unclaimed(tabId: number): boolean { return !this.restoring && !this.grants.has(tabId) }
   ids(): number[] { return [...this.grants.keys()] }
   allows(tab: Page): boolean {
     const grant = tab.id === undefined ? undefined : this.grants.get(tab.id)
@@ -133,7 +140,7 @@ export class PageAccess {
     }
   }
   /** Only called with the native result of this request's tabs.create, after explicit settings opt-in. */
-  async grantCreated(tabId: number, current: () => boolean, signal: AbortSignal): Promise<void> {
+  async grantCreated(tabId: number, current: () => boolean, signal: AbortSignal, capture?: (access: CreatedPageAccess) => void): Promise<void> {
     await this.ready
     if (!current() || signal.aborted || this.grants.has(tabId)) throw new Error('Automatic page control was cancelled.')
     const tab = await chrome.tabs.get(tabId)
@@ -141,11 +148,28 @@ export class PageAccess {
     const grant: Grant = { tabId, windowId: tab.windowId, origin: origin(tab.url) ?? 'https://pending.invalid', nonce: crypto.randomUUID(), mode: 'debugger', pending: true }
     this.grants.set(tabId, grant)
     const allowed = () => this.grants.get(tabId) === grant && current()
+    let releasedByOwner = false
+    let releasedEpoch: string | undefined
+    const ownership: CreatedPageAccess = {
+      current: () => allowed() && grant.pending !== true,
+      release: () => {
+        if (this.grants.get(tabId) !== grant) return Promise.resolve()
+        releasedByOwner = true
+        const persisted = this.revoke(tabId)
+        releasedEpoch = this.epoch
+        return persisted
+      },
+      // An intervening revocation is conservative evidence of user takeover,
+      // even if a newer grant has already been stopped again.
+      canClose: () => this.grants.get(tabId) === grant || (releasedByOwner && releasedEpoch === this.epoch && !this.grants.has(tabId)),
+    }
     try {
+      capture?.(ownership)
+      const deadline = Date.now() + 8000
       await this.persist()
       if (!allowed() || signal.aborted) throw new Error('Automatic page control was cancelled.')
-      await debuggerPages.attachCreated(tabId, allowed)
-      if (!await debuggerPages.ready(tabId, undefined, signal, 8000)) throw new Error('The new page did not become ready for automatic control.')
+      await debuggerPages.attachCreated(tabId, allowed, signal, Math.max(0, deadline - Date.now()))
+      if (!await debuggerPages.ready(tabId, undefined, signal, Math.max(0, deadline - Date.now()))) throw new Error('The new page did not become ready for automatic control.')
       const live = await chrome.tabs.get(tabId)
       delete grant.pending
       if (!allowed() || signal.aborted || !this.allows(live)) throw new Error('The new page changed before it could be controlled.')
@@ -154,7 +178,7 @@ export class PageAccess {
       if (!allowed() || signal.aborted) throw new Error('Automatic page control was cancelled.')
       this.changed()
     } catch (error) {
-      await this.revoke(tabId).catch(() => {})
+      await ownership.release().catch(() => {})
       throw error
     }
   }

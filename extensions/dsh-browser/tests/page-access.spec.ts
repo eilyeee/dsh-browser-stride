@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { PageAccess, PAGE_ACCESS_KEY, CONTROL_GROUP_TITLE } from '../src/background/page-access.ts'
+import { PageAccess, PAGE_ACCESS_KEY, CONTROL_GROUP_TITLE, type CreatedPageAccess } from '../src/background/page-access.ts'
 import { debuggerPages } from '../src/background/debugger-pages.ts'
 
 function fixture() {
@@ -104,6 +104,41 @@ describe('native page access and visible control group', () => {
     expect(h.access.has(42)).toBe(false)
     expect(detach).toHaveBeenCalledWith(42)
     expect(chrome.tabs.group).not.toHaveBeenCalled()
+  })
+
+  it.each(['stop', 'reauthorize'])('does not revoke or close a page taken over by a user %s during automatic preparation', async action => {
+    const h = fixture(), tab = h.page(42)
+    let finish!: (ready: boolean) => void
+    let ownership!: CreatedPageAccess
+    vi.spyOn(debuggerPages, 'attachCreated').mockResolvedValue()
+    vi.spyOn(debuggerPages, 'ready').mockImplementation(() => new Promise<boolean>(resolve => { finish = resolve }))
+    vi.spyOn(debuggerPages, 'has').mockReturnValue(true)
+    vi.spyOn(debuggerPages, 'detach').mockResolvedValue()
+    const pending = h.access.grantCreated(42, () => true, new AbortController().signal, access => { ownership = access }).catch(error => error)
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
+    await h.access.revoke(42)
+    if (action === 'reauthorize') await h.access.grantFromAction(tab)
+    finish(true)
+    expect(await pending).toBeInstanceOf(Error)
+    expect(ownership.current()).toBe(false)
+    await ownership.release()
+    expect(ownership.canClose()).toBe(false)
+    expect(h.access.allows(tab)).toBe(action === 'reauthorize')
+  })
+
+  it('does not regain close authority when a newer toolbar grant is subsequently stopped', async () => {
+    const h = fixture(), tab = h.page(42)
+    let ownership!: CreatedPageAccess
+    vi.spyOn(debuggerPages, 'attachCreated').mockResolvedValue()
+    vi.spyOn(debuggerPages, 'ready').mockResolvedValue(true)
+    vi.spyOn(debuggerPages, 'has').mockReturnValue(true)
+    vi.spyOn(debuggerPages, 'detach').mockResolvedValue()
+    await h.access.grantCreated(42, () => true, new AbortController().signal, access => { ownership = access })
+    await ownership.release()
+    expect(ownership.canClose()).toBe(true)
+    await h.access.grantFromAction(tab)
+    await h.access.revoke(42)
+    expect(ownership.canClose()).toBe(false)
   })
   it('starts denied, groups only native-action grants and excludes other tabs on the same site', async () => {
     const h = fixture(), first = h.page(1), other = h.page(2)
