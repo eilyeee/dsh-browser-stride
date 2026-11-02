@@ -42,10 +42,14 @@ export const BRIDGE_SESSION_PURGE_METHOD = 'bridge.session.purge'
 export const BRIDGE_RUN_LIST_METHOD = 'bridge.browserRuns.list'
 export const BRIDGE_RUN_CONTROL_METHOD = 'bridge.browserRuns.control'
 export const BRIDGE_RUN_RETARGET_METHOD = 'bridge.browserRuns.retarget'
+export const BRIDGE_TASK_START_METHOD = 'bridge.browserTasks.start'
+export const BRIDGE_TASK_APPROVAL_METHOD = 'bridge.browserTasks.approval'
 export const BROWSER_RUN_LIST_LIMIT = 20
 export const BROWSER_RUN_STATES = ['queued', 'running', 'blocked', 'paused', 'stopping', 'stopped', 'completed', 'failed'] as const
 export type PanelRunControl = 'pause' | 'stop'
 export interface BrowserRunSummary {
+  task?: { goal: string; activeMs: number; modelRequests: number; toolCalls: number;
+    outcome: 'pending' | 'verified' | 'needs-review' | 'not-completed' | 'budget-exhausted'; canStart: boolean }
   /** Optional capability: absent on older compatible Hosts. */
   canRetarget?: boolean
   runId: string
@@ -107,7 +111,7 @@ export function isToolExecutionScope(value: unknown): value is ToolExecutionScop
     : scope.kind === 'run' && Object.keys(scope).length === 3 && wireId(scope.runId)
       && Number.isSafeInteger(scope.controlRevision) && (scope.controlRevision as number) >= 0
 }
-export interface ToolDispatchConfirmation { id: string; action: ToolActionIdentity; execution: ToolExecutionScope; sessionId?: string; targetBinding?: string }
+export interface ToolDispatchConfirmation { id: string; action: ToolActionIdentity; execution: ToolExecutionScope; sessionId?: string; targetBinding?: string; taskBudget?: true }
 export function isToolDispatchConfirmation(value: unknown): value is ToolDispatchConfirmation {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
   const row = value as Record<string, unknown>
@@ -180,7 +184,7 @@ export type ServerFrame =
   /** One bridge-owned event envelope projected from Remote streams and waterfalls. */
   | { t: 'event'; frame: { rpcId: string; method: string; payload: unknown } }
   /** A model-requested browser action to execute in the user-controlled tab. */
-  | { t: 'tool.call'; id: string; action: ToolActionIdentity; execution: ToolExecutionScope; name: string; args: Record<string, unknown>; expiresAt: number; sessionId?: string; targetBinding?: string }
+  | { t: 'tool.call'; id: string; action: ToolActionIdentity; execution: ToolExecutionScope; name: string; args: Record<string, unknown>; expiresAt: number; sessionId?: string; targetBinding?: string; taskBudget?: true }
   /** Withdraw a tool call that timed out or whose caller was cancelled. */
   | { t: 'tool.cancel'; id: string }
   /** Liveness probe. */
@@ -290,6 +294,7 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
         ? { t: 'event', frame: frame.frame as ServerFrame extends { t: 'event' } ? ServerFrame['frame'] : never }
         : undefined
     case 'tool.call':
+      if (frame.taskBudget !== undefined && (frame.taskBudget !== true || (frame.execution as ToolExecutionScope | undefined)?.kind !== 'run')) return undefined
       if (!isToolDispatchConfirmation({ id: frame.id, action: frame.action, execution: frame.execution,
         ...(frame.targetBinding === undefined ? {} : { targetBinding: frame.targetBinding }),
         ...(frame.sessionId === undefined ? {} : { sessionId: frame.sessionId }) })) return undefined
@@ -302,6 +307,7 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
             action: frame.action,
             execution: frame.execution as ToolExecutionScope,
             ...(typeof frame.targetBinding === 'string' ? { targetBinding: frame.targetBinding } : {}),
+            ...(frame.taskBudget === true ? { taskBudget: true as const } : {}),
             name: frame.name,
             args: frame.args as Record<string, unknown>,
             expiresAt: frame.expiresAt,

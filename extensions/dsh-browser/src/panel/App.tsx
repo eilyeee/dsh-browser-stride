@@ -2261,6 +2261,7 @@ export function App(): React.JSX.Element {
         </section>
       )}
       <BrowserRuns api={api} sessionId={sessionRef.current} connected={state === 'connected' && !sessionChanging} copy={copy.runs}
+        {...(tabAffinity?.active !== undefined && tabAffinity.active !== null ? { startRevision: tabAffinity.revision } : {})}
         {...(tabAffinity !== null && (tabAffinity.status === 'following' || tabAffinity.status === 'background') && tabAffinity.controlled !== null ? { targetRevision: tabAffinity.revision } : {})} />
       <div className="messages-pane">
       <div className="messages" ref={scrollRef} onScroll={syncScrollBottom}>

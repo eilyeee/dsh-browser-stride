@@ -5,10 +5,11 @@ import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import WebSocket from 'ws'
 import { BridgeServer, BridgeToolError, isLoopbackAddress, messageToText, payloadCode, payloadMessage } from '../src/server.ts'
-import { isPageBrowserTool, BRIDGE_CONFIRM_TOOL_METHOD, BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, BRIDGE_SESSION_PURGE_METHOD, BRIDGE_RUN_LIST_METHOD, BRIDGE_RUN_CONTROL_METHOD, BRIDGE_RUN_RETARGET_METHOD, type BridgeFrame } from '../src/protocol.ts'
+import { isPageBrowserTool, BRIDGE_CONFIRM_TOOL_METHOD, BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, BRIDGE_SESSION_PURGE_METHOD, BRIDGE_RUN_LIST_METHOD, BRIDGE_RUN_CONTROL_METHOD, BRIDGE_RUN_RETARGET_METHOD, BRIDGE_TASK_START_METHOD, BRIDGE_TASK_APPROVAL_METHOD, type BridgeFrame } from '../src/protocol.ts'
 import { SessionPurgeError } from '../src/session-purge.ts'
 import type { BrowserHostApi, HostEventFrame } from '../src/host-api.ts'
 import { createRunStorage } from './helpers/run-storage.ts'
+import { newBrowserTask } from '../src/task-contract.ts'
 import { asSessionId } from '../src/contracts/ids.ts'
 
 const TOKEN = 'deadbeefdeadbeefdeadbeefdeadbeef'
@@ -117,11 +118,11 @@ afterEach(async () => {
   for (const fixture of storageFixtures.splice(0)) await fixture.close()
 })
 
-async function connectedLedger(scoped = false, autoConfirm = true) {
+async function connectedLedger(scoped = false, autoConfirm = true, overrides: Partial<ConstructorParameters<typeof BridgeServer>[0]> = {}) {
   const storage = await createRunStorage()
   storageFixtures.push(storage)
   const ledger = storage.store.dispatches
-  const h = await startBridge({ dispatches: ledger, toolTimeoutMs: 2_000, ...(scoped ? { runs: storage.store } : {}) })
+  const h = await startBridge({ dispatches: ledger, toolTimeoutMs: 2_000, ...(scoped ? { runs: storage.store } : {}), ...overrides })
   harnesses.push(h)
   const client = await connect(h.url, undefined, autoConfirm)
   send(client.ws, { t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: TOKEN, caps: CAPS })
@@ -130,6 +131,58 @@ async function connectedLedger(scoped = false, autoConfirm = true) {
 }
 
 describe('recorded tool dispatch', () => {
+  it('accepts budget waits only for the original live pending task call', async () => {
+    const approval = vi.fn()
+    const h = await connectedLedger(true, true, { tasks: { selectTarget: vi.fn(), approval } })
+    const queued = await h.storage.store.create({ sessionId: asSessionId('approval-task'), requiredCriteriaIds: ['task-goal'], task: newBrowserTask('Synthetic goal') })
+    const run = await h.storage.store.transition(queued.runId, queued.version, 'running')
+    await h.storage.store.withExecution(run.runId, 0, async () => {
+      const result = h.bridge.requestTool('browser_snapshot', {}, new AbortController().signal)
+      await waitFor(() => h.frames.some(frame => frame.t === 'tool.call'))
+      const call = h.frames.find((frame): frame is Extract<BridgeFrame, { t: 'tool.call' }> => frame.t === 'tool.call')!
+      expect(call.taskBudget).toBe(true)
+      for (const [id, requestId] of [['real-wait', call.id], ['foreign-wait', 'foreign-request']]) {
+        send(h.ws, { t: 'rpc', id, method: BRIDGE_TASK_APPROVAL_METHOD, payload: { requestId, waiting: true } })
+        await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === id))
+      }
+      expect(approval).toHaveBeenCalledExactlyOnceWith(run.runId, call.id, true)
+      send(h.ws, { t: 'tool.result', id: call.id, action: call.action, ok: true, result: {} })
+      await result
+      send(h.ws, { t: 'rpc', id: 'late-wait', method: BRIDGE_TASK_APPROVAL_METHOD, payload: { requestId: call.id, waiting: false } })
+      await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === 'late-wait'))
+      expect(approval).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('starts a queued task on a reserved native target and exposes its blank session in the picker', async () => {
+    const selectTarget = vi.fn()
+    const h = await connectedLedger(true, true, { tasks: { selectTarget, approval: vi.fn() } })
+    const run = await h.storage.store.create({ sessionId: asSessionId('waiting-task'), requiredCriteriaIds: ['task-goal'], task: newBrowserTask('Synthetic task') })
+    h.callMock.mockResolvedValueOnce({ ok: true, value: { items: [{ sessionId: run.sessionId, blank: true }, { sessionId: 'other', blank: true }] } })
+    send(h.ws, { t: 'rpc', id: 'catalog', method: 'session.list', payload: {} })
+    await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === 'catalog'))
+    expect(h.frames).toContainEqual(expect.objectContaining({ id: 'catalog', ok: true, result: expect.objectContaining({ result: { ok: true, value: {
+      items: [{ sessionId: run.sessionId, blank: false }, { sessionId: 'other', blank: true }] } } }) }))
+    const payload = { sessionId: run.sessionId, runId: run.runId, expectedVersion: run.version, controlRevision: 0,
+      targetBinding: 'page_native_start', targetUrl: 'https://synthetic.test/settings' }
+    send(h.ws, { t: 'rpc', id: 'task-start', method: BRIDGE_TASK_START_METHOD, payload })
+    await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === 'task-start'))
+    expect(h.frames).toContainEqual(expect.objectContaining({ id: 'task-start', ok: true, result: expect.objectContaining({ state: 'running', controlRevision: 0 }) }))
+    expect(selectTarget).toHaveBeenCalledWith(run.runId, payload.targetUrl)
+    send(h.ws, { t: 'rpc', id: 'task-duplicate', method: BRIDGE_TASK_START_METHOD, payload })
+    await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === 'task-duplicate'))
+    expect(h.frames).toContainEqual(expect.objectContaining({ id: 'task-duplicate', ok: false }))
+    expect(selectTarget).toHaveBeenCalledTimes(1)
+    await h.storage.store.withExecution(run.runId, 0, async () => {
+      const result = h.bridge.requestTool('browser_snapshot', {}, new AbortController().signal)
+      await waitFor(() => h.frames.some(frame => frame.t === 'tool.call'))
+      const call = h.frames.find((frame): frame is Extract<BridgeFrame, { t: 'tool.call' }> => frame.t === 'tool.call')!
+      expect(call.targetBinding).toBe(payload.targetBinding)
+      send(h.ws, { t: 'tool.result', id: call.id, action: call.action, ok: true, result: {} })
+      await result
+    })
+  })
+
   it('reserves a selected target before paused handoff publishes its running revision', async () => {
     const h = await connectedLedger(true)
     const queued = await h.storage.store.create({ sessionId: asSessionId('handoff-session'), requiredCriteriaIds: ['saved'] })

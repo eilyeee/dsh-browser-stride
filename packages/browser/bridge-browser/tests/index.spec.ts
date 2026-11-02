@@ -26,7 +26,8 @@ function stubContext(): Context {
   return {
     connection,
     webServer: { port: 0, registerUpgrade: () => () => {}, register: () => () => {} },
-    tools: { register: () => () => {} },
+    tools: { register: () => () => {}, guard: () => () => {} },
+    inject: () => undefined,
     agents: { get: () => undefined },
     get: (key: string) => key === 'typertGateway' ? gateway : key === 'connection' ? connection : key === 'storageDomain' ? storage : undefined,
     provide: () => () => {},

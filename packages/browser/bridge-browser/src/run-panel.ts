@@ -30,6 +30,8 @@ function summary(run: BrowserRunRecord, requiresReconciliation: boolean, pending
   return { runId: run.runId, sessionId: run.sessionId, state: run.state, version: run.version,
     controlRevision: run.controlRevision, updatedAt: run.updatedAt, recoveryRequired: run.recoveryRequired, requiresReconciliation,
     canRetarget: run.state === 'paused' && !run.recoveryRequired && !requiresReconciliation && !pendingWrites,
+    ...(run.task === undefined ? {} : { task: { ...run.task,
+      canStart: run.state === 'queued' && !run.recoveryRequired && !requiresReconciliation && !pendingWrites } }),
     controls: [...(run.state === 'running' || run.state === 'queued' ? ['pause' as const] : []),
       ...(!isTerminal(run.state) && run.state !== 'stopping' ? ['stop' as const] : [])] }
 }

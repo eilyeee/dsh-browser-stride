@@ -8,6 +8,9 @@ export interface BrowserRunCopy {
   stop: string
   retarget: string
   retargetHelp: string
+  start: string
+  waitingHelp: string
+  outcomes: Record<NonNullable<BrowserRunSummary['task']>['outcome'], string>
   refresh: string
   loading: string
   pausedHelp: string
@@ -38,10 +41,20 @@ export function parseBrowserRuns(value: unknown, sessionId: string): BrowserRunL
     const allowed: PanelRunControl[] = state === 'running' || state === 'queued' ? ['pause', 'stop']
       : state === 'blocked' || state === 'paused' ? ['stop'] : []
     if (item.controls.some(control => !allowed.includes(control))) throw new Error('invalid browser run controls')
+    let task: BrowserRunSummary['task']
+    if (item.task !== undefined) {
+      const value = item.task
+      if (!record(value) || typeof value.goal !== 'string' || value.goal.trim() === '' || value.goal.length > 4096
+        || !counter(value.activeMs) || !counter(value.modelRequests) || !counter(value.toolCalls)
+        || !['pending', 'verified', 'needs-review', 'not-completed', 'budget-exhausted'].includes(value.outcome as string)
+        || typeof value.canStart !== 'boolean' || (value.canStart && (state !== 'queued' || item.recoveryRequired || item.requiresReconciliation))) throw new Error('invalid browser task')
+      task = { goal: value.goal, activeMs: value.activeMs, modelRequests: value.modelRequests, toolCalls: value.toolCalls,
+        outcome: value.outcome as NonNullable<BrowserRunSummary['task']>['outcome'], canStart: value.canStart }
+    }
     seen.add(item.runId)
     return { runId: item.runId, sessionId, state, version: item.version, controlRevision: item.controlRevision,
       updatedAt: item.updatedAt, recoveryRequired: item.recoveryRequired, requiresReconciliation: item.requiresReconciliation,
-      controls: [...item.controls], ...(item.canRetarget === undefined ? {} : { canRetarget: item.canRetarget }) }
+      controls: [...item.controls], ...(item.canRetarget === undefined ? {} : { canRetarget: item.canRetarget }), ...(task === undefined ? {} : { task }) }
   })
   return { items, total: value.total }
 }

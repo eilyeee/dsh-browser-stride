@@ -21,9 +21,11 @@ import { createHash, randomUUID } from 'node:crypto'
 import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer } from 'ws'
-import type { BrowserHostApi } from './host-api.ts'
+import { isRecord, type BrowserHostApi } from './host-api.ts'
 import { canonicalize, makeActionId, asRunId } from './contracts/ids.ts'
 import { z } from 'zod'
+import { BRIDGE_TASK_START_METHOD, BRIDGE_TASK_APPROVAL_METHOD } from './protocol.ts'
+import type { BrowserTaskRuntime } from './task-runtime.ts'
 import { toolCommandMaterial } from './tool-identity.ts'
 import type { ToolActionIdentity, ToolDispatchConfirmation } from './protocol.ts'
 import { transportReceipt, type BrowserDispatchLedger, type DispatchSettlement } from './dispatch-ledger.ts'
@@ -121,7 +123,8 @@ export interface BridgeServerDeps {
   /** Production always provides the durable ledger; optional for transport-only unit fixtures. */
   dispatches?: Pick<BrowserDispatchLedger, 'prepare' | 'markSent' | 'settle' | 'get'>
   /** Trusted Host async execution scopes; never caller/model-supplied ids. */
-  runs?: Pick<BrowserRunStore, 'executionFor' | 'assertDispatchAuthority' | 'retargetPaused'> & RunPanelStore
+  runs?: Pick<BrowserRunStore, 'executionFor' | 'assertDispatchAuthority' | 'retargetPaused' | 'startTask'> & RunPanelStore
+  tasks?: Pick<BrowserTaskRuntime, 'selectTarget' | 'approval'>
   /**
    * Test seam: force the remote address seen by the privilege gate. The
    * sandbox cannot bind arbitrary loopback literals, so the non-loopback
@@ -378,6 +381,7 @@ export class BridgeServer {
         id,
         action,
         execution: confirmation.execution,
+        ...(execution !== undefined && this.deps.runs?.get(execution.runId)?.task !== undefined ? { taskBudget: true as const } : {}),
         ...(targetBinding === undefined ? {} : { targetBinding }),
         name,
         args,
@@ -594,23 +598,42 @@ export class BridgeServer {
     // An ordered call may have waited while another connection replaced its
     // owner. It must never borrow the new connection's identity or signal.
     if (this.current !== conn || conn.abort.signal.aborted) return
-    if (frame.method === BRIDGE_RUN_RETARGET_METHOD) {
+    if (frame.method === BRIDGE_TASK_APPROVAL_METHOD) {
+      const value = frame.payload as { requestId?: unknown; waiting?: unknown } | null
+      const pending = typeof value?.requestId === 'string' ? this.pendingTools.get(value.requestId) : undefined
+      const scope = pending?.confirmation.execution
+      if (pending?.owner === conn && scope?.kind === 'run' && typeof value?.waiting === 'boolean' && pending.authorityCurrent()
+        && this.deps.runs?.get(asRunId(scope.runId))?.task !== undefined) {
+        this.deps.tasks?.approval(scope.runId, value.requestId as string, value.waiting)
+      }
+      sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true, result: { accepted: true } })
+      return
+    }
+    if (frame.method === BRIDGE_RUN_RETARGET_METHOD || frame.method === BRIDGE_TASK_START_METHOD) {
       try {
         const id = z.string().min(1).max(200).refine(value => value.trim() === value)
         const counter = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER)
         const payload = z.strictObject({ runId: id, sessionId: id, expectedVersion: counter,
-          controlRevision: counter, targetBinding: id }).parse(frame.payload)
+          controlRevision: counter, targetBinding: id, targetUrl: z.string().max(8192).optional() }).parse(frame.payload)
         const runs = this.deps.runs
         if (runs === undefined) throw new Error('unavailable')
         const run = runs.get(asRunId(payload.runId))
         if (run === undefined || run.sessionId !== payload.sessionId) throw new Error('foreign run')
-        const changed = await runs.retargetPaused(run.runId, payload.expectedVersion, payload.controlRevision, revision => {
+        const attachTarget = (revision: number) => {
           if (this.current !== conn || conn.abort.signal.aborted) throw new Error('connection changed')
           const previous = this.runTargets.get(run.runId)
           if (previous !== undefined && previous.controlRevision >= revision) throw new Error('target revision consumed')
           if (previous === undefined && this.runTargets.size >= 5000) throw new Error('target cache full')
+          if (run.task !== undefined) {
+            if (payload.targetUrl === undefined || this.deps.tasks === undefined) throw new Error('native target required')
+            this.deps.tasks.selectTarget(run.runId, payload.targetUrl)
+          }
           this.runTargets.set(run.runId, { sessionId: run.sessionId, controlRevision: revision, connectionId: conn.connectionId, id: payload.targetBinding })
-        }, conn.abort.signal)
+        }
+        if (payload.controlRevision !== run.controlRevision) throw new Error('stale revision')
+        const changed = frame.method === BRIDGE_TASK_START_METHOD
+          ? await runs.startTask(run.runId, payload.expectedVersion, attachTarget, conn.abort.signal)
+          : await runs.retargetPaused(run.runId, payload.expectedVersion, payload.controlRevision, attachTarget, conn.abort.signal)
         sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true, result: { runId: changed.runId,
           sessionId: changed.sessionId, version: changed.version, controlRevision: changed.controlRevision,
           state: changed.state, targetBinding: payload.targetBinding } })
@@ -700,12 +723,20 @@ export class BridgeServer {
       return
     }
     try {
-      const result = await this.deps.api.call({
+      let result = await this.deps.api.call({
         rpcId: frame.id,
         method: frame.method,
         payload: frame.payload,
         signal: conn.abort.signal,
       })
+      // Explicit tasks must be selectable before their first Agent turn exists.
+      // This projects real Host task ownership, without inventing chat messages.
+      if (frame.method === 'session.list' && result.ok && isRecord(result.value) && Array.isArray(result.value.items)) {
+        const waiting = new Set(this.deps.runs?.list().filter(run => run.task !== undefined
+          && !['completed', 'failed', 'stopped'].includes(run.state)).map(run => String(run.sessionId)))
+        result = { ok: true, value: { ...result.value, items: result.value.items.map(item =>
+          isRecord(item) && typeof item.sessionId === 'string' && waiting.has(item.sessionId) ? { ...item, blank: false } : item) } }
+      }
       sendFrame(conn.ws, {
         t: 'rpc.result',
         id: frame.id,

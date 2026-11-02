@@ -36,6 +36,8 @@ import {
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
   BRIDGE_CONFIRM_TOOL_METHOD,
   BRIDGE_RUN_RETARGET_METHOD,
+  BRIDGE_TASK_START_METHOD,
+  BRIDGE_TASK_APPROVAL_METHOD,
   isPageBrowserTool,
   isRunTabMutation,
   isRespondResult,
@@ -1014,6 +1016,7 @@ async function authorizeToolCall(
   windowId: number,
   sessionId?: string,
   unrestrictedAccess: boolean = unrestrictedAccessEnabled(),
+  waiting?: (value: boolean) => Promise<void>,
 ): Promise<ApprovalAuthorization> {
   if (signal.aborted) return 'cancelled'
   if (unrestrictedAccess) return 'approved'
@@ -1024,7 +1027,10 @@ async function authorizeToolCall(
   )) {
     return 'approved'
   }
-  const result: ApprovalRequestResult = await approvals.request(prompt, signal, windowId, sessionId)
+  await waiting?.(true)
+  let result: ApprovalRequestResult
+  try { result = await approvals.request(prompt, signal, windowId, sessionId) }
+  finally { await waiting?.(false) }
   if (signal.aborted) return 'cancelled'
   if (result.status !== 'decision') return result.status
   const { decision } = result
@@ -1252,7 +1258,7 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
       call,
       sharePageContent(),
       budget,
-      (prompt) => authorizeToolCall(prompt, controller.signal, windowId ?? 0, call.sessionId, unrestrictedAccess),
+      (prompt) => authorize(prompt, windowId ?? 0),
       controller.signal,
       undefined,
       undefined,
@@ -1265,6 +1271,14 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
       },
     )
   }
+  const authorize = async (prompt: ApprovalPrompt, windowId: number): Promise<ApprovalAuthorization> => {
+    const notify = async (waiting: boolean) => {
+      if (call.taskBudget !== true || callRpc === null) return
+      await callRpc.request(BRIDGE_TASK_APPROVAL_METHOD, { requestId: call.id, waiting },
+        { signal: controller.signal, timeoutMs: 2000 }).catch(() => {})
+    }
+    return authorizeToolCall(prompt, controller.signal, windowId, call.sessionId, unrestrictedAccess, notify)
+  }
   const dispatch = (): Promise<ToolAnswer> => (isTabManagementTool(call.name)
     ? managementDispatch()
     : call.name === 'browser_open_tab'
@@ -1275,7 +1289,7 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
           target.windowId,
           sharePageContent(),
           budget,
-          (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, call.sessionId, unrestrictedAccess),
+          (prompt) => authorize(prompt, target.windowId),
           controller.signal,
           (tab) => bindOpenedTab(tab, call.sessionId, targetAllowed, { active: call.args.active !== false }),
           (tabId) => targetAllowed() && tabAffinity.allowsTarget(tabId, call.sessionId),
@@ -1288,7 +1302,7 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
           call,
           sharePageContent(),
           budget,
-          (prompt) => authorizeToolCall(prompt, controller.signal, prepared.windowId, call.sessionId, unrestrictedAccess),
+          (prompt) => authorize(prompt, prepared.windowId),
           controller.signal,
           prepared,
           () => targetAllowed() && prepared.id !== undefined && tabAffinity.allowsTarget(prepared.id, call.sessionId),
@@ -1601,13 +1615,14 @@ chrome.runtime.onConnect.addListener((port) => {
     const msg = message as { type?: string }
     switch (msg.type) {
       case 'browser-run.retarget': {
-        const request = message as { id?: unknown; runId?: unknown; sessionId?: unknown; expectedVersion?: unknown; controlRevision?: unknown; affinityRevision?: unknown }
+        const request = message as { id?: unknown; runId?: unknown; sessionId?: unknown; expectedVersion?: unknown; controlRevision?: unknown; affinityRevision?: unknown; start?: unknown; task?: unknown }
         if (typeof request.id !== 'string') break
         const id = request.id
         const sid = validSessionId(request.sessionId)
         const runId = validSessionId(request.runId)
         const version = request.expectedVersion
         const revision = request.controlRevision
+        const start = request.start === true
         const reply = (ok: boolean, code = 'handoff-failed'): void => {
           try { port.postMessage({ type: 'browser-run.retarget.result', id, ok,
             ...(!ok ? { error: { code, message: 'Task target change was not confirmed. Refresh task status before another action.' } } : {}) }) } catch { /* panel closed */ }
@@ -1619,21 +1634,35 @@ chrome.runtime.onConnect.addListener((port) => {
         const timer = setTimeout(() => controller.abort(), 15_000)
         runRetargets.set(id, { controller, timer })
         const boundRpc = rpc
+        let affinityRevision = request.affinityRevision
         const current = () => panelPorts.has(port) && panelActiveSessions.get(port) === sid && tabAffinity.focusedSession() === sid
-          && tabAffinity.snapshot().revision === request.affinityRevision
+          && tabAffinity.snapshot().revision === affinityRevision
         void (async () => {
           if (!current() || boundRpc === null || bridge?.connected !== true) throw new Error('stale selection')
+          if (start) {
+            const active = tabAffinity.snapshot().active
+            if (active === null) throw new Error('no active page')
+            const before = targetLeases.capture(sid, active, () => tabAffinity.snapshot().active ?? undefined)
+            const native = await chrome.tabs.get(active.tabId)
+            const summary = summarizeTab(native)
+            if (!current() || !before.current() || controller.signal.aborted || summary === null
+              || native.status === 'loading' || native.pendingUrl !== undefined || summary.tabId !== active.tabId
+              || summary.windowId !== active.windowId || summary.url !== active.url) throw new Error('page changed')
+            commitTabAffinityRebind(summary, sid)
+            affinityRevision = tabAffinity.snapshot().revision
+          }
           const target = captureToolTarget(sid)
           if ('ok' in target) throw new Error('target unavailable')
           const live = await prepareToolTarget(target, sid, controller.signal)
           if ('ok' in live || !current() || !target.current() || controller.signal.aborted) throw new Error('target changed')
-          const prepared = runTargets.prepare({ kind: 'run', runId, controlRevision: revision + 2 }, sid, target)
+          const prepared = runTargets.prepare({ kind: 'run', runId, controlRevision: revision + (start ? 0 : 2) }, sid, target)
           if (prepared === undefined) throw new Error('target unavailable')
-          const result = await boundRpc.request(BRIDGE_RUN_RETARGET_METHOD, { runId, sessionId: sid,
-            expectedVersion: version, controlRevision: revision, targetBinding: prepared.id }, { signal: controller.signal, timeoutMs: 12_000 })
+          const result = await boundRpc.request(start ? BRIDGE_TASK_START_METHOD : BRIDGE_RUN_RETARGET_METHOD, { runId, sessionId: sid,
+            expectedVersion: version, controlRevision: revision, targetBinding: prepared.id,
+            ...(start || request.task === true ? { targetUrl: target.target.url } : {}) }, { signal: controller.signal, timeoutMs: 12_000 })
           if (typeof result !== 'object' || result === null) throw new Error('invalid result')
           const value = result as { runId?: unknown; sessionId?: unknown; controlRevision?: unknown; state?: unknown; targetBinding?: unknown }
-          if (value.runId !== runId || value.sessionId !== sid || value.controlRevision !== revision + 2
+          if (value.runId !== runId || value.sessionId !== sid || value.controlRevision !== revision + (start ? 0 : 2)
             || value.state !== 'running' || value.targetBinding !== prepared.id) throw new Error('invalid result')
           reply(true)
         })().catch(error => reply(false, error instanceof BridgeRpcError ? error.code : 'handoff-failed')).finally(() => {
@@ -1656,7 +1685,7 @@ chrome.runtime.onConnect.addListener((port) => {
         break
       case 'rpc': {
         const rpcMsg = message as { id: string; method: string; payload?: unknown }
-        if (rpcMsg.method === BRIDGE_RUN_RETARGET_METHOD) {
+        if ([BRIDGE_RUN_RETARGET_METHOD, BRIDGE_TASK_START_METHOD, BRIDGE_TASK_APPROVAL_METHOD].includes(rpcMsg.method)) {
           try { port.postMessage({ type: 'rpc.result', id: rpcMsg.id, ok: false,
             error: { code: 'forbidden', message: 'Use the selected-page task control.' } }) } catch { /* panel closed */ }
           break

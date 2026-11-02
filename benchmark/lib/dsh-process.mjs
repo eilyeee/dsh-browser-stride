@@ -55,6 +55,7 @@ export async function startDshBackend({
   runtimeRoot,
   startUrl,
   toolProbe,
+  extraPatch,
 }) {
   const backendRoot = join(runtimeRoot, backend)
   const sessionRoot = join(backendRoot, 'sessions')
@@ -81,6 +82,7 @@ export async function startDshBackend({
       '',
     ].join('\n')
   }
+  if (typeof extraPatch === 'string') patchText += `\n${extraPatch}\n`
   await writeFile(patch, patchText)
   const logPath = join(logsRoot, `dsh-${backend}.log`)
   const log = createWriteStream(logPath, { flags: 'a' })

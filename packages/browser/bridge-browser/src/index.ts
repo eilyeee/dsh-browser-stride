@@ -24,6 +24,7 @@ import type {} from '@deepseek-ai/dsh-attachment'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-session-persistence'
+import type {} from '@deepseek-ai/dsh-commands'
 import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { BridgeServer, isLoopbackAddress, isLoopbackHost } from './server.ts'
@@ -51,6 +52,9 @@ import {
 import { isRecord, type BrowserHostApi } from './host-api.ts'
 import { BrowserRunStore, BrowserRunStoreError } from './run-store.ts'
 import { DispatchLedgerError } from './dispatch-ledger.ts'
+import { BrowserTaskRuntime } from './task-runtime.ts'
+import { TASK_LIMITS } from './task-contract.ts'
+export type { BrowserTaskVerifier } from './task-runtime.ts'
 export { computeToolCommandDigest } from './tool-identity.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -166,11 +170,11 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     throw new Error('bridge-browser: DSH storageDomain service is required for browser run records')
   }
   const runs = await BrowserRunStore.open(storage, resolved.pairingProfile)
-  const lifetime: { server?: BridgeServer; requests?: PairingRequests } = {}
+  const lifetime: { server?: BridgeServer; requests?: PairingRequests; tasks?: BrowserTaskRuntime } = {}
   // Cordis disposes separate effects concurrently. Keep this ordering inside
   // one effect so receipt writes drain before their storage domain closes.
   ctx.effect(() => async () => {
-    try { await lifetime.requests?.close(); await lifetime.server?.close() } finally { await runs.close() }
+    try { await lifetime.tasks?.close(); await lifetime.requests?.close(); await lifetime.server?.close() } finally { await runs.close() }
   }, 'bridge-browser: server and durable records')
   ctx.provide('browserRuns', runs)
   const tokenRes = await resolveToken(resolved.token)
@@ -183,7 +187,7 @@ function mountBridge(
   tokenRes: Awaited<ReturnType<typeof resolveToken>>,
   hostApi: BrowserHostApi,
   runs: BrowserRunStore,
-  lifetime: { server?: BridgeServer; requests?: PairingRequests },
+  lifetime: { server?: BridgeServer; requests?: PairingRequests; tasks?: BrowserTaskRuntime },
 ): void {
   // Workspace grouping wraps the gateway create; session deferral wraps the
   // result so materialization at first prompt still flows through grouping.
@@ -197,6 +201,32 @@ function mountBridge(
     ctx.get('attachments')?.imageLimits,
   )
   const browserContext = new BrowserContextInjector(ctx.agents)
+  const tasks = new BrowserTaskRuntime(ctx, runs)
+  lifetime.tasks = tasks
+  ctx.provide('browserTasks', tasks)
+  ctx.effect(() => ctx.tools.guard(exec => tasks.guard(exec)), 'bridge-browser: task tool authority')
+  ctx.on('tools/execute', (exec, next) => tasks.aroundTool(exec, next))
+  ctx.on('agent/request', async (payload, next) => {
+    await tasks.consume(payload.agent, 'modelRequests')
+    return next()
+  })
+  ctx.on('session/event', (session, event) => {
+    if (event.type === 'turn/end' && event.data.reason.kind === 'aborted' && event.data.reason.reason.kind === 'user') tasks.userCancelled(String(session.id))
+  })
+  ctx.on('agent/pre-step', async (payload, next) => {
+    if (payload.messages.some(message => message.source.kind === 'user') && tasks.interruptForInput(payload.agent)) return { kind: 'reject' }
+    return next()
+  })
+  ctx.inject(['commands'], commandCtx => commandCtx.effect(() => commandCtx.commands.register({
+    name: 'browser', description: '在已绑定的浏览器页面执行任务 / Run a task on the bound browser page',
+    input: { hint: '网页任务目标 / Browser task goal' },
+    handler: async ({ agent, rawInput }) => {
+      try {
+        await tasks.create(String(agent.id), rawInput.trim())
+        return { kind: 'success', text: `网页任务已创建。请在扩展选择此会话的页面，然后点击“绑定并开始”，并在扩展查看任务的核验状态。执行上限：${TASK_LIMITS.activeMs / 60000} 分钟、${TASK_LIMITS.modelRequests} 次模型请求、${TASK_LIMITS.toolCalls} 次浏览器调用。` }
+      } catch { return { kind: 'error', text: '无法创建网页任务：请填写目标，并先结束该会话已有的任务或模型活动。' } }
+    },
+  }), 'bridge-browser: explicit browser task command'))
   // DSH 0.1.7+ replaced `agent/session-start` with `agent/created` as the
   // startup-driving extension point (agent registered with live session and
   // completed setup); bind there so deferred sessions still receive their
@@ -270,6 +300,7 @@ function mountBridge(
     purgeSession,
     dispatches: runs.dispatches,
     runs,
+    tasks,
   })
   lifetime.server = server
 

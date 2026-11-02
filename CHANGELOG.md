@@ -18,6 +18,17 @@ no release version has been assigned yet.
 
 ### Added
 
+- DSH Web's explicit `/browser <goal>` command creates a waiting task without
+  waking its Agent. The extension's trusted **Bind and start** action reserves
+  a native target before execution. Queued task sessions remain selectable.
+  The Host drives the existing Agent in a run scope, counts model admissions
+  and browser subcalls, and cancels owned model activity on pause/stop. Initial
+  cumulative limits exclude human waits. PTC callbacks require a live original
+  Host parent token. Trusted Host verifiers supply independent completion facts;
+  missing evidence and uncertain writes remain unverified without automatic replay.
+  Controlled-form and opt-in real-model checks are test fixtures; there is no
+  task-specific form business logic in the product runtime.
+
 - Eligible paused runs can continue on the page explicitly bound by the user.
   A trusted panel click checks the displayed binding revision; the worker reserves
   an opaque native target and the Host registers it before publishing the new

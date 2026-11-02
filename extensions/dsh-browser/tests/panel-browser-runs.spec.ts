@@ -31,6 +31,17 @@ describe('browser task panel boundaries', () => {
     await act(async () => { document.querySelector<HTMLButtonElement>('.run-retarget')!.click() })
     expect(retargetRun).not.toHaveBeenCalled()
   })
+  it('shows queued task binding and its goal without accepting a synthetic start', async () => {
+    const queued = { ...item('session-a', 'queued'), task: { goal: 'Synthetic goal', activeMs: 0, modelRequests: 0, toolCalls: 0, outcome: 'pending' as const, canStart: true } }
+    const rpc = vi.fn(async () => list(queued))
+    const retargetRun = vi.fn(async () => {})
+    await act(async () => { root.render(createElement(BrowserRuns, { api: { rpc: rpc as PanelApi['rpc'], retargetRun }, startRevision: 5, sessionId: 'session-a', connected: true, copy: PANEL_COPY.en.runs })) })
+    expect(document.body.textContent).toContain('Synthetic goal')
+    await act(async () => { document.querySelector<HTMLButtonElement>('.run-start')!.click() })
+    expect(retargetRun).not.toHaveBeenCalled()
+    expect(() => parseBrowserRuns(list({ ...queued, state: 'running' }), 'session-a')).toThrow()
+    expect(() => parseBrowserRuns(list({ ...queued, task: { ...queued.task, modelRequests: -1 } }), 'session-a')).toThrow()
+  })
   it('continues polling after an empty session later receives a managed task', async () => {
     vi.useFakeTimers()
     const rpc = vi.fn().mockResolvedValueOnce({ items: [], total: 0 }).mockResolvedValue(list())

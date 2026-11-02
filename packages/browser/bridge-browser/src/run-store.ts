@@ -13,6 +13,7 @@ import { BROWSER_ERROR_CODES } from './contracts/errors.ts'
 import { validateActionFact, summarizeActionFacts, type ActionFact } from './contracts/outcome.ts'
 import { assertTransition, decideCompletion, dispatchGate, isTerminal, nextControlRevision, requestPause, requestResume, requestStop } from './contracts/run.ts'
 import { BrowserDispatchLedger } from './dispatch-ledger.ts'
+import { taskSchema, type BrowserTask } from './task-contract.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context { browserRuns: BrowserRunStore }
@@ -58,6 +59,7 @@ const runSchema = z.strictObject({
   requiredCriteriaIds: criteria,
   recoveryRequired: z.boolean(),
   facts: z.array(factSchema).max(256),
+  task: taskSchema.optional(),
 }).superRefine((run, ctx) => {
   if (run.updatedAt < run.createdAt) ctx.addIssue({ code: 'custom', message: 'invalid timestamps' })
   if (new Set(run.facts.map(fact => fact.actionId)).size !== run.facts.length) ctx.addIssue({ code: 'custom', message: 'duplicate action id' })
@@ -112,6 +114,7 @@ function snapshot<T>(value: T): T { return structuredClone(value) }
 
 /** Durable lifecycle/facts plus explicit Host scopes; stored state alone grants no dispatch. */
 export class BrowserRunStore {
+  private readonly listeners = new Set<(run: BrowserRunRecord) => void>()
   private tail: Promise<void> = Promise.resolve()
   private closing = false
   private writeFaulted = false
@@ -159,6 +162,36 @@ export class BrowserRunStore {
     this.assertOpen()
     return [...this.domain.table('runs').entries()].map(([, run]) => run)
       .filter(run => sessionId === undefined || run.sessionId === sessionId).map(snapshot)
+  }
+
+  onChange(listener: (run: BrowserRunRecord) => void): () => void {
+    this.listeners.add(listener)
+    return () => { this.listeners.delete(listener) }
+  }
+
+  /** Host-owned task state; never merge arbitrary model or page material. */
+  updateTask(runId: RunId, update: (task: BrowserTask) => BrowserTask): Promise<BrowserRunRecord> {
+    return this.exclusive(async () => {
+      const run = this.require(runId)
+      if (run.task === undefined) throw new BrowserRunStoreError('invalid-state')
+      const next = taskSchema.parse(update(snapshot(run.task)))
+      if (next.goal !== run.task.goal || next.activeMs < run.task.activeMs || next.modelRequests < run.task.modelRequests
+        || next.toolCalls < run.task.toolCalls) throw new BrowserRunStoreError('invalid-state')
+      return this.save({ ...run, task: next })
+    })
+  }
+
+  /** Reserve a native target before publishing an initially queued task. */
+  startTask(runId: RunId, expectedVersion: number, attachTarget: (revision: number) => void, signal?: AbortSignal): Promise<BrowserRunRecord> {
+    return this.exclusive(async () => {
+      if (signal?.aborted) throw new BrowserRunStoreError('cancelled')
+      const run = this.current(runId, expectedVersion)
+      if (run.state !== 'queued' || run.task === undefined || run.recoveryRequired) throw new BrowserRunStoreError('invalid-state')
+      this.assertReconciled(run)
+      this.assertSessionAvailable(run)
+      attachTarget(run.controlRevision)
+      return this.save({ ...run, state: 'running' })
+    })
   }
 
   /** Await all work inside this trusted scope; detached children lose authority. */
@@ -231,10 +264,10 @@ export class BrowserRunStore {
     }
   }
 
-  create(input: { sessionId: SessionId; requiredCriteriaIds: readonly string[]; parentRunId?: RunId }): Promise<BrowserRunRecord> {
+  create(input: { sessionId: SessionId; requiredCriteriaIds: readonly string[]; parentRunId?: RunId; task?: BrowserTask }): Promise<BrowserRunRecord> {
     // Copy before queueing: callers must not mutate queued authority material.
     const parsed = z.strictObject({ sessionId: id.transform(asSessionId), requiredCriteriaIds: criteria,
-      parentRunId: id.transform(asRunId).optional() }).parse(JSON.parse(canonicalize(input)))
+      parentRunId: id.transform(asRunId).optional(), task: taskSchema.optional() }).parse(JSON.parse(canonicalize(input)))
     return this.exclusive(async () => {
       if (parsed.parentRunId !== undefined) {
         const parent = this.require(parsed.parentRunId)
@@ -244,6 +277,11 @@ export class BrowserRunStore {
       const now = Date.now()
       const run = runSchema.parse({ ...parsed, runId: `run_${randomUUID()}`, state: 'queued',
         controlRevision: 0, version: 0, createdAt: now, updatedAt: now, recoveryRequired: false, facts: [] })
+      if (run.task !== undefined) {
+        if (this.list(run.sessionId).some(other => !isTerminal(other.state))) throw new BrowserRunStoreError('session-busy')
+        this.assertReconciled(run)
+        this.assertSessionAvailable(run)
+      }
       await this.persist(run)
       return snapshot(run)
     })
@@ -378,6 +416,7 @@ export class BrowserRunStore {
     try {
       await this.domain.table('runs').put(run.runId, run)
       this.invalidateExecutions()
+      for (const listener of this.listeners) { try { listener(snapshot(run)) } catch { /* observers cannot undo committed state */ } }
     }
     catch (error) {
       // A backend error can leave the commit point unknown (e.g. rename
