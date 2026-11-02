@@ -275,7 +275,7 @@ export class BrowserTaskRuntime {
             controlRevision: run.controlRevision, dispatchState: 'accepted', outcome: 'verified', verifiedCriteriaIds: ['task-goal'], evidence })
           outcome = 'verified'
         } else outcome = 'not-completed'
-      } catch { outcome = 'needs-review' }
+      } catch { outcome = job.exhausted ? 'budget-exhausted' : 'needs-review' }
     }
     this.tick(job)
     run = await this.runs.updateTask(run.runId, task => ({ ...task, outcome, activeMs: Math.ceil(job.activeMs) }))

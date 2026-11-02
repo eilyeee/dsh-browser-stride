@@ -175,6 +175,42 @@ describe('Host-owned browser task executor', () => {
     expect(h.current()).toMatchObject({ state: 'completed', task: { outcome: 'verified' }, facts: [{ outcome: 'verified', verifiedCriteriaIds: ['task-goal'] }] })
     expect(verify).toHaveBeenCalledTimes(1)
   })
+  it('reports the active-time limit when it expires during independent verification', async () => {
+    let now = 0
+    vi.spyOn(performance, 'now').mockImplementation(() => now)
+    const h = await setup()
+    h.runtime.registerVerifier(h.run.runId, { acceptsTarget: () => true, verify: async ({ signal }) => {
+      now = 300000
+      await new Promise<void>((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }))
+      return { observedText: ['unreachable synthetic proof'] }
+    } })
+    await h.start(); await h.settled()
+    expect(h.current()).toMatchObject({ state: 'blocked', task: { outcome: 'budget-exhausted', activeMs: 300000 }, facts: [] })
+    expect(h.cancel).toHaveBeenCalled()
+    expect(h.followup).toHaveBeenCalledTimes(1)
+  })
+  it.each(['pause', 'stop'] as const)('refuses late verifier evidence after %s', async control => {
+    const h = await setup()
+    const entered = gate()
+    const hold = gate()
+    let observedAbort = false
+    close.push(async () => { hold.release() })
+    h.runtime.registerVerifier(h.run.runId, { acceptsTarget: () => true, verify: async ({ signal }) => {
+      entered.release()
+      await hold.promise
+      observedAbort = signal.aborted
+      return { observedText: ['late synthetic proof'] }
+    } })
+    await h.start(); await entered.promise
+    const changed = await h.store.control(h.run.runId, h.current().version, control)
+    expect(h.cancel).toHaveBeenCalled()
+    hold.release()
+    await vi.waitFor(() => expect(h.current().version).toBeGreaterThan(changed.version))
+    await h.settled()
+    if (control === 'stop') await vi.waitFor(() => expect(h.current().state).toBe('stopped'))
+    expect(h.current()).toMatchObject({ state: control === 'pause' ? 'paused' : 'stopped', facts: [] })
+    expect(observedAbort).toBe(true)
+  })
   it('never replays an unresolved write or calls its business verifier', async () => {
     const h = await setup()
     const verify = vi.fn(async () => ({ observedText: ['synthetic result'] }))

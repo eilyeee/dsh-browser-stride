@@ -348,6 +348,9 @@ export class BridgeServer {
         if (this.pendingTools.get(id) !== pending) return
         clearTimeout(timer)
         this.pendingTools.delete(id)
+        // The extension's final wait notification can be lost on timeout,
+        // cancellation or disconnect. End only this original request's wait.
+        if (execution !== undefined) this.deps.tasks?.approval(execution.runId, id, false)
         if (settlement.state === 'returned') conn.confirmedTools.delete(id)
         signal.removeEventListener('abort', onAbort)
         this.track((async () => {

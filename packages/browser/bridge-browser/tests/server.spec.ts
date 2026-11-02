@@ -148,9 +148,35 @@ describe('recorded tool dispatch', () => {
       expect(approval).toHaveBeenCalledExactlyOnceWith(run.runId, call.id, true)
       send(h.ws, { t: 'tool.result', id: call.id, action: call.action, ok: true, result: {} })
       await result
+      expect(approval).toHaveBeenLastCalledWith(run.runId, call.id, false)
       send(h.ws, { t: 'rpc', id: 'late-wait', method: BRIDGE_TASK_APPROVAL_METHOD, payload: { requestId: call.id, waiting: false } })
       await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === 'late-wait'))
-      expect(approval).toHaveBeenCalledTimes(1)
+      expect(approval).toHaveBeenCalledTimes(2)
+    })
+  })
+
+  it.each(['expired', 'cancelled', 'connection-closed'] as const)('clears an approval wait when its read request ends as %s', async reason => {
+    const approval = vi.fn()
+    const h = await connectedLedger(true, true, { toolTimeoutMs: reason === 'expired' ? 500 : 2000,
+      tasks: { selectTarget: vi.fn(), approval } })
+    const queued = await h.storage.store.create({ sessionId: asSessionId('approval-cleanup-task'), requiredCriteriaIds: ['task-goal'], task: newBrowserTask('Synthetic goal') })
+    const run = await h.storage.store.transition(queued.runId, queued.version, 'running')
+    await h.storage.store.withExecution(run.runId, 0, async () => {
+      const controller = new AbortController()
+      const result = h.bridge.requestTool('browser_snapshot', {}, controller.signal).catch(error => error)
+      await waitFor(() => h.frames.some(frame => frame.t === 'tool.call'))
+      const call = h.frames.find((frame): frame is Extract<BridgeFrame, { t: 'tool.call' }> => frame.t === 'tool.call')!
+      send(h.ws, { t: 'rpc', id: 'wait-for-read', method: BRIDGE_TASK_APPROVAL_METHOD, payload: { requestId: call.id, waiting: true } })
+      await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === 'wait-for-read'))
+      expect(approval).toHaveBeenCalledExactlyOnceWith(run.runId, call.id, true)
+      if (reason === 'cancelled') controller.abort()
+      if (reason === 'connection-closed') { h.ws.close(); await h.done }
+      expect(await result).toBeInstanceOf(BridgeToolError)
+      expect(h.ledger.get(call.id)).toMatchObject({ state: 'unresolved', interruption: { reason } })
+      expect(approval).toHaveBeenCalledTimes(2)
+      expect(approval).toHaveBeenLastCalledWith(run.runId, call.id, false)
+      // An uncertain read leaves the run scope live, so time must start counting again.
+      expect(h.storage.store.executionFor(String(run.sessionId))?.runId).toBe(run.runId)
     })
   })
 

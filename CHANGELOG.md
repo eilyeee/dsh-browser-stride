@@ -9,6 +9,9 @@ no release version has been assigned yet.
 
 ### Fixed
 
+- Settled browser requests clear their original approval wait even after timeout,
+  cancellation or disconnect, so subsequent task time is counted. Reaching the
+  active-time limit during independent verification reports budget exhaustion.
 - Revoked task execution contexts cancel their owned Agent activity immediately.
   Expired contexts cannot admit another model request while awaiting task settlement.
 
