@@ -9,6 +9,9 @@ no release version has been assigned yet.
 
 ### Fixed
 
+- Revoked task execution contexts cancel their owned Agent activity immediately.
+  Expired contexts cannot admit another model request while awaiting task settlement.
+
 - Session checkpoints recheck the connection owner and a fresh document/binding
   generation after native reads. A late read cannot overwrite a newer checkpoint,
   including after same-tab rebinding, same-URL navigation or reconnect.

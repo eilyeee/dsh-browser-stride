@@ -12,12 +12,13 @@ const gate = () => { let release!: () => void; const promise = new Promise<void>
 async function setup() {
   const fixture = await createRunStorage()
   close.push(fixture.close)
+  const errors: unknown[] = []
   let idle = Promise.resolve()
   let running = false
   let work: () => Promise<void> = async () => {}
   const followup = vi.fn(() => {
     running = true
-    idle = Promise.resolve().then(work).catch(() => {}).finally(() => { running = false })
+    idle = Promise.resolve().then(work).catch(error => { errors.push(error) }).finally(() => { running = false })
   })
   const cancel = vi.fn()
   const agent = { id: 'synthetic-task-session', get status() { return running ? 'running' : 'idle' },
@@ -29,8 +30,12 @@ async function setup() {
   const current = () => fixture.store.get(run.runId)!
   const start = async () => fixture.store.startTask(run.runId, current().version,
     () => runtime.selectTarget(run.runId, 'https://synthetic.test/settings'))
-  const settled = async () => { await vi.waitFor(() => expect(['running', 'stopping']).not.toContain(current().state), { timeout: 10000 }) }
-  return { ...fixture, runtime, agent, run, current, start, settled, followup, cancel, work: (value: () => Promise<void>) => { work = value } }
+  const settled = async () => {
+    await vi.waitFor(() => expect(['running', 'stopping']).not.toContain(current().state), { timeout: 10000 })
+    const unexpected = errors.find(error => !(error instanceof Error && error.message === 'task-budget-exhausted'))
+    if (unexpected !== undefined) throw unexpected
+  }
+  return { ...fixture, runtime, agent, run, current, start, settled, followup, cancel, errors, work: (value: () => Promise<void>) => { work = value } }
 }
 function execution(agent: Agent, name = 'browser_snapshot', parent?: ToolExecutionToken): ToolExecution {
   return { agent, name, token: Symbol(name), callId: name, rootCallId: name, arguments: {}, signal: new AbortController().signal,
@@ -38,6 +43,40 @@ function execution(agent: Agent, name = 'browser_snapshot', parent?: ToolExecuti
 }
 
 describe('Host-owned browser task executor', () => {
+  it.each([false, true])('cancels owned model activity when a revoked scope is nested=%s', async nested => {
+    const h = await setup()
+    const hold = gate()
+    close.push(async () => { hold.release() })
+    let revoked = false
+    const pool = new AsyncResource('synthetic-revocation-pool')
+    const revoke = async () => {
+      await h.store.dispatches.prepare({ requestId: 'authority-failed-write', connectionId: 'synthetic', sessionId: h.run.sessionId,
+        runId: h.run.runId, controlRevision: 0, name: 'browser_click', args: {}, expiresAt: Date.now() + 60000 })
+      await h.store.dispatches.markSent('authority-failed-write')
+      await h.store.dispatches.settle('authority-failed-write', { state: 'unresolved', reason: 'expired' })
+      expect(() => h.store.executionFor(String(h.agent.id))).toThrow(/reconciliation-required|execution-context-expired/)
+      expect(h.cancel).toHaveBeenCalled()
+      await expect(h.runtime.consume(h.agent, 'modelRequests')).rejects.toThrow()
+      revoked = true
+      await hold.promise
+      return { content: [], isError: false }
+    }
+    h.work(async () => {
+      if (nested) {
+        const parent = execution(h.agent, 'run_code')
+        await h.runtime.aroundTool(parent, () => pool.runInAsyncScope(() => h.runtime.aroundTool(execution(h.agent, 'browser_click', parent.token), revoke)))
+      } else await revoke()
+    })
+    await h.start()
+    await vi.waitFor(() => expect(revoked || h.errors.length > 0).toBe(true), { timeout: 1500 })
+    if (h.errors[0] !== undefined) throw h.errors[0]
+    expect(h.current().task?.modelRequests).toBe(0)
+    hold.release()
+    await h.settled()
+    expect(h.current()).toMatchObject({ state: 'blocked', task: { outcome: 'needs-review' } })
+    pool.emitDestroy()
+  })
+
   it('does not steal an Agent activity that starts during the native start commit', async () => {
     const h = await setup()
     const hold = gate()
@@ -144,7 +183,7 @@ describe('Host-owned browser task executor', () => {
       await h.store.dispatches.prepare({ requestId: 'synthetic-write', connectionId: 'synthetic', sessionId: h.run.sessionId,
         runId: h.run.runId, controlRevision: 0, name: 'browser_click', args: {}, expiresAt: Date.now() + 60000 })
       await h.store.dispatches.markSent('synthetic-write')
-      await h.store.dispatches.settle('synthetic-write', { state: 'unresolved', reason: 'timeout' })
+      await h.store.dispatches.settle('synthetic-write', { state: 'unresolved', reason: 'expired' })
     })
     await h.start(); await h.settled()
     expect(h.current()).toMatchObject({ state: 'blocked', task: { outcome: 'needs-review' }, facts: [] })
