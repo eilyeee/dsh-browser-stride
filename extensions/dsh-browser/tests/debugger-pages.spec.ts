@@ -1,28 +1,60 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { DebuggerPages } from '../src/background/debugger-pages.ts'
+import { DebuggerPages, debuggerPages } from '../src/background/debugger-pages.ts'
+import { dispatchToolCall } from '../src/background/tools.ts'
 
 function fixture() {
   let loader = 'document-a'
   let detached!: (target: chrome.debugger.Debuggee) => void
-  const commands = vi.fn(async (_target: unknown, method: string, params?: { expression?: string }) => {
+  let event!: (target: chrome.debugger.DebuggerSession, method: string, params?: Record<string, unknown>) => void
+  const commands = vi.fn(async (_target: unknown, method: string, params?: { expression?: string; contextId?: number; uniqueContextId?: string }) => {
     if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'main', loaderId: loader, url: 'https://example.test/' } } }
-    if (method === 'Page.createIsolatedWorld') return { executionContextId: loader === 'document-a' ? 10 : 20 }
+    if (method === 'Page.createIsolatedWorld') {
+      event({ tabId: 42 }, 'Runtime.executionContextCreated', { context: {
+        id: 10, uniqueId: `context-${loader}`, name: 'DSH Stride controller', auxData: { frameId: 'main', isDefault: false },
+      } })
+      return { executionContextId: 10 } // Native numeric id is reused across documents.
+    }
     if (method === 'Runtime.evaluate') return { result: { value: params?.expression?.startsWith('globalThis.__strideDebuggerAction(') ? { ok: true } : undefined } }
     return {}
   })
   const attach = vi.fn(async () => {})
   const detach = vi.fn(async () => {})
   vi.stubGlobal('chrome', { debugger: { attach, detach, sendCommand: commands,
-    onDetach: { addListener: (listener: typeof detached) => { detached = listener } } },
+    onDetach: { addListener: (listener: typeof detached) => { detached = listener } },
+    onEvent: { addListener: (listener: typeof event) => { event = listener } } },
   runtime: { getURL: (file: string) => `chrome-extension://synthetic/${file}` } })
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: async () => '/* packaged controller */' })))
   const pages = new DebuggerPages()
-  return { pages, attach, detach, commands, navigate: () => { loader = 'document-b' }, disconnect: () => detached({ tabId: 42 }) }
+  return { pages, attach, detach, commands, event, navigate: () => { loader = 'document-b' }, disconnect: () => detached({ tabId: 42 }) }
 }
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 describe('new-tab debugger transport', () => {
+  it.each(['cancel', 'rebind'])('does not commit or deliver a write when %s happens during controller preparation', async reason => {
+    const h = fixture()
+    await h.pages.attachCreated(42, () => true)
+    vi.spyOn(debuggerPages, 'has').mockImplementation(id => h.pages.has(id))
+    vi.spyOn(debuggerPages, 'frames').mockImplementation(id => h.pages.frames(id))
+    vi.spyOn(debuggerPages, 'send').mockImplementation(h.pages.send.bind(h.pages))
+    let finish!: (source: string) => void
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: () => new Promise<string>(resolve => { finish = resolve }) })))
+    const controller = new AbortController()
+    let current = true
+    const commit = vi.fn()
+    const pending = dispatchToolCall({ id: 'pending-write', name: 'browser_press', args: { key: 'Enter' } },
+      'auto', { maxItems: 60, maxChars: 12000 }, undefined, controller.signal,
+      { id: 42, url: 'https://example.test/', windowId: 1 }, () => current,
+      { unrestrictedAccess: true, commitAction: commit })
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
+    if (reason === 'cancel') controller.abort()
+    else current = false
+    finish('/* packaged controller */')
+    expect((await pending).ok).toBe(false)
+    expect(commit).not.toHaveBeenCalled()
+    expect(h.commands.mock.calls.some(([, method, params]) => method === 'Runtime.evaluate' && params?.expression?.includes('DSH_ACTION'))).toBe(false)
+  })
+
   it('can attach only with current opt-in and never routes an unowned tab or child frame', async () => {
     const h = fixture()
     await expect(h.pages.attachCreated(42, () => false)).rejects.toThrow()
@@ -47,6 +79,11 @@ describe('new-tab debugger transport', () => {
     expect(h.commands.mock.calls.slice(before).some(([, method]) => method === 'Runtime.evaluate')).toBe(false)
     await h.pages.send(42, { type: 'DSH_PING' }, (await h.pages.frames(42))[0]!)
     expect(h.commands.mock.calls.filter(([, method]) => method === 'Page.createIsolatedWorld')).toHaveLength(2)
+    const evaluations = h.commands.mock.calls.filter(([, method]) => method === 'Runtime.evaluate').map(([, , params]) => params!)
+    expect(evaluations.every(params => params.contextId === undefined)).toBe(true)
+    expect(evaluations.map(params => params.uniqueContextId)).toEqual([
+      'context-document-a', 'context-document-a', 'context-document-b', 'context-document-b',
+    ])
   })
 
   it('does not execute when opt-in is revoked during packaged source loading', async () => {

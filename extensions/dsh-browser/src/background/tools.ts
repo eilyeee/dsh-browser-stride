@@ -23,7 +23,7 @@ import { approvalPromptForCall, originFromUrl } from './authorization.ts'
 import { waitForNextDocumentReady } from './navigation.ts'
 import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
 import { getUiLocale } from '../i18n.ts'
-import { debuggerPages, sendPageMessage } from './debugger-pages.ts'
+import { debuggerPages, sendPageMessage, PageDispatchRevoked, type PageDispatch } from './debugger-pages.ts'
 
 /** A tool call from the bridge. */
 export interface ToolCall {
@@ -171,6 +171,7 @@ async function sendAction(
   frame: TabFrame,
   budget?: ContentBudget,
   includePageDelta: boolean = false,
+  dispatch?: PageDispatch,
 ): Promise<unknown> {
   return sendPageMessage(tabId, {
     type: 'DSH_ACTION',
@@ -178,7 +179,7 @@ async function sendAction(
     args: withoutFrame(call.args),
     ...budget === undefined ? {} : { budget },
     ...includePageDelta ? { includePageDelta: true } : {},
-  }, frame.documentId === undefined ? { frameId: frame.frameId } : { documentId: frame.documentId })
+  }, frame.documentId === undefined ? { frameId: frame.frameId } : { documentId: frame.documentId }, dispatch)
 }
 
 function contentScriptReceiverMissing(error: unknown): boolean {
@@ -360,6 +361,7 @@ async function snapshotAllFrames(
   frames: TabFrame[],
   call: ToolCall,
   budget: ContentBudget,
+  current?: () => boolean,
 ): Promise<ToolAnswer> {
   const generation = snapshotGenerationByTab.get(tabId) ?? {}
   snapshotGenerationByTab.set(tabId, generation)
@@ -391,9 +393,10 @@ async function snapshotAllFrames(
       ...call,
       args: deltaRequested && sameDocument ? call.args : { ...call.args, delta: false },
     }
-    const response = await sendAction(tabId, frameCall, frame, budgets.get(frame.frameId))
+    const response = await sendAction(tabId, frameCall, frame, budgets.get(frame.frameId), false, { current })
     return { frame, response }
   }))
+  if (current?.() === false) return targetChanged()
   if (snapshotGenerationByTab.get(tabId) !== generation) {
     return unavailable('The page changed while the snapshot was being captured. Call browser_snapshot again.')
   }
@@ -470,6 +473,7 @@ async function snapshotAfterNavigation(
     frames,
     { ...call, name: 'browser_snapshot', args: {} },
     { ...budget, maxChars: snapshotMaxChars },
+    targetStillAllowed,
   )
   const snapshot = answerText(answer)
   if (snapshot === undefined) return undefined
@@ -489,7 +493,8 @@ async function dispatchOnce(
 ): Promise<ToolAnswer> {
   if (isCancelled(call, signal)) return cancelled()
   if (targetStillAllowed?.() === false) return targetChanged()
-  if (call.name === 'browser_snapshot') return snapshotAllFrames(tabId, frames, call, budget)
+  const requestCurrent = () => !isCancelled(call, signal) && targetStillAllowed?.() !== false
+  if (call.name === 'browser_snapshot') return snapshotAllFrames(tabId, frames, call, budget, requestCurrent)
 
   const frameId = requestedFrame(call.args)
   if (frameId < 0) return { ok: false, error: { code: 'action-failed', message: 'frame must be a non-negative integer.' } }
@@ -497,8 +502,8 @@ async function dispatchOnce(
   if (frame === undefined) {
     return unavailable(`Frame ${frameId} does not exist or has navigated. Call browser_snapshot again.`)
   }
-  // No await occurs between this guard and tabs.sendMessage, so an expired
-  // approval cannot cross the final state-changing dispatch boundary.
+  // Each transport repeats this check after its own asynchronous preparation
+  // and commits only immediately before delivering the page operation.
   if (isCancelled(call, signal)) return cancelled()
   if (targetStillAllowed?.() === false) return targetChanged()
   const hasSnapshotBaseline = snapshotDocumentsByTab.get(tabId)?.get(frameId) === frameDocumentKey(frame)
@@ -511,13 +516,13 @@ async function dispatchOnce(
   let response: unknown
   const stateChanging = STATE_CHANGING_PAGE_TOOLS.has(call.name)
   try {
-    if (stateChanging) commitAction?.()
     response = await sendAction(
       tabId,
       call,
       frame,
       requestPageDelta ? { ...budget, maxChars: deltaChars } : undefined,
       requestPageDelta,
+      { current: requestCurrent, ...(stateChanging ? { commit: commitAction } : {}) },
     )
   } catch (error: unknown) {
     if (stateChanging && contentScriptReceiverMissing(error)) rollbackActionCommit?.()
@@ -543,7 +548,7 @@ async function dispatchOnce(
     if (targetStillAllowed?.() === false) return targetChanged()
     if (ready) {
       try {
-        const snapshot = await snapshotAfterNavigation(tabId, call, text, budget, targetStillAllowed)
+        const snapshot = await snapshotAfterNavigation(tabId, call, text, budget, requestCurrent)
         if (snapshot !== undefined) return snapshot
       } catch {
         // Preserve the successful navigation status when the replacement page
@@ -809,6 +814,7 @@ export async function dispatchToolCall(
     )
   } catch (error: unknown) {
     if (isCancelled(call, signal)) return cancelled()
+    if (error instanceof PageDispatchRevoked) return targetChanged()
     if (!contentScriptReceiverMissing(error)) {
       return unavailable('The content script stopped responding after the operation was dispatched. Call browser_snapshot before continuing.')
     }
@@ -1044,7 +1050,7 @@ export async function dispatchOpenTab(
       call,
       status,
       budget ?? { maxItems: 60, maxChars: DEFAULT_SNAPSHOT_MAX_CHARS },
-      () => targetStillAllowed(tabId),
+      () => !isCancelled(call, signal) && targetStillAllowed(tabId),
     )
     if (snapshot !== undefined) return snapshot
   } catch {

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { authorizedExamplePages } from './page-access-fixture.ts'
+import { authorizedExamplePages, exampleNativePageProbe } from './page-access-fixture.ts'
 import { PAGE_ACCESS_KEY } from '../src/background/page-access.ts'
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -91,6 +91,7 @@ function mockChrome(initialTabs: chrome.tabs.Tab[], storedContext?: unknown) {
       onReplaced,
       onRemoved,
     },
+    scripting: { executeScript: vi.fn(exampleNativePageProbe) },
     webNavigation: { onCommitted: chromeEvent<[{ tabId: number; frameId: number }]>() },
     windows: {
       WINDOW_ID_NONE: -1,

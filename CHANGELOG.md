@@ -9,6 +9,13 @@ no release version has been assigned yet.
 
 ### Fixed
 
+- Debugger page operations recheck their original request immediately before
+  delivery and commit writes only there, so cancellation or retargeting during
+  controller preparation cannot dispatch an old action. Evaluations use unique
+  browser context identities across process changes. Cached manual page grants
+  require a native scripting probe during recovery; visible tab metadata is not
+  sufficient evidence of page access.
+
 - Page revocation commits a private epoch before updating its session cache, so
   a failed cache write cannot restore old grants after a worker restart. Recovery
   rechecks native tab/window/origin/group identity and processes startup events.

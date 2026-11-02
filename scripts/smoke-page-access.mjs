@@ -121,6 +121,25 @@ try {
   await a.bringToFront(); assert.equal((await rebind('explicit-grant-after-fault')).ok, true)
   await browser.worker.evaluate(id => chrome.tabs.update(id, { pinned: false }), aId)
   await browser.authorizePage(a)
+  // A stale/reused tab id can still expose matching metadata under Chrome's
+  // tabs permission. Recovery must also verify actual native scripting access.
+  const stale = await browser.context.newPage()
+  await stale.goto(`${new URL(a.url()).origin}/stale-native-grant`)
+  const staleId = await activeId(stale)
+  assert.equal(await nativeCanRead(staleId), false)
+  await browser.worker.evaluate(async ({ originalId, replacementId }) => {
+    const cache = (await chrome.storage.session.get('dshPageAccess')).dshPageAccess
+    const original = cache.grants.find(grant => grant.tabId === originalId)
+    if (original === undefined) throw new Error('Missing original synthetic grant')
+    const { groupId: _group, ...row } = original
+    await chrome.storage.session.set({ dshPageAccess: { ...cache, grants: [{ ...row, tabId: replacementId }] } })
+  }, { originalId: aId, replacementId: staleId })
+  Object.assign(browser, await browser.restartWorker())
+  await stale.bringToFront()
+  assert.equal((await rebind('matching-metadata-without-native-permission')).ok, false)
+  assert.equal(await grantCount(), 0, 'native browser permission must be rechecked before cached grants are restored')
+  await stale.close()
+  await browser.authorizePage(a)
   const artifacts = join(root, '.stride-private/validation/page-access')
   await mkdir(artifacts, { recursive: true })
   await browser.panel.screenshot({ path: join(artifacts, 'authorized-page-and-control-group.png') })
@@ -129,7 +148,7 @@ try {
   assert.equal(await grantCount(), 0, 'browser restart does not restore page grants')
   assert.equal(await nativeCanRead(await activeId(browser.target)), false)
   assert.equal((await browser.worker.evaluate(() => chrome.tabGroups.query({ title: 'DSH 控制' }))).length, 0)
-  console.log('Page permission smoke passed: native activeTab grant, same-origin sibling isolation, visible control group, no authorization by dragging, trusted stop, cross-origin revocation, Chrome reload, stale-cache revocation after worker restart and browser restart. No model called.')
+  console.log('Page permission smoke passed: native activeTab grant, sibling isolation, visible group, no authorization by dragging, trusted stop, cross-origin revocation, Chrome reload, stale-cache revocation, native scripting recheck during worker recovery and browser restart. No model called.')
 } finally {
   await browser?.close().catch(() => {})
   await new Promise(done => site.close(done))

@@ -3,11 +3,26 @@ import type { TabFrame } from './frames.ts'
 
 interface Session {
   current: () => boolean
-  context?: { document: string; id: number }
-  preparing?: Promise<number>
+  worlds: Map<number, { id: string; frameId: string }>
+  context?: { document: string; id: string }
+  preparing?: Promise<string>
 }
 interface Frame { id: string; loaderId: string; url: string }
 interface Evaluation { result?: { value?: unknown }; exceptionDetails?: unknown }
+const CONTROLLER_WORLD = 'DSH Stride controller'
+
+/** Request authority is checked at the transport's actual delivery boundary. */
+export interface PageDispatch {
+  current?: () => boolean
+  commit?: () => void
+}
+export class PageDispatchRevoked extends Error {
+  constructor() { super('The original browser request was revoked before dispatch.') }
+}
+function commitDispatch(dispatch?: PageDispatch): void {
+  if (dispatch?.current?.() === false) throw new PageDispatchRevoked()
+  dispatch?.commit?.()
+}
 
 export class DebuggerPages {
   private sessions = new Map<number, Session>()
@@ -18,25 +33,51 @@ export class DebuggerPages {
       if (target.tabId === undefined || !this.sessions.delete(target.tabId)) return
       this.onDetached(target.tabId)
     })
+    if (typeof chrome !== 'undefined') chrome.debugger?.onEvent?.addListener((target, method, params) => {
+      if (target.tabId === undefined || target.sessionId !== undefined) return
+      const session = this.sessions.get(target.tabId)
+      if (session === undefined) return
+      if (method === 'Runtime.executionContextCreated') {
+        const context = params?.context as { id?: unknown; uniqueId?: unknown; name?: unknown; auxData?: { frameId?: unknown; isDefault?: unknown } } | undefined
+        if (typeof context?.id !== 'number' || !Number.isSafeInteger(context.id) || typeof context.uniqueId !== 'string'
+          || context.uniqueId === '' || context.name !== CONTROLLER_WORLD || context.auxData?.isDefault !== false
+          || typeof context.auxData.frameId !== 'string') return
+        const previous = session.worlds.get(context.id)
+        if (previous?.id === session.context?.id && previous?.id !== context.uniqueId) session.context = undefined
+        session.worlds.set(context.id, { id: context.uniqueId, frameId: context.auxData.frameId })
+      } else if (method === 'Runtime.executionContextDestroyed') {
+        const id = params?.executionContextId
+        if (typeof id !== 'number') return
+        const previous = session.worlds.get(id)
+        if (previous === undefined || (typeof params?.executionContextUniqueId === 'string' && params.executionContextUniqueId !== previous.id)) return
+        session.worlds.delete(id)
+        if (session.context?.id === previous.id) session.context = undefined
+      } else if (method === 'Runtime.executionContextsCleared') {
+        session.worlds.clear()
+        session.context = undefined
+      }
+    })
   }
   has(tabId: number): boolean { return this.sessions.has(tabId) }
   private allowed(tabId: number, session: Session): void {
     if (this.sessions.get(tabId) !== session || !session.current()) throw new Error('The debugger page is no longer authorized.')
   }
-  private async command<T>(tabId: number, session: Session, method: string, params?: object): Promise<T> {
+  private async command<T>(tabId: number, session: Session, method: string, params?: object, dispatch?: PageDispatch): Promise<T> {
     this.allowed(tabId, session)
+    commitDispatch(dispatch)
     const answer = await chrome.debugger.sendCommand({ tabId }, method, params) as T
     this.allowed(tabId, session)
     return answer
   }
   async attachCreated(tabId: number, current: () => boolean): Promise<void> {
     if (chrome.debugger === undefined || !current() || this.has(tabId)) throw new Error('Automatic page control is unavailable.')
-    const session: Session = { current }
+    const session: Session = { current, worlds: new Map() }
     this.sessions.set(tabId, session)
     try {
       await chrome.debugger.attach({ tabId }, '1.3')
       this.allowed(tabId, session)
       await this.command(tabId, session, 'Page.enable')
+      await this.command(tabId, session, 'Runtime.enable')
     } catch (error) {
       if (this.sessions.get(tabId) === session) this.sessions.delete(tabId)
       await chrome.debugger.detach({ tabId }).catch(() => {})
@@ -64,7 +105,7 @@ export class DebuggerPages {
     // Automatic control currently supports the top document only. Child frames get no authority.
     return [{ frameId: 0, parentFrameId: -1, url: frame.url, documentId: `${frame.id}:${frame.loaderId}` }]
   }
-  private async context(tabId: number, session: Session, frame: Frame): Promise<number> {
+  private async context(tabId: number, session: Session, frame: Frame): Promise<string> {
     const document = `${frame.id}:${frame.loaderId}`
     if (session.context?.document === document) return session.context.id
     if (session.preparing !== undefined) { await session.preparing; this.allowed(tabId, session); return this.context(tabId, session, frame) }
@@ -74,33 +115,42 @@ export class DebuggerPages {
         return response.text()
       }).catch(error => { this.source = undefined; throw error }))
       const world = await this.command<{ executionContextId: number }>(tabId, session, 'Page.createIsolatedWorld', {
-        frameId: frame.id, worldName: 'DSH Stride controller', grantUniveralAccess: false,
+        frameId: frame.id, worldName: CONTROLLER_WORLD, grantUniveralAccess: false,
       })
+      // Numeric context ids can be reused after cross-process navigation.
+      // Resolve the browser-issued unique id and never evaluate using the number.
+      const deadline = Date.now() + 1000
+      while (!session.worlds.has(world.executionContextId) && Date.now() < deadline) {
+        this.allowed(tabId, session)
+        await new Promise<void>(resolve => { setTimeout(resolve, 10) })
+      }
+      const identified = session.worlds.get(world.executionContextId)
+      if (identified?.frameId !== frame.id) throw new Error('The isolated page controller could not be identified.')
       const installed = await this.command<Evaluation>(tabId, session, 'Runtime.evaluate', {
-        contextId: world.executionContextId, expression: source, returnByValue: true,
+        uniqueContextId: identified.id, expression: source, returnByValue: true,
       })
       if (installed.exceptionDetails !== undefined) throw new Error('The packaged browser controller could not start.')
       const live = await this.frame(tabId, session)
-      if (`${live.id}:${live.loaderId}` !== document) throw new Error('The page changed while preparing its controller.')
-      session.context = { document, id: world.executionContextId }
-      return world.executionContextId
+      if (`${live.id}:${live.loaderId}` !== document || session.worlds.get(world.executionContextId)?.id !== identified.id) throw new Error('The page changed while preparing its controller.')
+      session.context = { document, id: identified.id }
+      return identified.id
     })()
     session.preparing = preparing
     try { return await preparing } finally { if (session.preparing === preparing) session.preparing = undefined }
   }
-  async send(tabId: number, message: unknown, options?: { frameId?: number; documentId?: string }): Promise<unknown> {
+  async send(tabId: number, message: unknown, options?: { frameId?: number; documentId?: string }, dispatch?: PageDispatch): Promise<unknown> {
     const session = this.session(tabId)
     if (options?.frameId !== undefined && options.frameId !== 0) throw new Error('Automatic control supports only the main document.')
     const frame = await this.frame(tabId, session)
     const document = `${frame.id}:${frame.loaderId}`
     if (options?.documentId !== undefined && options.documentId !== document) throw new Error('The target document changed before dispatch.')
-    const contextId = await this.context(tabId, session, frame)
+    const uniqueContextId = await this.context(tabId, session, frame)
     const live = await this.frame(tabId, session)
     if (`${live.id}:${live.loaderId}` !== document || live.url !== frame.url) throw new Error('The target document changed before dispatch.')
     const response = await this.command<Evaluation>(tabId, session, 'Runtime.evaluate', {
-      contextId, expression: `globalThis.__strideDebuggerAction(JSON.parse(${JSON.stringify(JSON.stringify(message))}))`,
+      uniqueContextId, expression: `globalThis.__strideDebuggerAction(JSON.parse(${JSON.stringify(JSON.stringify(message))}))`,
       awaitPromise: true, returnByValue: true,
-    })
+    }, dispatch)
     if (response.exceptionDetails !== undefined) throw new Error('The page stopped responding after dispatch. Observe it before another action.')
     const answer = response.result?.value as { result?: { navigationPending?: boolean } } | undefined
     if (answer?.result?.navigationPending !== true) {
@@ -116,9 +166,9 @@ export class DebuggerPages {
         const session = this.session(tabId)
         const frame = await this.frame(tabId, session)
         if (`${frame.id}:${frame.loaderId}` !== previousDocumentId) {
-          const contextId = await this.context(tabId, session, frame)
+          const uniqueContextId = await this.context(tabId, session, frame)
           const state = await this.command<Evaluation>(tabId, session, 'Runtime.evaluate', {
-            contextId, expression: 'document.readyState', returnByValue: true,
+            uniqueContextId, expression: 'document.readyState', returnByValue: true,
           })
           if (state.result?.value === 'interactive' || state.result?.value === 'complete') return !signal.aborted
         }
@@ -132,7 +182,8 @@ export class DebuggerPages {
 export const debuggerPages = new DebuggerPages()
 
 /** One transport per page; a stopped debugger page never falls back to broader native access. */
-export function sendPageMessage(tabId: number, message: unknown, options?: chrome.tabs.MessageSendOptions): Promise<unknown> {
-  return debuggerPages.has(tabId) ? debuggerPages.send(tabId, message, options)
-    : options === undefined ? chrome.tabs.sendMessage(tabId, message) : chrome.tabs.sendMessage(tabId, message, options)
+export function sendPageMessage(tabId: number, message: unknown, options?: chrome.tabs.MessageSendOptions, dispatch?: PageDispatch): Promise<unknown> {
+  if (debuggerPages.has(tabId)) return debuggerPages.send(tabId, message, options, dispatch)
+  commitDispatch(dispatch)
+  return options === undefined ? chrome.tabs.sendMessage(tabId, message) : chrome.tabs.sendMessage(tabId, message, options)
 }

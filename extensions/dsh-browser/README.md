@@ -45,6 +45,8 @@ Enable **Automatically control pages opened by DSH** in settings and save. It is
 
 The Chrome controller evaluates only packaged DOM operations in a separate isolated world, for the main HTTP(S) document. Cross-site navigation within this new tab remains controlled; child frames and selected-text quotes are not supported by this transport. Closing, moving the tab to another window, leaving the group, **Stop controlling this page**, disabling the setting, unpairing DSH or browser debugger cancellation revokes access. Already-dispatched operations cannot be undone. Automatic grants are not restored after worker/browser restart or extension reload; use a fresh DSH-created page or the toolbar authorization flow. Chrome may show its debugging indicator and can refuse attachment when another debugger or browser policy conflicts.
 
+Preparing the controller does not commit a page write. The original request, target and deadline are checked again immediately before delivery. Evaluations use browser-issued unique context identities so a reused numeric context id cannot select another document after a process change. Restoring manual page grants also requires a native scripting probe: Chrome's tab-metadata permission can expose a URL without granting page access.
+
 Firefox does not offer this mode. Managed `/browser` tasks still require trusted selected-page binding and cannot create/follow/close tabs. `pnpm run test:smoke-browser` exercises ordinary real Host tool dispatch into an automatically controlled synthetic page; it does not call a model or establish DSH Desktop integration.
 
 ## Pending page calls

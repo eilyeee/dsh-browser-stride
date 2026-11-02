@@ -13,7 +13,8 @@ function fixture() {
   let nextGroup = 50
   const groups = new Map<number, { id: number; windowId: number; title?: string }>()
   const set = vi.fn(async (value: Record<string, unknown>) => { Object.assign(data, structuredClone(value)) })
-  const inject = vi.fn(async () => [])
+  const inject = vi.fn(async (details: { target: { tabId: number }; func?: unknown }) => details.func === undefined ? []
+    : [{ frameId: 0, result: new URL(tabs.get(details.target.tabId)!.url!).origin }])
   const sendMessage = vi.fn(async (): Promise<unknown> => ({}))
   const ungroup = vi.fn(async (id: number | number[]) => { for (const key of [id].flat()) { const tab = tabs.get(key); if (tab) tab.groupId = -1 } })
   vi.stubGlobal('chrome', {
@@ -202,6 +203,15 @@ describe('native page access and visible control group', () => {
     tab.groupId = groupId
     const again = new PageAccess(vi.fn()); await again.ready
     expect(again.allows(tab)).toBe(false)
+  })
+
+  it('does not treat visible native tab metadata as a restored browser page grant', async () => {
+    const h = fixture(), tab = h.page(1)
+    await h.access.grantFromAction(tab)
+    h.inject.mockRejectedValueOnce(new Error('Missing native page permission'))
+    const restarted = new PageAccess(vi.fn()); await restarted.ready
+    expect(restarted.allows(tab)).toBe(false)
+    expect((h.data[PAGE_ACCESS_KEY] as { grants: unknown[] }).grants).toEqual([])
   })
 
   it('does not give an old request a new toolbar grant for the same tab or another tab', async () => {

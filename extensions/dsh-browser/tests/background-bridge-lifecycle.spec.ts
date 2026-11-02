@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { authorizedExamplePages } from './page-access-fixture.ts'
+import { authorizedExamplePages, exampleNativePageProbe } from './page-access-fixture.ts'
 import { PAGE_ACCESS_KEY } from '../src/background/page-access.ts'
 
 import { BRIDGE_PROTOCOL_VERSION, BRIDGE_RUN_RETARGET_METHOD, BRIDGE_RUN_LIST_METHOD, BRIDGE_TASK_START_METHOD } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
@@ -148,7 +148,8 @@ function mockChrome(options: {
       onCommitted,
     },
     scripting: {
-      executeScript: vi.fn(options.executeScript ?? (async () => [])),
+      executeScript: vi.fn(async (details: { target: { tabId: number }; func?: unknown }) => details.func === undefined
+        ? (options.executeScript ?? (async () => []))() : exampleNativePageProbe(details)),
     },
     windows: {
       WINDOW_ID_NONE: -1,
@@ -1190,7 +1191,7 @@ describe('background bridge lifecycle', () => {
       args: { key: 'Enter' },
       expiresAt: Date.now() + 10_000,
     })
-    await vi.waitFor(() => { expect(chrome.scripting.executeScript).toHaveBeenCalledOnce() })
+    await vi.waitFor(() => { expect(vi.mocked(chrome.scripting.executeScript).mock.calls.filter(([details]) => details.files !== undefined)).toHaveLength(1) })
 
     panel.onMessage.emit({
       type: 'settings',

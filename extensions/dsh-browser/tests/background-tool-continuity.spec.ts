@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { authorizedExamplePages } from './page-access-fixture.ts'
+import { authorizedExamplePages, exampleNativePageProbe } from './page-access-fixture.ts'
 import { PAGE_ACCESS_KEY } from '../src/background/page-access.ts'
 
 import { BRIDGE_PROTOCOL_VERSION } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
@@ -148,7 +148,7 @@ describe('tool-driven session checkpoints', () => {
         onReplaced: chromeEvent<[number, number]>(),
         onRemoved: chromeEvent<[number]>(),
       },
-      scripting: { executeScript: vi.fn(async () => []) },
+      scripting: { executeScript: vi.fn(exampleNativePageProbe) },
       webNavigation: {
         getAllFrames: vi.fn(async () => [{
           tabId: 1,

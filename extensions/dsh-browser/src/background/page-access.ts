@@ -63,6 +63,13 @@ export class PageAccess {
         const native = await chrome.tabs.get(grant.tabId)
         if (native.id !== grant.tabId || native.windowId !== grant.windowId || origin(native.url) !== grant.origin
           || (grant.groupId !== undefined && native.groupId !== grant.groupId)) { pruned = true; continue }
+        // Chrome's tabs permission exposes metadata even without activeTab.
+        // Cached URL/group identity alone is no longer evidence of page access.
+        const probe = await chrome.scripting.executeScript({ target: { tabId: grant.tabId }, func: () => location.origin })
+        if (!probe.some(frame => frame.frameId === 0 && frame.result === grant.origin)) { pruned = true; continue }
+        const live = await chrome.tabs.get(grant.tabId)
+        if (live.id !== grant.tabId || live.windowId !== grant.windowId || origin(live.url) !== grant.origin
+          || (grant.groupId !== undefined && live.groupId !== grant.groupId)) { pruned = true; continue }
       } catch { pruned = true; continue }
       this.grants.set(grant.tabId, { ...grant })
       if (typeof grant.groupId === 'number' && grant.groupId >= 0) this.groups.set(grant.windowId, grant.groupId)

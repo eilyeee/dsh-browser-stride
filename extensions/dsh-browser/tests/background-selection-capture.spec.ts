@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { authorizedExamplePages } from './page-access-fixture.ts'
+import { authorizedExamplePages, exampleNativePageProbe } from './page-access-fixture.ts'
 import { PAGE_ACCESS_KEY } from '../src/background/page-access.ts'
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -100,6 +100,7 @@ function mockChrome(sharePageContent: 'auto' | 'off' = 'auto') {
       onReplaced,
       onRemoved,
     },
+    scripting: { executeScript: vi.fn(exampleNativePageProbe) },
     webNavigation: { onCommitted },
     windows: {
       WINDOW_ID_NONE: -1,
