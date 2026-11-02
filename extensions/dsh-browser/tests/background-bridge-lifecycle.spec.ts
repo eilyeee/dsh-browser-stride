@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { BRIDGE_PROTOCOL_VERSION, BRIDGE_RUN_RETARGET_METHOD, BRIDGE_TASK_START_METHOD } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
+import { BRIDGE_PROTOCOL_VERSION, BRIDGE_RUN_RETARGET_METHOD, BRIDGE_RUN_LIST_METHOD, BRIDGE_TASK_START_METHOD } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { wireToolCall, confirmTestTool } from './wire-tool-call.ts'
 import { PAGE_SESSION_CONTEXT_STORAGE_KEY } from '../src/background/session-continuity.ts'
@@ -72,6 +72,7 @@ function mockChrome(options: {
   tabGet?: (tabId: number) => Promise<chrome.tabs.Tab>
   tabQuery?: (queryInfo: chrome.tabs.QueryInfo) => Promise<chrome.tabs.Tab[]>
   tabRemove?: (tabId: number) => Promise<void>
+  tabCreate?: (properties: chrome.tabs.CreateProperties) => Promise<chrome.tabs.Tab>
   tabSendMessage?: (tabId: number, message: unknown) => Promise<unknown>
   executeScript?: () => Promise<unknown>
 } = {}) {
@@ -120,6 +121,7 @@ function mockChrome(options: {
       get: vi.fn(options.tabGet ?? (async (tabId: number) => ({ id: tabId, windowId: 1, title: 'Tab', url: 'https://example.com/' } as chrome.tabs.Tab))),
       query: vi.fn(options.tabQuery ?? (async () => [{ id: 1, windowId: 1, title: 'Tab', url: 'https://example.com/' }] as chrome.tabs.Tab[])),
       remove: vi.fn(options.tabRemove ?? (async () => {})),
+      create: vi.fn(options.tabCreate ?? (async () => ({ id: 2, windowId: 1, status: 'complete', url: 'https://example.com/' } as chrome.tabs.Tab))),
       sendMessage: vi.fn(options.tabSendMessage ?? (async () => {})),
       onActivated: chromeEvent<[{ tabId: number; windowId: number }]>(),
       onUpdated: chromeEvent<[number, Parameters<Parameters<typeof chrome.tabs.onUpdated.addListener>[0]>[1], chrome.tabs.Tab]>(),
@@ -155,6 +157,82 @@ afterEach(() => {
 })
 
 describe('background bridge lifecycle', () => {
+  it.each([false, true])('does not let an already-started tab creation restore revoked authority after a fresh binding=%s', async rebind => {
+    let finish!: () => void
+    const hold = new Promise<void>(resolve => { finish = resolve })
+    const h = mockChrome({ localGet: async () => ({ dshSettings: { bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge', unrestrictedBrowserAccess: true } }),
+      tabCreate: async () => { await hold; return { id: 2, windowId: 1, status: 'complete', url: 'https://example.com/' } as chrome.tabs.Tab } })
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+    const panel = panelPort(); h.onConnect.emit(panel.port)
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const socket = FakeWebSocket.instances[0]!
+    socket.open(); await Promise.resolve()
+    socket.receive({ t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps: { textOnly: true, snapshotMaxChars: 32000, maxInteractiveItems: 60 } })
+    try {
+      panel.onMessage.emit({ type: 'tab-affinity.rebind', id: 'initial' })
+      await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith({ type: 'tab-affinity.rebind.result', id: 'initial', ok: true }))
+      socket.receive({ t: 'tool.call', id: 'late-open', name: 'browser_open_tab', args: { url: 'https://example.com/' }, expiresAt: Date.now() + 10000 })
+      await vi.waitFor(() => expect(chrome.tabs.create).toHaveBeenCalled())
+      const state = panel.postMessage.mock.calls.map(([m]) => m).filter(m => m.type === 'tab-affinity').at(-1).state
+      panel.onMessage.emit({ type: 'tab-affinity.unbind', id: 'release', sessionId: null, revision: state.revision })
+      await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith({ type: 'tab-affinity.unbind.result', id: 'release', ok: true }))
+      if (rebind) {
+        panel.onMessage.emit({ type: 'tab-affinity.rebind', id: 'fresh' })
+        await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith({ type: 'tab-affinity.rebind.result', id: 'fresh', ok: true }))
+      }
+      finish()
+      await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'late-open', ok: false })))
+      panel.onMessage.emit({ type: 'request-status' })
+      expect(panel.postMessage.mock.calls.filter(([m]) => m.type === 'tab-affinity').at(-1)![0].state).toMatchObject(rebind
+        ? { status: 'following', controlled: { tabId: 1 } } : { detached: true, controlled: null })
+    } finally { finish(); panel.onDisconnect.emit(); socket.close() }
+  })
+
+  it('requires a running task to pause before unbinding, then denies all browser tools after unbinding', async () => {
+    const h = mockChrome({ localGet: async () => ({ dshSettings: { bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge', unrestrictedBrowserAccess: true } }) })
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+    const panel = panelPort(); h.onConnect.emit(panel.port)
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const socket = FakeWebSocket.instances[0]!
+    socket.open(); await Promise.resolve()
+    socket.receive({ t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps: { textOnly: true, snapshotMaxChars: 32000, maxInteractiveItems: 60 } })
+    panel.onMessage.emit({ type: 'session.active', sessionId: 'selected', isNew: true })
+    await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity', state: expect.objectContaining({ status: 'following' }) })))
+    const state = panel.postMessage.mock.calls.map(([m]) => m).filter(m => m.type === 'tab-affinity').at(-1).state
+    for (const [id, runState] of [['busy', 'running'], ['release', 'paused']]) {
+      panel.onMessage.emit({ type: 'tab-affinity.unbind', id, sessionId: 'selected', revision: state.revision })
+      await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'rpc', method: BRIDGE_RUN_LIST_METHOD })))
+      const frame = socket.sent.filter(frame => (frame as { method?: string }).method === BRIDGE_RUN_LIST_METHOD).at(-1) as { id: string }
+      socket.receive({ t: 'rpc.result', id: frame.id, ok: true, result: { type: 'server-response', rpcId: frame.id, result: { ok: true, value: { items: [{ state: runState }] } } } })
+      await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity.unbind.result', id, ok: runState === 'paused' })))
+      socket.sent.splice(0)
+    }
+    expect(chrome.storage.local.set).toHaveBeenCalledWith({ dshDetachedSessions: { sessionIds: ['selected'], detached: true } })
+    vi.mocked(chrome.tabs.sendMessage).mockClear()
+    for (const name of ['browser_snapshot', 'browser_open_tab', 'browser_follow_tab']) {
+      socket.receive({ t: 'tool.call', id: name, name, args: {}, sessionId: 'selected', expiresAt: Date.now() + 10000 })
+      await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: name, ok: false })))
+    }
+    expect(chrome.tabs.sendMessage).not.toHaveBeenCalled()
+    expect(chrome.tabs.remove).not.toHaveBeenCalled()
+    panel.onDisconnect.emit(); socket.close()
+  })
+
+  it('keeps explicit page revocation after a worker or extension restart, even with stale saved bindings', async () => {
+    const h = mockChrome({ localGet: async () => ({ dshDetachedSessions: { sessionIds: ['selected'], detached: true } }),
+      sessionGet: async key => key === 'dshTabAffinity' ? { dshTabAffinity: { controlledTabId: 1, focusedSessionId: 'selected', sessionTabs: { selected: { tabId: 1, windowId: 1, title: 'Tab', url: 'https://example.com/' } } } } : {} })
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+    const panel = panelPort(); h.onConnect.emit(panel.port)
+    await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity', state: expect.objectContaining({ detached: true, controlled: null }) })))
+    panel.onMessage.emit({ type: 'session.active', sessionId: 'selected', isNew: true })
+    await vi.waitFor(() => expect(chrome.storage.session.set).toHaveBeenCalledWith(expect.objectContaining({ dshTabAffinity: expect.objectContaining({ detached: true }) })))
+    expect(panel.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity', state: expect.objectContaining({ status: 'following' }) }))
+    panel.onDisconnect.emit()
+  })
+
   it.each([false, true])('creates native pins through the dedicated path, including initial start=%s, and fences a changed document', async start => {
     const method = start ? BRIDGE_TASK_START_METHOD : BRIDGE_RUN_RETARGET_METHOD
     const revision = start ? 0 : 3

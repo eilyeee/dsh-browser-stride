@@ -90,7 +90,7 @@ interface SessionResumeHintMessage {
   sessionId: string | null
 }
 
-type BackgroundMessage = RpcResultMessage | RespondResultMessage | SettingsResultMessage | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | (Omit<TabAffinityRebindResultMessage, 'type'> & { type: 'browser-run.retarget.result' }) | SelectionMessage | SessionResumeHintMessage | { type: 'browser-pairing'; status: BrowserPairingStatus }
+type BackgroundMessage = RpcResultMessage | RespondResultMessage | SettingsResultMessage | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | (Omit<TabAffinityRebindResultMessage, 'type'> & { type: 'browser-run.retarget.result' | 'tab-affinity.unbind.result' }) | SelectionMessage | SessionResumeHintMessage | { type: 'browser-pairing'; status: BrowserPairingStatus }
 
 /** Structured gateway failure retained for product-level error handling. */
 export class PanelRpcError extends Error {
@@ -130,6 +130,7 @@ export interface PanelApi {
   resolveTabAffinity(revision: number, decision: TabAffinityDecision, sessionId: string | null): Promise<void>
   retargetRun(payload: { runId: string; sessionId: string; expectedVersion: number; controlRevision: number; affinityRevision: number; start?: boolean; task?: boolean }): Promise<void>
   rebindTabAffinity(): Promise<void>
+  unbindTabAffinity(revision: number, sessionId: string | null): Promise<void>
   /** Clear all selection state, or only the exact selection supplied. */
   clearSelection(selection?: PageSelection): Promise<void>
   /** Scope this panel's selections to its own browser window. */
@@ -232,6 +233,7 @@ export function connectPanel(): PanelApi {
         break
       }
       case 'browser-run.retarget.result':
+      case 'tab-affinity.unbind.result':
       case 'tab-affinity.rebind.result': {
         const entry = pendingRebinds.get(msg.id)
         if (entry === undefined) return
@@ -454,6 +456,21 @@ export function connectPanel(): PanelApi {
           if (pendingRebinds.get(id) !== entry) return
           pendingRebinds.delete(id)
           reject(connectionError(cause))
+        })
+      })
+    },
+    unbindTabAffinity(revision, sessionId) {
+      const id = crypto.randomUUID()
+      return new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pendingRebinds.delete(id)
+          reject(new PanelRpcError('timeout', getUiLocale() === 'zh' ? '解绑结果未确认，请核对页面绑定状态' : 'Unbinding was not confirmed. Check the page binding.'))
+        }, 10000)
+        const entry = { resolve: () => { clearTimeout(timer); resolve() }, reject: (error: Error) => { clearTimeout(timer); reject(error) } }
+        pendingRebinds.set(id, entry)
+        void send({ type: 'tab-affinity.unbind', id, revision, sessionId }, { kind: 'rebind', id }).catch((error: unknown) => {
+          if (pendingRebinds.get(id) !== entry) return
+          pendingRebinds.delete(id); entry.reject(connectionError(error))
         })
       })
     },

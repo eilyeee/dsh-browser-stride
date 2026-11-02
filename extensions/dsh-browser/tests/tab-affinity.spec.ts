@@ -10,6 +10,47 @@ function tab(tabId: number, title = `Tab ${tabId}`): AffinityTab {
 }
 
 describe('TabAffinityController', () => {
+  it('unbinds only the displayed session and never lets implicit binding restore it', () => {
+    const affinity = new TabAffinityController()
+    affinity.bindNewSession('other', tab(2))
+    affinity.bindNewSession('selected', tab(1))
+    const revision = affinity.snapshot().revision
+    expect(affinity.unbindSession('other', revision)).toBe(false)
+    expect(affinity.unbindSession('selected', revision - 1)).toBe(false)
+    expect(affinity.unbindSession('selected', revision)).toBe(true)
+    expect(affinity.snapshot()).toMatchObject({ status: 'lost', controlled: null, detached: true })
+    expect(affinity.getSessionTab('other')?.tabId).toBe(2)
+    expect(affinity.resolveTarget('selected')).toEqual({ kind: 'lost' })
+    expect(affinity.bindInitial(tab(1), 'selected')).toBe(false)
+    expect(affinity.bindNewSession('selected', tab(1))).toBe(false)
+    expect(affinity.bindNewSession('automatic-new', tab(1))).toBe(false)
+    affinity.focusSession('automatic-new')
+    affinity.focusSession('other')
+    expect(affinity.isDetached('automatic-new')).toBe(true)
+    affinity.focusSession('selected')
+    affinity.bindSession('selected', tab(1))
+    expect(affinity.allowsTarget(1, 'selected')).toBe(false)
+    affinity.rebindActive(tab(1), 'selected')
+    expect(affinity.isDetached('selected')).toBe(false)
+    expect(affinity.resolveTarget('selected')).toMatchObject({ kind: 'target', tab: { tabId: 1 } })
+  })
+
+  it('restores explicit revocation independently of stale session target records', () => {
+    const affinity = new TabAffinityController()
+    affinity.restoreSessionTabs({ selected: tab(1), other: tab(2) })
+    affinity.restoreDetachedSessions(['selected'])
+    affinity.restoreDetached()
+    affinity.focusSession('selected')
+    affinity.observeActive(tab(1))
+    expect(affinity.resolveTarget('selected')).toEqual({ kind: 'lost' })
+    expect(affinity.bindNewSession('automatic-new', tab(1))).toBe(false)
+    expect(affinity.getSessionTab('other')?.tabId).toBe(2)
+    expect(affinity.decide('follow', affinity.snapshot().revision, 'selected')).toBe(true)
+    expect(affinity.snapshot()).toMatchObject({ status: 'following' })
+    expect(affinity.snapshot().detached).toBeUndefined()
+    expect(affinity.detachedSessionIds()).toEqual([])
+  })
+
   it('binds the first tool target and follows metadata updates in place', () => {
     const affinity = new TabAffinityController()
     affinity.observeActive(tab(1))

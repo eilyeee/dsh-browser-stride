@@ -14,6 +14,7 @@
  *   panel → bg: { type: 'approval.response', id, decision }
  *   panel → bg: { type: 'tab-affinity.response', revision, decision, sessionId }
  *   panel → bg: { type: 'tab-affinity.rebind', id }
+ *   panel → bg: { type: 'tab-affinity.unbind', id, revision, sessionId }
  *   panel → bg: { type: 'panel.window', windowId }
  *   panel → bg: { type: 'selection.clear', selection? }
  *   panel → bg: { type: 'request-status' }
@@ -28,6 +29,7 @@
  *   bg → panel: { type: 'selection', selection }
  *   bg → panel: { type: 'tab-affinity', state }
  *   bg → panel: { type: 'tab-affinity.rebind.result', id, ok, error? }
+ *   bg → panel: { type: 'tab-affinity.unbind.result', id, ok, error? }
  *
  * @module
  */
@@ -36,6 +38,7 @@ import {
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
   BRIDGE_CONFIRM_TOOL_METHOD,
   BRIDGE_RUN_RETARGET_METHOD,
+  BRIDGE_RUN_LIST_METHOD,
   BRIDGE_TASK_START_METHOD,
   BRIDGE_TASK_APPROVAL_METHOD,
   isPageBrowserTool,
@@ -172,10 +175,11 @@ async function probeBridge(url: string): Promise<boolean> {
 const STORAGE_KEY = 'dshSettings'
 const INSTALLATION_KEY = 'dshBridgeInstallationId'
 const TAB_AFFINITY_STORAGE_KEY = 'dshTabAffinity'
+const DETACHED_SESSIONS_STORAGE_KEY = 'dshDetachedSessions'
 
-type StoredTabAffinity =
+type StoredTabAffinity = { detached?: true; detachedSessions?: string[] } & (
   | { controlledTabId: number; keptActiveTabId?: number; pinned?: true; sessionTabs?: Record<string, AffinityTab>; focusedSessionId?: string }
-  | { lost: true; sessionTabs?: Record<string, AffinityTab>; focusedSessionId?: string }
+  | { lost: true; sessionTabs?: Record<string, AffinityTab>; focusedSessionId?: string })
 
 let settings: Settings = { ...SETTINGS_DEFAULTS }
 let unrestrictedAccessActive = SETTINGS_DEFAULTS.unrestrictedBrowserAccess
@@ -208,6 +212,7 @@ void chrome.storage.session.remove(LEGACY_RECENT_SESSION_STORAGE_KEY).catch(() =
 const sessionTrustedActionOrigins = new Set<string>()
 /** Tool calls that are either withdrawable or completing an already-dispatched action. */
 interface ActiveToolCall {
+  sessionId?: string
   executionFence?: ToolExecutionFence
   managed: boolean
   targetLease?: ToolTargetLease
@@ -224,6 +229,7 @@ const writeQueue = new WriteQueue()
 /** Disconnection drops result ownership, but dispatched operations must still settle before revocation. */
 const unsettledToolCalls = new Set<ActiveToolCall>()
 let lastPersistedAffinity: string | undefined
+let lastPersistedDetachment: string | undefined
 let affinityPersistence = Promise.resolve()
 /** Per-session snapshot refreshes preserve prompt ordering without cross-session cancellation. */
 const sessionSnapshotRefreshes = new Map<string, Promise<void>>()
@@ -235,6 +241,7 @@ interface ActiveFollowRefresh {
 }
 
 const activeFollowRefreshes = new Map<string, ActiveFollowRefresh>()
+const unbindingSessions = new Set<string>()
 const TAB_AFFINITY_REBIND_TIMEOUT_MS = 10_000
 
 class TabAffinityRebindError extends Error {
@@ -685,7 +692,9 @@ function storedAffinity(): StoredTabAffinity | null {
   const sessionTabs = tabAffinity.sessionMap()
   const hasSessionTabs = Object.keys(sessionTabs).length > 0
   const focusedSessionId = tabAffinity.focusedSession()
-  const focus = focusedSessionId === null ? {} : { focusedSessionId }
+  const detachedSessions = tabAffinity.detachedSessionIds()
+  const focus = { ...(focusedSessionId === null ? {} : { focusedSessionId }),
+    ...(detachedSessions.length > 0 ? { detachedSessions } : {}), ...(state.detached ? { detached: true as const } : {}) }
   if (state.controlled !== null) {
     return {
       controlledTabId: state.controlled.tabId,
@@ -699,20 +708,29 @@ function storedAffinity(): StoredTabAffinity | null {
   }
   return state.status === 'lost'
     ? { lost: true, ...(hasSessionTabs ? { sessionTabs } : {}), ...focus }
-    : (hasSessionTabs ? { lost: true, sessionTabs, ...focus } : null)
+    : (hasSessionTabs || detachedSessions.length > 0 ? { lost: true, sessionTabs, ...focus } : null)
 }
 
-function persistTabAffinity(): void {
+function persistTabAffinity(strict = false): Promise<void> {
   const record = storedAffinity()
   const serialized = JSON.stringify(record)
-  if (serialized === lastPersistedAffinity) return
+  if (serialized === lastPersistedAffinity) return affinityPersistence
   lastPersistedAffinity = serialized
-  affinityPersistence = affinityPersistence.catch(() => {}).then(async () => {
+  const detached = { sessionIds: tabAffinity.detachedSessionIds(), detached: tabAffinity.snapshot().detached === true }
+  const serializedDetachment = JSON.stringify(detached)
+  const pending = affinityPersistence.catch(() => {}).then(async () => {
+    if (lastPersistedDetachment !== serializedDetachment) {
+      await chrome.storage.local.set({ [DETACHED_SESSIONS_STORAGE_KEY]: detached })
+      lastPersistedDetachment = serializedDetachment
+    }
     if (record === null) await chrome.storage.session.remove(TAB_AFFINITY_STORAGE_KEY)
     else await chrome.storage.session.set({ [TAB_AFFINITY_STORAGE_KEY]: record })
-  }).catch(() => {
-    if (lastPersistedAffinity === serialized) lastPersistedAffinity = undefined
   })
+  affinityPersistence = pending.catch(() => {
+    if (lastPersistedAffinity === serialized) lastPersistedAffinity = undefined
+    lastPersistedDetachment = undefined
+  })
+  return strict ? pending : affinityPersistence
 }
 
 function observeActiveSummary(summary: AffinityTab): void {
@@ -760,6 +778,17 @@ async function syncActiveTab(windowId?: number, signal?: AbortSignal): Promise<c
 
 async function restoreTabAffinity(): Promise<void> {
   let record: StoredTabAffinity | null = null
+  let durableDetached: { sessionIds?: unknown; detached?: unknown } | undefined
+  let durableUnavailable = false
+  try {
+    await settingsReady
+    const local = await chrome.storage.local.get(DETACHED_SESSIONS_STORAGE_KEY)
+    durableDetached = local[DETACHED_SESSIONS_STORAGE_KEY] as typeof durableDetached
+    if (durableDetached !== undefined && (durableDetached === null || typeof durableDetached !== 'object'
+      || !Array.isArray(durableDetached.sessionIds) || durableDetached.sessionIds.some(sid => typeof sid !== 'string' || sid.trim() === '')
+      || typeof durableDetached.detached !== 'boolean')) throw new Error('invalid-detachment-state')
+    lastPersistedDetachment = JSON.stringify(durableDetached ?? { sessionIds: [], detached: false })
+  } catch { durableUnavailable = true }
   try {
     const stored = await chrome.storage.session.get(TAB_AFFINITY_STORAGE_KEY)
     const candidate = stored[TAB_AFFINITY_STORAGE_KEY] as Partial<StoredTabAffinity> | undefined
@@ -786,6 +815,10 @@ async function restoreTabAffinity(): Promise<void> {
         ...focus,
       }
     }
+    if (record !== null) {
+      if (candidate?.detached === true) record.detached = true
+      if (Array.isArray(candidate?.detachedSessions)) record.detachedSessions = candidate.detachedSessions.filter((sid): sid is string => typeof sid === 'string' && sid.trim() !== '')
+    }
     lastPersistedAffinity = candidate === undefined || record !== null
       ? JSON.stringify(record)
       : undefined
@@ -806,6 +839,9 @@ async function restoreTabAffinity(): Promise<void> {
     }
     tabAffinity.restoreSessionTabs(restoredSessions)
   }
+  const detachedIds = Array.isArray(durableDetached?.sessionIds) ? durableDetached.sessionIds.filter((sid): sid is string => typeof sid === 'string' && sid.trim() !== '') : record?.detachedSessions ?? []
+  tabAffinity.restoreDetachedSessions(detachedIds)
+  if (durableUnavailable) tabAffinity.restoreDetachedSessions(Object.keys(tabAffinity.sessionMap()))
   tabAffinity.restoreFocusedSession(record?.focusedSessionId ?? null)
 
   if (record !== null && 'controlledTabId' in record) {
@@ -819,6 +855,7 @@ async function restoreTabAffinity(): Promise<void> {
   } else if (record?.lost === true) {
     tabAffinity.restoreLost()
   }
+  if (durableUnavailable || durableDetached?.detached === true || record?.detached === true) tabAffinity.restoreDetached()
 
   // Restore the pin before syncing the active tab: otherwise the sync would
   // surface a handoff prompt for a switch the user already said not to ask about.
@@ -907,7 +944,8 @@ async function ensureInitialTabBinding(sessionId?: string): Promise<boolean> {
   }
 }
 
-function affinityFailure(kind: 'handoff' | 'lost' | 'missing'): ToolAnswer {
+function affinityFailure(kind: 'handoff' | 'lost' | 'missing' | 'detached'): ToolAnswer {
+  if (kind === 'detached') return { ok: false, error: { code: 'action-failed', message: 'The user unbound this page. Browser tools cannot rebind it; the user must explicitly select a page in the extension.' } }
   if (kind === 'handoff') {
     return {
       ok: false,
@@ -965,6 +1003,7 @@ async function resolveToolTab(sessionId?: string): Promise<Pick<chrome.tabs.Tab,
  */
 async function resolveOpenTabWindow(sessionId?: string): Promise<{ windowId: number } | ToolAnswer> {
   await affinityReady
+  if (tabAffinity.isDetached(sessionId)) return affinityFailure('detached')
   const resolution = tabAffinity.resolveTarget(sessionId)
   if (resolution.kind === 'handoff') return affinityFailure('handoff')
   if (resolution.kind === 'target') {
@@ -1117,8 +1156,9 @@ async function resolveTabAffinityResponse(response: {
     invalidateSessionTarget(sid)
     persistTabAffinity()
     if (controlled !== null && sid !== undefined) {
+      const lease = targetLeases.capture(sid, controlled, () => selectedTargetIdentity(sid))
       await pageSessionContexts.ready
-      pageSessionContexts.bind(sid, { id: controlled.tabId, ...controlled })
+      if (lease.current()) pageSessionContexts.bind(sid, { id: controlled.tabId, ...controlled })
     }
   }
   broadcastTabAffinity()
@@ -1207,6 +1247,7 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
   let executionFence: ToolExecutionFence | undefined
   let runTarget: RunTargetBinding | undefined
   const activeCall: ActiveToolCall = {
+    ...(call.sessionId === undefined ? {} : { sessionId: call.sessionId }),
     managed: call.execution.kind === 'run',
     controller,
     unrestrictedAccess,
@@ -1220,7 +1261,7 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
   const target = isTabManagementTool(call.name) || call.name === 'browser_open_tab' ? undefined : captureToolTarget(call.sessionId)
   if (target !== undefined && !('ok' in target)) activeCall.targetLease = target
   const isCurrentCall = (): boolean => activeToolCalls.get(call.id) === activeCall
-  const targetAllowed = (): boolean => isCurrentCall() && executionFence?.current() === true && (runTarget === undefined || runTarget.current()) && (activeCall.targetLease === undefined
+  const targetAllowed = (): boolean => !tabAffinity.isDetached(call.sessionId) && isCurrentCall() && executionFence?.current() === true && (runTarget === undefined || runTarget.current()) && (activeCall.targetLease === undefined
     || (activeCall.committed ? activeCall.targetLease.sameBinding() : activeCall.targetLease.current()))
   const commitAction = (): void => {
     if (!targetAllowed()) throw new Error('Browser target lease expired before dispatch')
@@ -1310,6 +1351,7 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
         ))
   )
   const dispatchAndCheckpoint = async (): Promise<ToolAnswer> => {
+    if (tabAffinity.isDetached(call.sessionId)) return affinityFailure('detached')
     if (call.execution.kind === 'run') {
       if (isRunTabMutation(call.name)) return { ok: false, error: { code: 'execution-denied',
         message: 'Run-bound tab creation, follow and close are unavailable. Pause the task and use its selected-page continuation control.' } }
@@ -1629,7 +1671,7 @@ chrome.runtime.onConnect.addListener((port) => {
         }
         if (sid === undefined || runId === undefined || typeof version !== 'number' || !Number.isSafeInteger(version) || version < 0
           || typeof revision !== 'number' || !Number.isSafeInteger(revision + 2) || revision < 0 || !Number.isSafeInteger(revision)
-          || runRetargets.size !== 0) { reply(false); break }
+          || runRetargets.size !== 0 || unbindingSessions.has(sid)) { reply(false); break }
         const controller = new AbortController()
         const timer = setTimeout(() => controller.abort(), 15_000)
         runRetargets.set(id, { controller, timer })
@@ -1827,7 +1869,11 @@ chrome.runtime.onConnect.addListener((port) => {
               if (summary === null) throw new Error('No active tab is available to bind this session')
               if (tabAffinity.getSessionTab(sid) === undefined) {
                 invalidateSessionTarget(sid)
-                tabAffinity.bindNewSession(sid, summary)
+                if (!tabAffinity.bindNewSession(sid, summary)) {
+                  tabAffinity.focusSession(sid)
+                  persistTabAffinity(); broadcastTabAffinity()
+                  return
+                }
               }
               pageSessionContexts.bind(sid, { id: summary.tabId, ...summary })
               resetTabSnapshot(summary.tabId)
@@ -1858,6 +1904,7 @@ chrome.runtime.onConnect.addListener((port) => {
         const response = message as { revision?: unknown; decision?: unknown; sessionId?: unknown }
         if (typeof response.revision !== 'number' || !isTabAffinityDecision(response.decision)) break
         const sid = typeof response.sessionId === 'string' ? response.sessionId : undefined
+        if (sid !== undefined && unbindingSessions.has(sid)) break
         const decision = resolveTabAffinityResponse({
           revision: response.revision,
           decision: response.decision,
@@ -1878,6 +1925,11 @@ chrome.runtime.onConnect.addListener((port) => {
         if (typeof request.id !== 'string') break
         const requestId = request.id
         const rebindSessionId = validSessionId(request.sessionId) ?? panelActiveSessions.get(port)
+        if (unbindingSessions.has(rebindSessionId ?? '')) {
+          try { port.postMessage({ type: 'tab-affinity.rebind.result', id: requestId, ok: false,
+            error: { code: 'binding-busy', message: getUiLocale() === 'zh' ? '正在解绑页面，请稍后重试' : 'Page unbinding is in progress. Try again afterwards.' } }) } catch { /* panel closed */ }
+          break
+        }
         if (tabAffinityRebinds.has(requestId)) break
         const controller = new AbortController()
         const timer = setTimeout(() => {
@@ -1909,6 +1961,53 @@ chrome.runtime.onConnect.addListener((port) => {
           clearTimeout(current.timer)
           tabAffinityRebinds.delete(requestId)
         })
+        break
+      }
+      case 'tab-affinity.unbind': {
+        const request = message as { id?: unknown; sessionId?: unknown; revision?: unknown }
+        if (typeof request.id !== 'string') break
+        const id = request.id
+        const sid = request.sessionId === null ? undefined : validSessionId(request.sessionId)
+        const key = sid ?? ''
+        const current = () => panelPorts.has(port) && panelActiveSessions.get(port) === sid
+          && tabAffinity.focusedSession() === (sid ?? null) && tabAffinity.snapshot().revision === request.revision
+        const reply = (ok: boolean, message?: string) => {
+          try { port.postMessage({ type: 'tab-affinity.unbind.result', id, ok,
+            ...(ok ? {} : { error: { code: 'unbind-refused', message: message ?? (getUiLocale() === 'zh' ? '页面绑定已变化，请核对后重试' : 'The page binding changed. Check it before retrying.') } }) }) } catch { /* panel closed */ }
+        }
+        if ((request.sessionId !== null && sid === undefined) || typeof request.revision !== 'number'
+          || !Number.isSafeInteger(request.revision) || !current() || unbindingSessions.has(key)) { reply(false); break }
+        unbindingSessions.add(key)
+        const boundRpc = rpc
+        void (async () => {
+          await Promise.all([affinityReady, pageSessionContexts.ready])
+          if (!current() || runRetargets.size > 0 || tabAffinityRebinds.size > 0) throw new Error('stale-binding')
+          if (sid !== undefined && boundRpc !== null && bridge?.connected === true) {
+            const envelope = await boundRpc.request(BRIDGE_RUN_LIST_METHOD, { sessionId: sid }, { timeoutMs: 5000 }) as { result?: { ok?: boolean; value?: { items?: Array<{ state?: string }> } } }
+            const listed = envelope?.result?.ok === true ? envelope.result.value : undefined
+            if (!Array.isArray(listed?.items)) throw new Error('task-status-unavailable')
+            if (listed.items.some(run => run.state === 'running' || run.state === 'stopping')) throw new Error('task-running')
+          }
+          if (!current() || rpc !== boundRpc || runRetargets.size > 0 || tabAffinityRebinds.size > 0) throw new Error('stale-binding')
+          const previous = tabAffinity.snapshot().controlled
+          if (!tabAffinity.unbindSession(sid, request.revision as number)) throw new Error('stale-binding')
+          invalidateSessionTarget(sid)
+          for (const call of unsettledToolCalls) if (call.sessionId === sid) {
+            call.executionFence?.revoke()
+            call.revocationRequested = true
+            if (!call.committed) call.controller.abort()
+          }
+          if (sid !== undefined) { activeFollowRefreshes.get(sid)?.controller.abort(); pageSessionContexts.removeSession(sid) }
+          if (sid !== undefined) cancelPendingApprovals(sid)
+          if (previous !== null) resetTabSnapshot(previous.tabId)
+          broadcastTabAffinity()
+          await persistTabAffinity(true)
+          reply(true)
+        })().catch(error => {
+          const running = error instanceof Error && error.message === 'task-running'
+          reply(false, running ? (getUiLocale() === 'zh' ? '请先暂停或停止正在运行的任务，再解绑页面' : 'Pause or stop the running task before unbinding its page.')
+            : getUiLocale() === 'zh' ? '页面解绑未能确认，请核对绑定和任务状态后重试' : 'Page unbinding was not confirmed. Check the binding and task status before retrying.')
+        }).finally(() => { unbindingSessions.delete(key) })
         break
       }
       case 'request-status':

@@ -48,6 +48,12 @@ export interface PanelCopy {
     lostTitle: string
     lostBody: string
     useCurrent: string
+    boundTitle: string
+    unbind: string
+    unbinding: string
+    detachedTitle: string
+    detachedBody: string
+    unboundTab: string
   }
   question: {
     eyebrow: string
@@ -282,6 +288,12 @@ const EN: PanelCopy = {
     pinnedBody: (active) => `You are viewing “${active}”. Future browser actions still run on the original page, and switching tabs will not ask again.`,
     askAgain: 'Ask on tab switch',
     followCurrent: 'Follow current page',
+    boundTitle: 'Bound page',
+    unbind: 'Unbind page',
+    unbinding: 'Unbinding…',
+    detachedTitle: 'Page unbound',
+    detachedBody: 'Select a page explicitly before using browser tools again. Your conversation and DSH pairing are kept.',
+    unboundTab: 'No bound page',
     lostTitle: 'The controlled tab was closed',
     lostBody: 'Browser actions are paused to avoid operating the wrong page.',
     useCurrent: 'Use current page',
@@ -529,6 +541,12 @@ const ZH: PanelCopy = {
     pinnedBody: (active) => `你正在查看“${active}”，后续浏览器操作仍会在原页面执行；切换标签页时不会再询问。`,
     askAgain: '切换标签页时重新询问',
     followCurrent: '改为跟随当前页',
+    boundTitle: '当前绑定页面',
+    unbind: '解绑页面',
+    unbinding: '正在解绑…',
+    detachedTitle: '页面已解绑',
+    detachedBody: '重新选择页面后才能继续浏览器操作。会话和 DSH 配对保留。',
+    unboundTab: '未绑定页面',
     lostTitle: '受控标签页已关闭',
     lostBody: '为避免操作错页，浏览器操作已暂停。',
     useCurrent: '使用当前页面',

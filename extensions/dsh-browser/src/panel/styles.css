@@ -148,6 +148,17 @@ textarea:focus-visible {
   background: var(--blue);
 }
 
+.tab-affinity.following,
+.tab-affinity.detached {
+  border-color: #dce3ff;
+  background: #f9faff;
+}
+
+.tab-affinity.following::before,
+.tab-affinity.detached::before {
+  background: var(--blue);
+}
+
 .tab-affinity.lost {
   border-color: #f3d0cc;
   background: #fffafa;
@@ -172,7 +183,9 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
-.tab-affinity.background .tab-affinity-heading .eyebrow {
+.tab-affinity.background .tab-affinity-heading .eyebrow,
+.tab-affinity.following .tab-affinity-heading .eyebrow,
+.tab-affinity.detached .tab-affinity-heading .eyebrow {
   color: var(--blue-ink);
 }
 
@@ -297,13 +310,15 @@ textarea:focus-visible {
   transform: translateY(1px);
 }
 
-.tab-affinity-actions .keep {
+.tab-affinity-actions .keep,
+.tab-affinity-actions .unbind {
   border: 1px solid var(--line-strong);
   background: var(--surface);
   color: var(--ink);
 }
 
-.tab-affinity-actions .keep:hover {
+.tab-affinity-actions .keep:hover,
+.tab-affinity-actions .unbind:hover {
   border-color: #b6c0d0;
   background: #f8fafc;
 }

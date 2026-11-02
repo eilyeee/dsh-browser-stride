@@ -11,6 +11,24 @@ afterEach(() => {
 })
 
 describe('panel protocol', () => {
+  it('correlates page unbinding and times out without replay', async () => {
+    vi.useFakeTimers()
+    let receive: ((message: unknown) => void) | undefined
+    const postMessage = vi.fn()
+    vi.stubGlobal('chrome', { runtime: { connect: vi.fn(() => ({ postMessage,
+      onMessage: { addListener: (callback: (message: unknown) => void) => { receive = callback } }, onDisconnect: { addListener: vi.fn() } })) } })
+    const api = connectPanel()
+    const first = api.unbindTabAffinity(3, 'selected')
+    const request = postMessage.mock.calls[0]![0]
+    expect(request).toMatchObject({ type: 'tab-affinity.unbind', sessionId: 'selected', revision: 3 })
+    receive?.({ type: 'tab-affinity.unbind.result', id: 'foreign', ok: true })
+    receive?.({ type: 'tab-affinity.unbind.result', id: request.id, ok: true })
+    await first
+    const second = api.unbindTabAffinity(4, 'selected').catch(error => error)
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(await second).toMatchObject({ code: 'timeout' })
+    expect(postMessage).toHaveBeenCalledTimes(2)
+  })
   it('times out an unconfirmed target handoff without replaying it', async () => {
     vi.useFakeTimers()
     let receive: ((value: unknown) => void) | undefined

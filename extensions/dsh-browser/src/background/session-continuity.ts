@@ -93,6 +93,12 @@ export class PageSessionContextTracker {
     return true
   }
 
+  removeSession(sessionId: string): void {
+    let changed = false
+    for (const [id, context] of this.tabs) if (context.sessionId === sessionId) { this.tabs.delete(id); changed = true }
+    if (changed) this.persist()
+  }
+
   /** Transfer identity during Chrome's prerender/replacement tab swap. */
   replaceTab(removedValue: unknown, addedValue: unknown): boolean {
     const removedTabId = normalizeId(removedValue)

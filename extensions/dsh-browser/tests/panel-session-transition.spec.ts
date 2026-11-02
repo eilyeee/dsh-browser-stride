@@ -68,6 +68,7 @@ describe('panel session transitions', () => {
       resolveTabAffinity: vi.fn(async () => {}),
       retargetRun: vi.fn(async () => {}),
     rebindTabAffinity: vi.fn(async () => {}),
+      unbindTabAffinity: vi.fn(async () => {}),
       clearSelection: vi.fn(async () => {}),
       registerWindow: vi.fn(async () => {}),
       setActiveSession: vi.fn()

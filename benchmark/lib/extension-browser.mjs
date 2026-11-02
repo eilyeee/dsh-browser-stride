@@ -14,8 +14,7 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
   const profileDir = await mkdtemp(join(tempParent, 'extension-profile-'))
   let context
   let stage = 'launching Chromium'
-  try {
-    context = await chromium.launchPersistentContext(profileDir, {
+  const launch = () => chromium.launchPersistentContext(profileDir, {
       executablePath,
       channel: 'chromium',
       headless: true,
@@ -29,16 +28,18 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
         '--disable-component-update',
       ],
     })
+  try {
+    context = await launch()
     stage = 'waiting for extension service worker'
     let worker = context.serviceWorkers()[0]
     if (worker === undefined) worker = await context.waitForEvent('serviceworker', { timeout: 30_000 })
     const extensionId = new URL(worker.url()).host
     stage = 'opening benchmark target tab'
-    const target = await context.newPage()
+    let target = await context.newPage()
     target.setDefaultTimeout(actionTimeoutMs)
     await target.goto(`${trustedOrigin}/health`, { waitUntil: 'domcontentloaded' })
     stage = 'opening extension panel'
-    const panel = await context.newPage()
+    let panel = await context.newPage()
     panel.setDefaultTimeout(actionTimeoutMs)
     await panel.goto(`chrome-extension://${extensionId}/panel/index.html`)
     await panel.waitForSelector('header.topbar', { timeout: 15_000 })
@@ -104,6 +105,25 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
       panel,
       target,
       executablePath,
+      /** Keep installation data while replacing the whole browser/worker lifetime. */
+      async restart() {
+        const targetUrl = target.url()
+        await context.close()
+        context = await launch()
+        target = await context.newPage()
+        target.setDefaultTimeout(actionTimeoutMs)
+        await target.goto(targetUrl, { waitUntil: 'domcontentloaded' })
+        panel = await context.newPage()
+        panel.setDefaultTimeout(actionTimeoutMs)
+        await panel.goto(`chrome-extension://${extensionId}/panel/index.html`)
+        await panel.waitForSelector('header.topbar', { timeout: 15000 })
+        await panel.locator('.connection .dot.connected').waitFor({ state: 'visible', timeout: connectTimeoutMs })
+        worker = context.serviceWorkers().find(value => new URL(value.url()).host === extensionId)
+          ?? await context.waitForEvent('serviceworker', { timeout: 15000 })
+        await panel.evaluate(() => { window.__dshBenchmarkPort = chrome.runtime.connect({ name: 'dsh-panel' }) })
+        await target.bringToFront()
+        return { context, worker, target, panel }
+      },
       async prepare(url) {
         await target.goto(url, { waitUntil: 'domcontentloaded' })
         await target.bringToFront()

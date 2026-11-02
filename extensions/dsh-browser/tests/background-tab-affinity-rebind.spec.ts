@@ -121,6 +121,33 @@ afterEach(() => {
 })
 
 describe('background tab-affinity rebind protocol', () => {
+  it('does not acknowledge unbinding when durable revocation storage fails', async () => {
+    const h = await connectPanelForTest()
+    h.onMessage.emit({ type: 'session.active', sessionId: 'selected', isNew: true })
+    await vi.waitFor(() => expect(h.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity', state: expect.objectContaining({ status: 'following' }) })))
+    const state = h.postMessage.mock.calls.map(([m]) => m).filter(m => m.type === 'tab-affinity').at(-1).state
+    vi.mocked(chrome.storage.local.set).mockRejectedValueOnce(new Error('storage unavailable'))
+    h.onMessage.emit({ type: 'tab-affinity.unbind', id: 'storage-failed', sessionId: 'selected', revision: state.revision })
+    await vi.waitFor(() => expect(h.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity.unbind.result', id: 'storage-failed', ok: false })))
+    expect(h.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity.unbind.result', id: 'storage-failed', ok: true }))
+    expect(h.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity', state: expect.objectContaining({ detached: true, controlled: null }) }))
+  })
+
+  it('unbinds offline without closing the page or losing the conversation, and persists revocation', async () => {
+    const h = await connectPanelForTest()
+    h.onMessage.emit({ type: 'session.active', sessionId: 'selected', isNew: true })
+    await vi.waitFor(() => expect(h.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity', state: expect.objectContaining({ status: 'following' }) })))
+    const state = h.postMessage.mock.calls.map(([m]) => m).filter(m => m.type === 'tab-affinity').at(-1).state
+    h.onMessage.emit({ type: 'tab-affinity.unbind', id: 'foreign', sessionId: 'other', revision: state.revision })
+    expect(h.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity.unbind.result', id: 'foreign', ok: false }))
+    h.onMessage.emit({ type: 'tab-affinity.unbind', id: 'release', sessionId: 'selected', revision: state.revision })
+    await vi.waitFor(() => expect(h.postMessage).toHaveBeenCalledWith({ type: 'tab-affinity.unbind.result', id: 'release', ok: true }))
+    expect(chrome.storage.local.set).toHaveBeenCalledWith({ dshDetachedSessions: { sessionIds: ['selected'], detached: true } })
+    expect(h.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity', state: expect.objectContaining({ detached: true, controlled: null }) }))
+    h.onMessage.emit({ type: 'session.active', sessionId: 'selected', isNew: true })
+    await vi.waitFor(() => expect(h.postMessage.mock.calls.filter(([m]) => m.type === 'tab-affinity').at(-1)![0].state).toMatchObject({ detached: true, controlled: null }))
+  })
+
   it('acknowledges only after control has moved to the freshly queried active tab', async () => {
     const { onMessage, postMessage, query } = await connectPanelForTest()
     query.mockResolvedValue([tab(2)])

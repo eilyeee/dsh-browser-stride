@@ -387,26 +387,31 @@ function tabLabel(tab: AffinityTab | null, unknownTab: string): string {
   }
 }
 
-function TabAffinityBanner({
+export function TabAffinityBanner({
   state,
   copy,
   onDecision,
+  onUnbind,
+  unbinding,
 }: {
   state: TabAffinityState | null
   copy: PanelCopy
   onDecision: (decision: TabAffinityDecision) => void
+  onUnbind: () => void
+  unbinding: boolean
 }): React.JSX.Element | null {
-  if (state === null || state.status === 'unbound' || state.status === 'following') return null
-  const controlled = tabLabel(state.controlled, copy.tabHandoff.closedTab)
+  if (state === null || state.status === 'unbound') return null
+  const controlled = tabLabel(state.controlled, state.detached ? copy.tabHandoff.unboundTab : copy.tabHandoff.closedTab)
   const active = tabLabel(state.active, copy.tabHandoff.unknownTab)
   const lost = state.status === 'lost'
   const handoff = state.status === 'handoff'
-  const title = lost
+  const following = state.status === 'following'
+  const title = state.detached ? copy.tabHandoff.detachedTitle : following ? copy.tabHandoff.boundTitle : lost
     ? copy.tabHandoff.lostTitle
     : handoff
       ? copy.tabHandoff.questionTitle
       : copy.tabHandoff.backgroundTitle(controlled)
-  const body = lost
+  const body = state.detached ? copy.tabHandoff.detachedBody : following ? controlled : lost
     ? copy.tabHandoff.lostBody
     : handoff
       ? copy.tabHandoff.questionBody(controlled, active)
@@ -415,12 +420,12 @@ function TabAffinityBanner({
         : copy.tabHandoff.backgroundBody(active)
 
   return (
-    <section className={`tab-affinity ${state.status}`} role={handoff || lost ? 'alert' : 'status'}>
+    <section className={`tab-affinity ${state.detached ? 'detached' : state.status}`} role={handoff || (lost && !state.detached) ? 'alert' : 'status'}>
       <div className="tab-affinity-heading">
         <span className="eyebrow">{copy.tabHandoff.eyebrow}</span>
         <strong>{title}</strong>
       </div>
-      <div className="tab-affinity-route" aria-hidden="true">
+      {!following && <div className="tab-affinity-route" aria-hidden="true">
         <span className={`tab-affinity-node ${lost ? 'closed' : 'controlled'}`}>
           <small>{copy.tabHandoff.assistant}</small>
           <span title={controlled}>{controlled}</span>
@@ -430,25 +435,29 @@ function TabAffinityBanner({
           <small>{copy.tabHandoff.you}</small>
           <span title={active}>{active}</span>
         </span>
-      </div>
+      </div>}
       <p>{body}</p>
       <div className="tab-affinity-actions">
-        {handoff && <button className="keep" onClick={() => onDecision('keep')}>{copy.tabHandoff.keep}</button>}
-        {state.active !== null && (
-          <button className="follow" onClick={() => onDecision('follow')}>
+        {handoff && <button className="keep" disabled={unbinding} onClick={() => onDecision('keep')}>{copy.tabHandoff.keep}</button>}
+        {!following && state.active !== null && (
+          <button className="follow" disabled={unbinding} onClick={event => { if (!state.detached || event.nativeEvent.isTrusted) onDecision('follow') }}>
             {lost ? copy.tabHandoff.useCurrent : handoff ? copy.tabHandoff.follow : copy.tabHandoff.followCurrent}
           </button>
         )}
         {handoff && (
-          <button className="keep-always" onClick={() => onDecision('keep-always')}>
+          <button className="keep-always" disabled={unbinding} onClick={() => onDecision('keep-always')}>
             {copy.tabHandoff.keepAlways}
           </button>
         )}
         {!handoff && !lost && state.pinned && (
-          <button className="keep-always" onClick={() => onDecision('ask-again')}>
+          <button className="keep-always" disabled={unbinding} onClick={() => onDecision('ask-again')}>
             {copy.tabHandoff.askAgain}
           </button>
         )}
+        {state.controlled !== null && <button type="button" className="unbind" disabled={unbinding}
+          onClick={event => { if (event.nativeEvent.isTrusted) onUnbind() }}>
+          {unbinding ? copy.tabHandoff.unbinding : copy.tabHandoff.unbind}
+        </button>}
       </div>
     </section>
   )
@@ -651,6 +660,8 @@ export function App(): React.JSX.Element {
   const [showTextSize, setShowTextSize] = useState(false)
   const [approvalQueue, setApprovalQueue] = useState<ApprovalRequest[]>([])
   const [tabAffinity, setTabAffinity] = useState<TabAffinityState | null>(null)
+  const [unbindingPage, setUnbindingPage] = useState(false)
+  const unbindingPageRef = useRef(false)
   const [trustedOriginInput, setTrustedOriginInput] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [showSessionPicker, setShowSessionPicker] = useState(false)
@@ -1894,6 +1905,16 @@ export function App(): React.JSX.Element {
     }
   }
 
+  async function unbindPage(): Promise<void> {
+    if (tabAffinity === null || unbindingPageRef.current) return
+    const sid = sessionRef.current
+    unbindingPageRef.current = true
+    setUnbindingPage(true)
+    try { await api.unbindTabAffinity(tabAffinity.revision, sid) }
+    catch (cause) { if (sessionRef.current === sid) setError(cause instanceof Error ? cause.message : String(cause)) }
+    finally { unbindingPageRef.current = false; setUnbindingPage(false) }
+  }
+
   function addTrustedOrigin(): void {
     const origin = normalizeWebOrigin(trustedOriginInput)
     if (origin === null) return
@@ -2217,7 +2238,7 @@ export function App(): React.JSX.Element {
           onStep={(direction) => changeUiScale(stepUiScale(uiScaleRef.current, direction))}
           onReset={() => changeUiScale(DEFAULT_UI_SCALE)} />
       )}
-      <TabAffinityBanner state={tabAffinity} copy={copy} onDecision={decideTabAffinity} />
+      <TabAffinityBanner state={tabAffinity} copy={copy} onDecision={decideTabAffinity} onUnbind={() => { void unbindPage() }} unbinding={unbindingPage} />
       {showSessionPicker && (
         <section className="session-picker" aria-label={copy.app.sessions}>
           <div className="session-picker-head">

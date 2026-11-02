@@ -39,6 +39,8 @@ export interface TabAffinityState {
   active: AffinityTab | null
   /** True once the user chose `keep-always`; tab switches stop prompting. */
   pinned: boolean
+  /** Explicit user revocation, distinct from a closed tab. */
+  detached?: true
 }
 
 export type TabTargetResolution =
@@ -65,6 +67,8 @@ export class TabAffinityController {
   private revision = 0
   private sessionTabs = new Map<string, AffinityTab>()
   private focusedSessionId: string | null = null
+  private detached = false
+  private detachedSessions = new Set<string>()
 
   snapshot(): TabAffinityState {
     return {
@@ -73,11 +77,13 @@ export class TabAffinityController {
       controlled: this.controlled === null ? null : { ...this.controlled },
       active: this.active === null ? null : { ...this.active },
       pinned: this.pinned,
+      ...(this.detached ? { detached: true as const } : {}),
     }
   }
 
   /** Associate a session with its controlled tab. */
   bindSession(sessionId: string, tab: AffinityTab): void {
+    if (this.detachedSessions.has(sessionId)) return
     this.sessionTabs.set(sessionId, { ...tab })
   }
 
@@ -93,6 +99,30 @@ export class TabAffinityController {
     for (const [sid, tab] of Object.entries(sessions)) {
       this.sessionTabs.set(sid, { ...tab })
     }
+  }
+
+  detachedSessionIds(): string[] { return [...this.detachedSessions] }
+
+  restoreDetachedSessions(sessions: string[]): void {
+    for (const sid of sessions) { this.detachedSessions.add(sid); this.sessionTabs.delete(sid) }
+  }
+
+  restoreDetached(): void {
+    this.controlled = null; this.hasBound = true; this.lost = true; this.detached = true
+    this.pinned = false; this.keptActiveTabId = null; this.revision += 1
+  }
+
+  isDetached(sessionId?: string): boolean {
+    return sessionId === undefined ? this.detached : this.detachedSessions.has(sessionId)
+      || (this.detached && this.focusedSessionId === sessionId)
+  }
+
+  /** Revoke only the displayed session, without closing its page or conversation. */
+  unbindSession(sessionId: string | undefined, revision: number): boolean {
+    if (revision !== this.revision || this.focusedSessionId !== (sessionId ?? null) || this.controlled === null) return false
+    if (sessionId !== undefined) { this.sessionTabs.delete(sessionId); this.detachedSessions.add(sessionId) }
+    this.restoreDetached()
+    return true
   }
 
   restoreFocusedSession(sessionId: string | null): void {
@@ -114,8 +144,11 @@ export class TabAffinityController {
     const previousKept = this.keptActiveTabId
     const previousLost = this.lost
     const previousPinned = this.pinned
+    const previousDetached = this.detached
     this.focusedSessionId = sessionId
     const tab = this.sessionTabs.get(sessionId)
+    this.detached = this.detachedSessions.has(sessionId) || (this.detached && tab === undefined)
+    if (this.detached) this.detachedSessions.add(sessionId)
     if (tab === undefined) {
       this.controlled = null
       this.keptActiveTabId = null
@@ -142,6 +175,7 @@ export class TabAffinityController {
       || previousKept !== this.keptActiveTabId
       || previousLost !== this.lost
       || previousPinned !== this.pinned
+      || previousDetached !== this.detached
     if (changed) this.revision += 1
     return changed
   }
@@ -178,6 +212,7 @@ export class TabAffinityController {
   bindInitial(tab: AffinityTab, sessionId?: string): boolean {
     const sid = sessionId?.trim()
     if (sid !== undefined && sid !== '') {
+      if (this.detached || this.detachedSessions.has(sid)) return false
       if (this.sessionTabs.has(sid)) return false
       this.sessionTabs.set(sid, { ...tab })
       if (this.focusedSessionId === null) this.focusedSessionId = sid
@@ -205,10 +240,11 @@ export class TabAffinityController {
   /** Bind an unmapped session only after an explicit new-session activation. */
   bindNewSession(sessionId: string, tab: AffinityTab): boolean {
     const sid = sessionId.trim()
-    if (sid === '') return false
+    if (sid === '' || this.detached || this.detachedSessions.has(sid)) return false
     const previous = this.sessionTabs.get(sid)
     this.sessionTabs.set(sid, { ...tab })
     this.focusedSessionId = sid
+    this.detached = false
     this.active = { ...tab }
     this.controlled = { ...tab }
     this.keptActiveTabId = null
@@ -222,6 +258,8 @@ export class TabAffinityController {
   /** Explicitly rebind to the active tab for the named session. */
   rebindActive(tab: AffinityTab, sessionId?: string): boolean {
     const sid = sessionId?.trim()
+    this.detached = false
+    if (sid !== undefined) this.detachedSessions.delete(sid)
     this.active = { ...tab }
     this.controlled = { ...tab }
     this.keptActiveTabId = null
@@ -239,6 +277,8 @@ export class TabAffinityController {
   /** Explicitly control an existing tab without changing the browser's active tab. */
   rebindControlled(tab: AffinityTab, sessionId?: string): boolean {
     const sid = sessionId?.trim()
+    this.detached = false
+    if (sid !== undefined) this.detachedSessions.delete(sid)
     this.controlled = { ...tab }
     this.keptActiveTabId = this.active !== null && this.active.tabId !== tab.tabId
       ? this.active.tabId
@@ -379,8 +419,11 @@ export class TabAffinityController {
     this.hasBound = true
     this.lost = false
     if (sessionId !== undefined && sessionId.trim() !== '') {
+      this.detachedSessions.delete(sessionId)
       this.sessionTabs.set(sessionId, { ...this.active })
+      this.focusedSessionId = sessionId
     }
+    this.detached = false
     this.revision += 1
     return true
   }
