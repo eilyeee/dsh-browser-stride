@@ -50,6 +50,7 @@ function mockChrome(initialTabs: chrome.tabs.Tab[], storedContext?: unknown) {
   const sessionData: Record<string, unknown> = storedContext === undefined
     ? {}
     : { [PAGE_SESSION_CONTEXT_STORAGE_KEY]: storedContext }
+  sessionData[PAGE_ACCESS_KEY] = authorizedExamplePages(initialTabs.map(tab => tab.id!))[PAGE_ACCESS_KEY]
   const sessionSet = vi.fn(async (items: Record<string, unknown>) => { Object.assign(sessionData, items) })
   const query = vi.fn(async (queryInfo: chrome.tabs.QueryInfo) => {
     const candidates = [...tabs.values()].filter((entry) => queryInfo.windowId === undefined || entry.windowId === queryInfo.windowId)
@@ -72,7 +73,7 @@ function mockChrome(initialTabs: chrome.tabs.Tab[], storedContext?: unknown) {
     storage: {
       local: { get: vi.fn(async () => ({})), set: vi.fn(async () => {}) },
       session: {
-        get: vi.fn(async (key: string) => key === PAGE_ACCESS_KEY ? authorizedExamplePages([...new Set([...initialTabs.map(tab => tab.id!), 2])]) : ({ [key]: sessionData[key] })),
+        get: vi.fn(async (key: string) => ({ [key]: sessionData[key] })),
         set: sessionSet,
         remove: vi.fn(async (key: string) => { delete sessionData[key] }),
       },
@@ -181,7 +182,7 @@ describe('background contextual session continuity', () => {
 
   it('moves the recovery binding when the user explicitly rebinds the session', async () => {
     const first = tab(1, 'https://example.com/first')
-    const chromeMock = mockChrome([first])
+    const chromeMock = mockChrome([first, { ...tab(2, 'https://example.com/second'), active: false }])
     await loadBackground(chromeMock)
     const panel = panelPort()
     chromeMock.onConnect.emit(panel.port)

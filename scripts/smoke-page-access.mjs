@@ -61,6 +61,7 @@ try {
   await browser.authorizePage(a)
   assert.equal(await nativeCanRead(aId), true)
   assert.equal(await nativeCanRead(bId), false, 'same-origin sibling tabs are not covered by activeTab')
+  await browser.panel.getByRole('button', { name: '停止控制此页', exact: true }).waitFor() // Available before task binding.
   await a.bringToFront(); assert.equal((await rebind('authorized-a')).ok, true)
   const snapshot = await browser.worker.evaluate(tabId => chrome.tabs.sendMessage(tabId, { type: 'DSH_ACTION', action: 'browser_snapshot', args: {} }), aId)
   assert.equal(snapshot.ok, true, JSON.stringify(snapshot))
@@ -90,6 +91,34 @@ try {
   await a.reload()
   await wait(async () => (await grantCount()) === 1, 'same-origin reload retains Chrome grant')
   assert.equal(await nativeCanRead(aId), true)
+  // A pinned tab has no group to remove. This isolates durable revocation from
+  // group-based restoration checks when the replaceable session cache fails.
+  await browser.worker.evaluate(id => chrome.tabs.update(id, { pinned: true }), aId)
+  await wait(async () => (await grantCount()) === 0, 'pinning removes the controlled group grant')
+  await browser.authorizePage(a)
+  const pinned = await browser.worker.evaluate(id => chrome.tabs.get(id), aId)
+  assert.equal(pinned.pinned, true, 'page authorization preserves pinning')
+  assert.equal(pinned.groupId, -1)
+  await a.bringToFront(); assert.equal((await rebind('before-cache-fault')).ok, true)
+  await browser.worker.evaluate(() => {
+    const save = chrome.storage.session.set.bind(chrome.storage.session)
+    let failed = false
+    chrome.storage.session.set = async value => {
+      if (!failed && Object.hasOwn(value, 'dshPageAccess')) { failed = true; throw new Error('Synthetic session-cache failure') }
+      return save(value)
+    }
+  })
+  await browser.panel.getByRole('button', { name: '停止控制此页', exact: true }).click()
+  await browser.panel.getByText('停止控制的结果尚未确认，请重新加载扩展后核对页面授权。', { exact: true }).waitFor()
+  assert.equal((await rebind('after-cache-fault')).ok, false)
+  assert.equal(await grantCount(), 1, 'the test must retain the stale cache')
+  Object.assign(browser, await browser.restartWorker())
+  assert.equal(await nativeCanRead(aId), true, 'native activeTab must survive this worker-only restart')
+  assert.equal((await rebind('stale-cache-cannot-restore')).ok, false, 'the private revocation must override the stale session cache')
+  await browser.authorizePage(a)
+  await a.bringToFront(); assert.equal((await rebind('explicit-grant-after-fault')).ok, true)
+  await browser.worker.evaluate(id => chrome.tabs.update(id, { pinned: false }), aId)
+  await browser.authorizePage(a)
   const artifacts = join(root, '.stride-private/validation/page-access')
   await mkdir(artifacts, { recursive: true })
   await browser.panel.screenshot({ path: join(artifacts, 'authorized-page-and-control-group.png') })
@@ -98,7 +127,7 @@ try {
   assert.equal(await grantCount(), 0, 'browser restart does not restore page grants')
   assert.equal(await nativeCanRead(await activeId(browser.target)), false)
   assert.equal((await browser.worker.evaluate(() => chrome.tabGroups.query({ title: 'DSH 控制' }))).length, 0)
-  console.log('Page permission smoke passed: native activeTab grant, same-origin sibling isolation, visible control group, no authorization by dragging, trusted stop, cross-origin revocation, Chrome reload and browser restart. No model called.')
+  console.log('Page permission smoke passed: native activeTab grant, same-origin sibling isolation, visible control group, no authorization by dragging, trusted stop, cross-origin revocation, Chrome reload, stale-cache revocation after worker restart and browser restart. No model called.')
 } finally {
   await browser?.close().catch(() => {})
   await new Promise(done => site.close(done))

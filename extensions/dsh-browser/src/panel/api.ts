@@ -92,7 +92,7 @@ interface SessionResumeHintMessage {
   sessionId: string | null
 }
 
-export interface PageAccessStatus { activeGranted: boolean; controlledGranted: boolean; controlledTabId: number | null }
+export interface PageAccessStatus { activeGranted: boolean; controlledGranted: boolean; controlledTabId: number | null; revocableTabId: number | null }
 
 type BackgroundMessage = ({ type: 'page-access' } & PageAccessStatus) | RpcResultMessage | RespondResultMessage | SettingsResultMessage | (Omit<SettingsResultMessage, 'type'> & { type: 'browser-pairing.unpair.result' | 'page-access.revoke.result' }) | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | (Omit<TabAffinityRebindResultMessage, 'type'> & { type: 'browser-run.retarget.result' | 'tab-affinity.unbind.result' }) | SelectionMessage | SessionResumeHintMessage | { type: 'browser-pairing'; status: BrowserPairingStatus }
 

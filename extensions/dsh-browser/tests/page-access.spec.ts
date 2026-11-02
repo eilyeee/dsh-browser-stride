@@ -72,7 +72,9 @@ describe('native page access and visible control group', () => {
     expect(h.access.has(2)).toBe(false)
     expect(h.ungroup).toHaveBeenCalledWith(2)
     const lease = h.access.lease(1)
-    approved.groupId = -1; h.access.observe(approved, true)
+    approved.groupId = -1
+    expect(h.access.allows(approved)).toBe(false) // The native check also precedes a delayed group event.
+    h.access.observe(approved, true)
     expect(lease()).toBe(false)
     expect(h.access.has(1)).toBe(false)
     expect(h.changed).toHaveBeenCalledWith(1)
@@ -111,6 +113,102 @@ describe('native page access and visible control group', () => {
     const restarted = new PageAccess(vi.fn()); await restarted.cleanExpiredGroups()
     expect(restarted.allows(tab)).toBe(false)
     expect(tab.groupId).toBe(-1)
+  })
+
+  it('does not restore a grant after revocation storage failed and the worker restarted', async () => {
+    const h = fixture(), tab = h.page(1)
+    tab.pinned = true
+    vi.mocked(chrome.tabs.group).mockRejectedValueOnce(new Error('Pinned tabs cannot be grouped'))
+    await h.access.grantFromAction(tab)
+    expect(chrome.tabs.group).not.toHaveBeenCalled()
+    expect((h.data[PAGE_ACCESS_KEY] as { grants: Array<{ groupId?: number }> }).grants[0]?.groupId).toBeUndefined()
+    h.set.mockRejectedValueOnce(new Error('session storage unavailable'))
+    await expect(h.access.revoke(1)).rejects.toThrow('session storage unavailable')
+    const restarted = new PageAccess(vi.fn()); await restarted.ready
+    expect(restarted.allows(tab)).toBe(false)
+  })
+
+  it('rechecks a restored grant against native group membership and cannot revive it by dragging back', async () => {
+    const h = fixture(), tab = h.page(1)
+    await h.access.grantFromAction(tab)
+    const groupId = tab.groupId
+    tab.groupId = -1 // The tab was moved while this worker was not running.
+    const restarted = new PageAccess(vi.fn()); await restarted.ready
+    expect(restarted.allows(tab)).toBe(false)
+    tab.groupId = groupId
+    const again = new PageAccess(vi.fn()); await again.ready
+    expect(again.allows(tab)).toBe(false)
+  })
+
+  it('does not give an old request a new toolbar grant for the same tab or another tab', async () => {
+    const h = fixture(), first = h.page(1), second = h.page(2)
+    await h.access.grantFromAction(first)
+    const requestScope = h.access.snapshot()
+    expect(requestScope.allows(first)).toBe(true)
+    expect(requestScope.allows(second)).toBe(false)
+    await h.access.revoke(1)
+    expect(requestScope.current()).toBe(false)
+    await h.access.grantFromAction(first)
+    await h.access.grantFromAction(second)
+    expect(requestScope.allows(first)).toBe(false)
+    expect(requestScope.allows(second)).toBe(false)
+    expect(h.access.snapshot().allows(first)).toBe(true)
+  })
+
+  it('does not lose a group exit delivered while native restoration was pending', async () => {
+    const h = fixture(), tab = h.page(1)
+    await h.access.grantFromAction(tab)
+    const initial = { ...tab }
+    let finish!: (value: chrome.tabs.Tab) => void
+    let checking = false
+    vi.mocked(chrome.tabs.get).mockImplementationOnce(() => { checking = true; return new Promise(resolve => { finish = resolve }) })
+    const restarted = new PageAccess(vi.fn())
+    await vi.waitFor(() => expect(checking).toBe(true))
+    tab.groupId = -1; restarted.observe(tab, true)
+    tab.groupId = initial.groupId; restarted.observe(tab, true)
+    finish(initial)
+    await restarted.ready
+    expect(restarted.allows(tab)).toBe(false)
+  })
+
+  it('clears grants requested before restoration finished', async () => {
+    const h = fixture(), tab = h.page(1)
+    await h.access.grantFromAction(tab)
+    const restarted = new PageAccess(vi.fn())
+    await restarted.clear()
+    expect(restarted.allows(tab)).toBe(false)
+    const again = new PageAccess(vi.fn()); await again.ready
+    expect(again.allows(tab)).toBe(false)
+  })
+
+  it('fails closed when the private revocation record is corrupt', async () => {
+    const h = fixture(), tab = h.page(1)
+    await h.access.grantFromAction(tab)
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open('dsh-browser-private', 1)
+      request.onsuccess = () => resolve(request.result)
+      request.onerror = () => reject(request.error)
+    })
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const transaction = db.transaction('credentials', 'readwrite')
+        transaction.objectStore('credentials').put(false, 'page-access-epoch')
+        transaction.oncomplete = () => resolve()
+        transaction.onabort = () => reject(transaction.error)
+      })
+    } finally { db.close() }
+    const restarted = new PageAccess(vi.fn()); await restarted.ready
+    expect(restarted.allows(tab)).toBe(false)
+  })
+
+  it('commits revocation even if a UI or cancellation observer throws', async () => {
+    const h = fixture(), tab = h.page(1)
+    await h.access.grantFromAction(tab)
+    h.changed.mockImplementation(() => { throw new Error('Synthetic observer failure') })
+    await h.access.revoke(1)
+    expect(h.access.allows(tab)).toBe(false)
+    const restarted = new PageAccess(vi.fn()); await restarted.ready
+    expect(restarted.allows(tab)).toBe(false)
   })
 
   it('revokes immediately while an injection is pending and refuses to regroup late work', async () => {

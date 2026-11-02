@@ -635,7 +635,7 @@ export function App(): React.JSX.Element {
   const [pairingStatus, setPairingStatus] = useState<BrowserPairingStatus>({ phase: 'idle' })
   const pairingBusy = ['requesting', 'pending', 'saving'].includes(pairingStatus.phase)
   const unpairingConnection = pairingStatus.phase === 'unpairing'
-  const [pageAccess, setPageAccess] = useState<PageAccessStatus>({ activeGranted: false, controlledGranted: false, controlledTabId: null })
+  const [pageAccess, setPageAccess] = useState<PageAccessStatus>({ activeGranted: false, controlledGranted: false, controlledTabId: null, revocableTabId: null })
   useEffect(() => api.onPageAccess(setPageAccess), [api])
   const [hasConnectionCredential, setHasConnectionCredential] = useState(false)
   useEffect(() => api.onBrowserPairing(status => setPairingStatus(current =>
@@ -2241,8 +2241,8 @@ export function App(): React.JSX.Element {
       )}
       <section className="page-access-notice" role="status">
         <p>{pageAccess.controlledGranted || pageAccess.activeGranted ? copy.pageAccess.granted : copy.pageAccess.required}</p>
-        {pageAccess.controlledGranted && pageAccess.controlledTabId !== null && <button type="button" className="secondary" onClick={event => {
-          if (event.nativeEvent.isTrusted) void api.revokePageAccess(pageAccess.controlledTabId!).catch(() => setError(copy.pageAccess.failed))
+        {typeof pageAccess.revocableTabId === 'number' && <button type="button" className="secondary" onClick={event => {
+          if (event.nativeEvent.isTrusted) void api.revokePageAccess(pageAccess.revocableTabId!).catch(() => setError(copy.pageAccess.failed))
         }}>{copy.pageAccess.revoke}</button>}
       </section>
       <TabAffinityBanner state={tabAffinity} copy={copy} onDecision={decideTabAffinity} activeAuthorized={pageAccess.activeGranted} />

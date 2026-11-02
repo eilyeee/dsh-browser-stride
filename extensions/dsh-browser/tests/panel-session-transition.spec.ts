@@ -4,7 +4,7 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import type { BridgeState } from '../src/background/bridge.ts'
-import type { PanelApi } from '../src/panel/api.ts'
+import type { PanelApi, PageAccessStatus } from '../src/panel/api.ts'
 import { BRIDGE_SESSION_PURGE_METHOD, type ServerFrame } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 
 let panelApi: PanelApi
@@ -18,6 +18,7 @@ import { createRemoteHostApi } from '@eilyeee/dsh-browser-stride/src/remote-host
 
 describe('panel session transitions', () => {
   let root: Root
+  let onPageAccess: ((status: PageAccessStatus) => void) | undefined
   let onStatus: ((state: BridgeState, caps: null) => void) | undefined
   let onResumeHint: ((sessionId: string | null) => void) | undefined
   let onEvent: ((frame: ServerFrame) => void) | undefined
@@ -53,7 +54,7 @@ describe('panel session transitions', () => {
     panelApi = {
       startBrowserPairing: vi.fn(async () => {}),
       cancelBrowserPairing: vi.fn(async () => {}),
-      onPageAccess: vi.fn(() => () => {}),
+      onPageAccess: vi.fn(callback => { onPageAccess = callback; return () => {} }),
       revokePageAccess: vi.fn(async () => {}),
       unpairBrowser: vi.fn(async () => {}),
       onBrowserPairing: vi.fn(() => unsubscribe),
@@ -97,6 +98,17 @@ describe('panel session transitions', () => {
       onResumeHint?.(hint)
     })
   }
+
+  it('offers stop control for an authorized page before a task is bound', async () => {
+    await act(async () => { root.render(createElement(App)) })
+    await act(async () => onPageAccess?.({ activeGranted: true, controlledGranted: false, controlledTabId: null, revocableTabId: 17 }))
+    const stop = document.querySelector<HTMLButtonElement>('.page-access-notice button')
+    expect(stop).not.toBeNull()
+    await act(async () => stop!.click())
+    expect(panelApi.revokePageAccess).not.toHaveBeenCalled() // Native click protection remains intact.
+    await act(async () => onPageAccess?.({ activeGranted: false, controlledGranted: false, controlledTabId: null, revocableTabId: null }))
+    expect(document.querySelector('.page-access-notice button')).toBeNull()
+  })
 
   it('shows the saved Session model and allows switching to the deployment default', async () => {
     let selected = { provider: 'provider', model: 'saved-model' }

@@ -278,7 +278,7 @@ const EN: PanelCopy = {
     },
     overflow: (shown, total) => `${shown.join(' → ')} → ${total - shown.length} more`,
   },
-  pageAccess: { required: 'Click the DSH Stride toolbar icon on a page to authorize that tab. Switching tabs does not grant access.', granted: 'Authorized pages appear in the DSH 控制 group. Moving a page into the group does not authorize it.', revoke: 'Stop controlling this page', failed: 'Page access could not be removed. Try again.' },
+  pageAccess: { required: 'Click the DSH Stride toolbar icon on a page to authorize that tab. Switching tabs does not grant access.', granted: 'The target page is authorized. Moving other tabs into the DSH 控制 group does not authorize them.', revoke: 'Stop controlling this page', failed: 'Stopping page control was not confirmed. Reload the extension and check page access.' },
   tabHandoff: {
     eyebrow: 'Page handoff',
     assistant: 'Assistant',
@@ -538,7 +538,7 @@ const ZH: PanelCopy = {
     },
     overflow: (shown, total) => `${shown.join(' → ')} 等${total}个工具`,
   },
-  pageAccess: { required: '请在目标页面点击工具栏上的 DSH Stride 图标授权此页。切换标签页不会自动授权。', granted: '已授权页面会加入「DSH 控制」分组。手动拖入分组不会自动授权。', revoke: '停止控制此页', failed: '未能撤销页面授权，请重试。' },
+  pageAccess: { required: '请在目标页面点击工具栏上的 DSH Stride 图标授权此页。切换标签页不会自动授权。', granted: '目标页面已授权。手动拖入「DSH 控制」分组不会自动授权其他页面。', revoke: '停止控制此页', failed: '停止控制的结果尚未确认，请重新加载扩展后核对页面授权。' },
   tabHandoff: {
     eyebrow: '页面交接',
     assistant: '助手',

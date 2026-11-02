@@ -101,7 +101,7 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
           const allowed = await worker.evaluate(async expected => {
             const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true })
             const grants = (await chrome.storage.session.get('dshPageAccess')).dshPageAccess?.grants ?? []
-            return tab?.url === expected && grants.some(grant => grant.tabId === tab.id && grant.origin === new URL(expected).origin && grant.groupId !== undefined)
+            return tab?.url === expected && grants.some(grant => grant.tabId === tab.id && grant.origin === new URL(expected).origin && (grant.groupId !== undefined || tab.pinned))
           }, page.url())
           if (allowed) return
           await page.waitForTimeout(50)
@@ -134,6 +134,47 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
       target,
       executablePath,
       authorizePage,
+      /** Restart only the worker, retaining native tab grants and session storage. */
+      async restartWorker() {
+        const previous = worker
+        await previous.evaluate(() => { globalThis.__strideWorkerRestartProof = crypto.randomUUID() })
+        const cdp = await context.newCDPSession(panel)
+        const versions = new Map()
+        const stopped = new Set()
+        cdp.on('ServiceWorker.workerVersionUpdated', event => {
+          for (const version of event.versions) {
+            versions.set(version.versionId, version)
+            if (version.runningStatus === 'stopped') stopped.add(version.versionId)
+          }
+        })
+        try {
+          await cdp.send('ServiceWorker.enable')
+          let version
+          const deadline = Date.now() + 10000
+          while (Date.now() < deadline && version === undefined) {
+            version = [...versions.values()].find(item => item.scriptURL === previous.url() && item.runningStatus === 'running')
+            if (version === undefined) await panel.waitForTimeout(50)
+          }
+          if (version === undefined) throw new Error('Cannot find the native extension worker')
+          await cdp.send('ServiceWorker.stopWorker', { versionId: version.versionId })
+          while (Date.now() < deadline && !stopped.has(version.versionId)) await panel.waitForTimeout(50)
+          if (!stopped.has(version.versionId)) throw new Error('Native worker stop was not confirmed')
+          await panel.reload()
+          await panel.waitForSelector('header.topbar', { timeout: 15000 })
+          let next
+          while (Date.now() < deadline && next === undefined) {
+            for (const candidate of context.serviceWorkers().filter(item => new URL(item.url()).host === extensionId)) {
+              // Playwright may retain its Worker proxy across native lifetimes.
+              if (await candidate.evaluate(() => globalThis.__strideWorkerRestartProof === undefined).catch(() => false)) { next = candidate; break }
+            }
+            if (next === undefined) await panel.waitForTimeout(50)
+          }
+          if (next === undefined) throw new Error('Replacement extension worker did not start')
+          worker = next
+          await panel.evaluate(() => { window.__dshBenchmarkPort = chrome.runtime.connect({ name: 'dsh-panel' }) })
+          return { worker, panel }
+        } finally { await cdp.detach() }
+      },
       /** Keep installation data while replacing the whole browser/worker lifetime. */
       async restart({ connected = true } = {}) {
         const targetUrl = target.url()

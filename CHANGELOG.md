@@ -9,6 +9,14 @@ no release version has been assigned yet.
 
 ### Fixed
 
+- Page revocation commits a private epoch before updating its session cache, so
+  a failed cache write cannot restore old grants after a worker restart. Recovery
+  rechecks native tab/window/origin/group identity and processes startup events.
+  Tab-management requests retain their original grants across waits and cannot
+  acquire a later authorization. Authorized pages expose Stop control even before
+  binding a task. Pinned pages keep their pinned state, and Firefox loopback
+  navigation requires a fresh grant just like navigation on other sites.
+
 - Settled browser requests clear their original approval wait even after timeout,
   cancellation or disconnect, so subsequent task time is counted. Reaching the
   active-time limit during independent verification reports budget exhaustion.

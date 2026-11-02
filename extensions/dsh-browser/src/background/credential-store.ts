@@ -4,6 +4,7 @@ const DATABASE = 'dsh-browser-private'
 const STORE = 'credentials'
 const KEY = 'bridge'
 const DISCONNECTED = 'disconnected'
+const PAGE_ACCESS_EPOCH = 'page-access-epoch'
 
 async function database(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -15,13 +16,20 @@ async function database(): Promise<IDBDatabase> {
   })
 }
 
-export async function readBridgeCredential(): Promise<string | undefined> {
+export function readBridgeCredential(): Promise<string | undefined> { return readPrivateString(KEY) }
+
+export function readPageAccessEpoch(): Promise<string | undefined> { return readPrivateString(PAGE_ACCESS_EPOCH, true) }
+
+async function readPrivateString(key: string, strict = false): Promise<string | undefined> {
   const db = await database()
   try {
     return await new Promise((resolve, reject) => {
       const transaction = db.transaction(STORE, 'readonly')
-      const request = transaction.objectStore(STORE).get(KEY)
-      request.onsuccess = () => { resolve(typeof request.result === 'string' ? request.result : undefined) }
+      const request = transaction.objectStore(STORE).get(key)
+      request.onsuccess = () => {
+        if (strict && request.result !== undefined && (typeof request.result !== 'string' || request.result === '')) { reject(new Error('Invalid page revocation epoch')); return }
+        resolve(typeof request.result === 'string' ? request.result : undefined)
+      }
       request.onerror = () => { reject(request.error ?? new Error('Cannot read credential')) }
       transaction.onabort = () => { reject(transaction.error ?? new Error('Credential read aborted')) }
     })
@@ -58,6 +66,21 @@ export async function readBridgeDisconnected(): Promise<boolean> {
       request.onsuccess = () => resolve(request.result === true)
       request.onerror = () => reject(request.error ?? new Error('Cannot read connection state'))
       transaction.onabort = () => reject(transaction.error ?? new Error('Connection state read aborted'))
+    })
+  } finally { db.close() }
+}
+
+
+/** Commit revocation before the replaceable session cache, so an old cache cannot revive a grant. */
+export async function writePageAccessEpoch(epoch: string): Promise<void> {
+  const db = await database()
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction(STORE, 'readwrite')
+      transaction.objectStore(STORE).put(epoch, PAGE_ACCESS_EPOCH)
+      transaction.oncomplete = () => resolve()
+      transaction.onerror = () => reject(transaction.error ?? new Error('Cannot save page revocation'))
+      transaction.onabort = () => reject(transaction.error ?? new Error('Page revocation aborted'))
     })
   } finally { db.close() }
 }

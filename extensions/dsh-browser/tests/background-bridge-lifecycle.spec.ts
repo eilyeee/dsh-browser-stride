@@ -87,6 +87,8 @@ function mockChrome(options: {
   }))
   const onConnect = chromeEvent<[chrome.runtime.Port]>()
   const actionClick = chromeEvent<[chrome.tabs.Tab]>()
+  const onUpdated = chromeEvent<[number, Parameters<Parameters<typeof chrome.tabs.onUpdated.addListener>[0]>[1], chrome.tabs.Tab]>()
+  let pageState = options.authorizedPages === false ? undefined : authorizedExamplePages()[PAGE_ACCESS_KEY]
   const onCommitted = chromeEvent<[{ tabId: number; frameId: number }]>()
   const onAlarm = chromeEvent<[chrome.alarms.Alarm]>()
   const alarms = {
@@ -119,8 +121,8 @@ function mockChrome(options: {
         setAccessLevel: vi.fn(options.localSetAccessLevel ?? (async () => {})),
       },
       session: {
-        get: vi.fn(async (key: string) => key === PAGE_ACCESS_KEY && options.authorizedPages !== false ? authorizedExamplePages() : await (options.sessionGet ?? (async () => ({})))(key)),
-        set: vi.fn(async () => {}),
+        get: vi.fn(async (key: string) => key === PAGE_ACCESS_KEY ? { [key]: pageState } : await (options.sessionGet ?? (async () => ({})))(key)),
+        set: vi.fn(async (value: Record<string, unknown>) => { if (PAGE_ACCESS_KEY in value) pageState = value[PAGE_ACCESS_KEY] }),
         remove: vi.fn(async () => {}),
       },
     },
@@ -131,7 +133,7 @@ function mockChrome(options: {
       create: vi.fn(options.tabCreate ?? (async () => ({ id: 2, windowId: 1, status: 'complete', url: 'https://example.com/' } as chrome.tabs.Tab))),
       sendMessage: vi.fn(options.tabSendMessage ?? (async () => {})),
       onActivated: chromeEvent<[{ tabId: number; windowId: number }]>(),
-      onUpdated: chromeEvent<[number, Parameters<Parameters<typeof chrome.tabs.onUpdated.addListener>[0]>[1], chrome.tabs.Tab]>(),
+      onUpdated,
       onReplaced: chromeEvent<[number, number]>(),
       onRemoved: chromeEvent<[number]>(),
     },
@@ -154,7 +156,7 @@ function mockChrome(options: {
       onRemoved: chromeEvent<[number]>(),
     },
   } as unknown as typeof chrome)
-  return { alarms, onConnect, onCommitted, actionClick, tabs: chrome.tabs }
+  return { alarms, onConnect, onCommitted, actionClick, onUpdated, tabs: chrome.tabs }
 }
 
 afterEach(() => {
@@ -186,6 +188,10 @@ describe('background bridge lifecycle', () => {
       await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity.rebind.result', id: 'panel-cannot-grant', ok: false, error: expect.objectContaining({ code: 'page-access-required' }) })))
       h.actionClick.emit(await chrome.tabs.get(1))
       await vi.waitFor(() => expect(chrome.scripting.executeScript).toHaveBeenCalled())
+      panel.onMessage.emit({ type: 'page-access.revoke', id: 'stop-before-task', tabId: 1 })
+      await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith({ type: 'page-access.revoke.result', id: 'stop-before-task', ok: true }))
+      h.actionClick.emit(await chrome.tabs.get(1))
+      await vi.waitFor(() => expect(vi.mocked(chrome.scripting.executeScript).mock.calls.length).toBe(2))
       socket.receive({ t: 'tool.call', id: 'approved-snapshot', name: 'browser_snapshot', args: {}, expiresAt: Date.now() + 10000 })
       await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'approved-snapshot', ok: true })))
       panel.onMessage.emit({ type: 'page-access.revoke', id: 'stop-page', tabId: 1 })
@@ -193,6 +199,54 @@ describe('background bridge lifecycle', () => {
       socket.receive({ t: 'tool.call', id: 'revoked-snapshot', name: 'browser_snapshot', args: {}, expiresAt: Date.now() + 10000 })
       await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'revoked-snapshot', ok: false })))
     } finally { panel.onDisconnect.emit(); socket.close() }
+  })
+
+  it('requires another Firefox authorization after a new loopback document starts loading', async () => {
+    vi.stubEnv('EXT_TARGET', 'firefox')
+    const native = { id: 1, windowId: 1, url: 'http://127.0.0.1:39001/page', title: 'Synthetic loopback page' } as chrome.tabs.Tab
+    const h = mockChrome({ authorizedPages: false, localGet: async () => ({ dshSettings: { bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge' } }),
+      tabGet: async () => native, tabQuery: async () => [native],
+    })
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+    const panel = panelPort(); h.onConnect.emit(panel.port)
+    try {
+      await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+      h.actionClick.emit(native)
+      await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'page-access', activeGranted: true })))
+      panel.postMessage.mockClear()
+      h.onUpdated.emit(1, { status: 'loading' }, native)
+      await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'page-access', activeGranted: false })))
+    } finally { panel.onDisconnect.emit(); FakeWebSocket.instances[0]?.close(); vi.unstubAllEnvs() }
+  })
+
+  it('does not close a newly reauthorized tab for a request that arrived under its old grant', async () => {
+    let waiting = false, hold = false, finish!: (tab: chrome.tabs.Tab) => void
+    const native = { id: 1, windowId: 1, url: 'https://example.com/', title: 'Synthetic page' } as chrome.tabs.Tab
+    const h = mockChrome({ localGet: async () => ({ dshSettings: { bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge', unrestrictedBrowserAccess: true } }),
+      tabGet: async id => {
+        if (hold && id === 1) { hold = false; waiting = true; return new Promise(resolve => { finish = resolve }) }
+        return { ...native, id }
+      },
+    })
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+    const panel = panelPort(); h.onConnect.emit(panel.port)
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const socket = FakeWebSocket.instances[0]!
+    try {
+      socket.open(); await Promise.resolve()
+      socket.receive({ t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps: { textOnly: true, snapshotMaxChars: 32000, maxInteractiveItems: 60 } })
+      hold = true
+      socket.receive({ t: 'tool.call', id: 'old-grant-close', name: 'browser_close_tab', args: { tabId: 1 }, expiresAt: Date.now() + 10000 })
+      await vi.waitFor(() => expect(waiting).toBe(true))
+      h.onUpdated.emit(1, { url: 'https://other.example/' }, { ...native, url: 'https://other.example/' })
+      h.actionClick.emit(native)
+      await vi.waitFor(() => expect(chrome.scripting.executeScript).toHaveBeenCalled())
+      finish(native)
+      await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'old-grant-close', ok: false })))
+      expect(chrome.tabs.remove).not.toHaveBeenCalled()
+    } finally { if (finish) finish(native); panel.onDisconnect.emit(); socket.close() }
   })
 
   it.each([true, false])('unpairs DSH locally even when remote revocation succeeds=%s and only resumes after explicit pairing', async remoteRevoked => {
@@ -696,6 +750,7 @@ describe('background bridge lifecycle', () => {
   })
 
   it('cancels in-flight unrestricted calls before persisting revocation', async () => {
+    let holdNativeLookup = false, lookupStarted = false
     let finishTabLookup!: (tab: chrome.tabs.Tab) => void
     const tabLookup = new Promise<chrome.tabs.Tab>((resolve) => { finishTabLookup = resolve })
     const chromeMock = mockChrome({
@@ -705,7 +760,10 @@ describe('background bridge lifecycle', () => {
           unrestrictedBrowserAccess: true,
         },
       }),
-      tabGet: async () => await tabLookup,
+      tabGet: async id => {
+        if (holdNativeLookup) { lookupStarted = true; return await tabLookup }
+        return { id, windowId: 1, title: 'Tab', url: 'https://example.com/' } as chrome.tabs.Tab
+      },
     })
     vi.stubGlobal('WebSocket', FakeWebSocket)
     await import('../src/background/index.ts')
@@ -721,6 +779,7 @@ describe('background bridge lifecycle', () => {
       caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
     })
     await Promise.resolve()
+    holdNativeLookup = true
     socket.receive({
       t: 'tool.call',
       id: 'close-in-flight',
@@ -728,7 +787,7 @@ describe('background bridge lifecycle', () => {
       args: { tabId: 1 },
       expiresAt: Date.now() + 10_000,
     })
-    await vi.waitFor(() => { expect(chromeMock.tabs.get).toHaveBeenCalledWith(1) })
+    await vi.waitFor(() => { expect(lookupStarted).toBe(true) })
 
     panel.onMessage.emit({
       type: 'settings',
@@ -1066,8 +1125,9 @@ describe('background bridge lifecycle', () => {
     original.open()
     await Promise.resolve()
     original.receive({ t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
+    const readsBeforeFollow = vi.mocked(chrome.tabs.get).mock.calls.filter(([id]) => id === 2).length
     original.receive({ t: 'tool.call', id: 'old-follow', name: 'browser_follow_tab', args: { tabId: 2 }, expiresAt: Date.now() + 10_000 })
-    await vi.waitFor(() => { expect(vi.mocked(chrome.tabs.get).mock.calls.filter(([id]) => id === 2)).toHaveLength(2) })
+    await vi.waitFor(() => { expect(vi.mocked(chrome.tabs.get).mock.calls.filter(([id]) => id === 2)).toHaveLength(readsBeforeFollow + 2) })
     if (owner === 'replaced') {
       panel.onMessage.emit({ type: 'settings', settings: { bridgeUrl: 'ws://127.0.0.1:39002/ext/bridge' } })
       await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(2) })

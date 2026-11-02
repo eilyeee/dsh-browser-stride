@@ -440,7 +440,8 @@ function broadcastStatus(): void {
 function broadcastPageAccess(): void {
   const state = tabAffinity.snapshot()
   const message = { type: 'page-access', activeGranted: pageAccess.has(state.active?.tabId),
-    controlledGranted: pageAccess.has(state.controlled?.tabId), controlledTabId: state.controlled?.tabId ?? null }
+    controlledGranted: pageAccess.has(state.controlled?.tabId), controlledTabId: state.controlled?.tabId ?? null,
+    revocableTabId: pageAccess.has(state.controlled?.tabId) ? state.controlled!.tabId : pageAccess.has(state.active?.tabId) ? state.active!.tabId : null }
   for (const port of panelPorts) { try { port.postMessage(message) } catch { /* closed */ } }
 }
 
@@ -1312,9 +1313,10 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
   unsettledToolCalls.add(activeCall)
   const target = isTabManagementTool(call.name) || call.name === 'browser_open_tab' ? undefined : captureToolTarget(call.sessionId)
   if (target !== undefined && !('ok' in target)) activeCall.targetLease = target
+  const admittedPages = pageAccess.snapshot()
   const pageLease = target !== undefined && !('ok' in target) ? pageAccess.lease(target.target.tabId) : () => true
   const isCurrentCall = (): boolean => activeToolCalls.get(call.id) === activeCall
-  const targetAllowed = (): boolean => pageLease() && !tabAffinity.isDetached(call.sessionId) && isCurrentCall() && executionFence?.current() === true && (runTarget === undefined || runTarget.current()) && (activeCall.targetLease === undefined
+  const targetAllowed = (): boolean => (call.name !== 'browser_list_tabs' || admittedPages.current()) && pageLease() && !tabAffinity.isDetached(call.sessionId) && isCurrentCall() && executionFence?.current() === true && (runTarget === undefined || runTarget.current()) && (activeCall.targetLease === undefined
     || (activeCall.committed ? activeCall.targetLease.sameBinding() : activeCall.targetLease.current()))
   const commitAction = (): void => {
     if (!targetAllowed()) throw new Error('Browser target lease expired before dispatch')
@@ -1358,9 +1360,9 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
       undefined,
       {
         unrestrictedAccess,
-        allowsTab: tab => pageAccess.allows(tab),
+        allowsTab: admittedPages.allows,
         ...(controlledTabId === undefined ? {} : { controlledTabId }),
-        followTab: (tab) => followModelSelectedTab(tab, call.sessionId, targetAllowed),
+        followTab: (tab) => followModelSelectedTab(tab, call.sessionId, () => targetAllowed() && admittedPages.allows(tab)),
         commitAction,
         rollbackActionCommit,
       },
@@ -2149,7 +2151,8 @@ chrome.runtime.onConnect.addListener((port) => {
         const request = message as { id?: unknown; tabId?: unknown }
         if (typeof request.id !== 'string' || typeof request.tabId !== 'number') break
         const reply = (ok: boolean) => { try { port.postMessage({ type: 'page-access.revoke.result', id: request.id, ok }) } catch { /* closed */ } }
-        if (request.tabId !== tabAffinity.snapshot().controlled?.tabId) { reply(false); break }
+        // Revocation remains valid if focus changed after the displayed button was clicked.
+        if (!pageAccess.has(request.tabId)) { reply(false); break }
         void pageAccess.revoke(request.tabId).then(() => reply(true), () => reply(false))
         break
       }
@@ -2235,6 +2238,9 @@ chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
 })
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  // Firefox ends activeTab on a new document, including loopback pages where
+  // the separate DSH network permission would otherwise let injection succeed.
+  if (import.meta.env.EXT_TARGET === 'firefox' && changeInfo.status === 'loading') void pageAccess.revoke(tabId).catch(() => {})
   pageAccess.observe(tab, changeInfo.groupId !== undefined)
   if (changeInfo.status === 'complete') void pageAccess.refresh(tab)
   if (changeInfo.status === 'loading' || changeInfo.url !== undefined) invalidateDocumentTarget(tabId)
