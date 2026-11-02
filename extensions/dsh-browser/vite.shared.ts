@@ -3,8 +3,8 @@ import { resolve } from 'node:path'
 import { defineConfig } from 'vite'
 
 /**
- * Shared build plumbing for the extension's three targets (background ES
- * service worker, iife content script, React panel). Each target has its own
+ * Shared build plumbing for the extension's four targets (background ES
+ * service worker, two iife page controllers, React panel). Each target has its own
  * config file; scripts/build.mjs runs them sequentially into one dist/.
  */
 

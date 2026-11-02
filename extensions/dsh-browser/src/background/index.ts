@@ -55,6 +55,7 @@ import { needsWriteTurn, WriteQueue } from './write-queue.ts'
 import { executeRecordedTool } from './execution-receipts.ts'
 import { ToolExecutionFence } from './execution-authority.ts'
 import { PageAccess } from './page-access.ts'
+import { debuggerPages, sendPageMessage } from './debugger-pages.ts'
 import { RunTargetRegistry, type RunTargetBinding } from './run-targets.ts'
 import { localBridgeUrl } from './bridge-address.ts'
 import { requestBrowserPairing, revokeBrowserPairing, type BrowserPairingStatus } from './pairing-client.ts'
@@ -106,6 +107,8 @@ export interface Settings {
   sharePageContent: 'ask' | 'auto' | 'off'
   /** Skip confirmations only within explicitly authorized tabs. */
   unrestrictedBrowserAccess: boolean
+  /** Chrome-only opt-in: automatically control tabs created by DSH chat. */
+  autoControlNewTabs: boolean
   /** Origins whose state-changing actions may run without another prompt. */
   trustedActionOrigins: string[]
   /** Show an OS notification when no side panel can display an approval. */
@@ -120,6 +123,7 @@ const SETTINGS_DEFAULTS: Settings = {
   token: '',
   sharePageContent: 'auto',
   unrestrictedBrowserAccess: false,
+  autoControlNewTabs: false,
   trustedActionOrigins: [],
   approvalNotifications: true,
   autoResumeSession: true,
@@ -190,6 +194,8 @@ let activeBridgeUrl: string | undefined
 let activePairing: { url: string; credential: string; installationId: string } | undefined
 let activeInstallationId = ''
 let unrestrictedAccessActive = SETTINGS_DEFAULTS.unrestrictedBrowserAccess
+let automaticAccessActive = false
+let automaticAccessRevision = 0
 let unrestrictedAccessRevision = 0
 let pageSharingRevision = 0
 let unrestrictedRevocation: Promise<void> | undefined
@@ -223,6 +229,7 @@ const pageAccess = new PageAccess(tabId => {
   broadcastPageAccess()
   syncSelectionWatch()
 })
+debuggerPages.onDetached = tabId => { void pageAccess.revoke(tabId).catch(() => {}) }
 const pageSessionContexts = new PageSessionContextTracker({
   read: async () => (await chrome.storage.session.get(PAGE_SESSION_CONTEXT_STORAGE_KEY))[PAGE_SESSION_CONTEXT_STORAGE_KEY],
   write: async (value) => {
@@ -333,6 +340,14 @@ async function persistSettings(next: Partial<Settings>, enableConnection = false
   const changesUnrestrictedAccess = typeof next.unrestrictedBrowserAccess === 'boolean'
   const accessRevision = changesUnrestrictedAccess ? ++unrestrictedAccessRevision : unrestrictedAccessRevision
   const updated = normalizeSettings({ ...settings, ...next })
+  const changesAutomatic = settings.autoControlNewTabs !== updated.autoControlNewTabs
+  if (changesAutomatic) automaticAccessRevision += 1
+  const automaticRevision = automaticAccessRevision
+  let automaticTransition: Promise<void> | undefined
+  if (!updated.autoControlNewTabs) {
+    automaticAccessActive = false
+    automaticTransition = pageAccess.revokeAutomatic()
+  }
   const revokesUnrestrictedAccess = settings.unrestrictedBrowserAccess && !updated.unrestrictedBrowserAccess
   if (settings.sharePageContent !== updated.sharePageContent || revokesUnrestrictedAccess) pageSharingRevision += 1
   settings = updated
@@ -354,6 +369,7 @@ async function persistSettings(next: Partial<Settings>, enableConnection = false
   const persisted = updated
   const write = settingsPersistence.then(async () => {
     await accessTransition
+    await automaticTransition
     if (next.token !== undefined) {
       if (controlRevision !== connectionControlRevision || unpairing) throw new Error('Connection settings were superseded')
       await writeBridgeCredential(persisted.token, enableConnection ? 'enable' : undefined,
@@ -369,6 +385,7 @@ async function persistSettings(next: Partial<Settings>, enableConnection = false
   })
   settingsPersistence = write.catch(() => {})
   await write
+  if (automaticRevision === automaticAccessRevision && settings.autoControlNewTabs && persisted.autoControlNewTabs) automaticAccessActive = true
   if (changesUnrestrictedAccess
     && accessRevision === unrestrictedAccessRevision
     && settings.unrestrictedBrowserAccess
@@ -390,6 +407,7 @@ function normalizeSettings(candidate: Settings): Settings {
     ...candidate,
     sharePageContent,
     unrestrictedBrowserAccess: candidate.unrestrictedBrowserAccess === true,
+    autoControlNewTabs: import.meta.env.EXT_TARGET !== 'firefox' && candidate.autoControlNewTabs === true,
     trustedActionOrigins: trusted,
     approvalNotifications: candidate.approvalNotifications !== false,
     autoResumeSession: candidate.autoResumeSession !== false,
@@ -401,6 +419,7 @@ let settingsLoaded = false
 const settingsReady = loadSettings().then((loaded) => {
   settings = loaded
   unrestrictedAccessActive = loaded.unrestrictedBrowserAccess
+  automaticAccessActive = loaded.autoControlNewTabs
   settingsLoaded = true
 })
 
@@ -491,7 +510,7 @@ function hasPanelInWindow(windowId: number): boolean {
  */
 function resetSelectionDedupe(sources: readonly SelectionSource[]): void {
   for (const { tabId, frameId } of sources) {
-    void Promise.resolve(chrome.tabs.sendMessage(
+    void Promise.resolve(sendPageMessage(
       tabId,
       { type: 'DSH_SELECTION_RESET' },
       { frameId },
@@ -546,7 +565,7 @@ function syncSelectionWatch(): void {
     for (const tab of tabs) {
       if (tab.id === undefined || !pageAccess.has(tab.id)) continue
       const enabled = selectionWatchEnabled(tab.windowId)
-      void Promise.resolve(chrome.tabs.sendMessage(tab.id, {
+      void Promise.resolve(sendPageMessage(tab.id, {
         type: 'DSH_SELECTION_WATCH',
         enabled,
         epoch: selectionWatchEpoch,
@@ -1279,7 +1298,7 @@ async function pushBudgetToControlledTab(negotiated: BridgeCaps): Promise<void> 
       : undefined
   if (tabId === undefined || !pageAccess.has(tabId)) return
   try {
-    await chrome.tabs.sendMessage(tabId, {
+    await sendPageMessage(tabId, {
       type: 'DSH_BUDGET',
       budget: { maxItems: negotiated.maxInteractiveItems, maxChars: negotiated.snapshotMaxChars },
     })
@@ -1295,6 +1314,9 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
   if (activeToolCalls.has(call.id)) return
   const controller = new AbortController()
   const unrestrictedAccess = unrestrictedAccessEnabled()
+  const automaticRevision = automaticAccessRevision
+  const automaticOpen = call.name === 'browser_open_tab' && automaticAccessActive
+  const automaticAllowed = () => automaticAccessActive && automaticAccessRevision === automaticRevision
   let settle!: () => void
   const callRpc = rpc
   let executionFence: ToolExecutionFence | undefined
@@ -1316,7 +1338,7 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
   const admittedPages = pageAccess.snapshot()
   const pageLease = target !== undefined && !('ok' in target) ? pageAccess.lease(target.target.tabId) : () => true
   const isCurrentCall = (): boolean => activeToolCalls.get(call.id) === activeCall
-  const targetAllowed = (): boolean => (call.name !== 'browser_list_tabs' || admittedPages.current()) && pageLease() && !tabAffinity.isDetached(call.sessionId) && isCurrentCall() && executionFence?.current() === true && (runTarget === undefined || runTarget.current()) && (activeCall.targetLease === undefined
+  const targetAllowed = (): boolean => (!automaticOpen || automaticAllowed()) && (call.name !== 'browser_list_tabs' || admittedPages.current()) && pageLease() && !tabAffinity.isDetached(call.sessionId) && isCurrentCall() && executionFence?.current() === true && (runTarget === undefined || runTarget.current()) && (activeCall.targetLease === undefined
     || (activeCall.committed ? activeCall.targetLease.sameBinding() : activeCall.targetLease.current()))
   const commitAction = (): void => {
     if (!targetAllowed()) throw new Error('Browser target lease expired before dispatch')
@@ -1386,12 +1408,20 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
           target.windowId,
           sharePageContent(),
           budget,
-          (prompt) => authorize(prompt, target.windowId),
+          (prompt) => automaticOpen && automaticAllowed() ? Promise.resolve('approved') : authorize(prompt, target.windowId),
           controller.signal,
           (tab) => bindOpenedTab(tab, call.sessionId, targetAllowed, { active: call.args.active !== false }),
           (tabId) => targetAllowed() && tabAffinity.allowsTarget(tabId, call.sessionId),
           commitAction,
-          true,
+          !automaticOpen,
+          automaticOpen ? async tabId => {
+            if (!targetAllowed() || controller.signal.aborted) throw new Error('The open request is no longer current.')
+            await pageAccess.grantCreated(tabId, automaticAllowed, controller.signal)
+            if (!targetAllowed() || controller.signal.aborted) {
+              await pageAccess.revoke(tabId)
+              throw new Error('The open request is no longer current.')
+            }
+          } : undefined,
         ))
     : (target === undefined || 'ok' in target ? Promise.resolve(target ?? affinityFailure('missing'))
       : prepareToolTarget(target, call.sessionId, controller.signal)).then((prepared) => 'ok' in prepared

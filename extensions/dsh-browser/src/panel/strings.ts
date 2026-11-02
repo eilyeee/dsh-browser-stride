@@ -97,6 +97,8 @@ export interface PanelCopy {
     sharingOff: string
     unrestrictedBrowserAccess: string
     unrestrictedBrowserAccessHelp: string
+    autoControlNewTabs: string
+    autoControlNewTabsHelp: string
     approvalNotifications: string
     approvalNotificationsHelp: string
     autoResumeSession: string
@@ -356,7 +358,9 @@ const EN: PanelCopy = {
     sharingAsk: 'Ask every time',
     sharingOff: 'Off',
     unrestrictedBrowserAccess: 'Skip action confirmations on authorized pages',
-    unrestrictedBrowserAccessHelp: 'Allow actions without confirmation only on tabs you explicitly authorize with the toolbar icon. This cannot grant access to other tabs.',
+    unrestrictedBrowserAccessHelp: 'Allow actions without confirmation on authorized tabs, including DSH-created tabs when automatic control is enabled. This cannot grant access to other tabs.',
+    autoControlNewTabs: 'Automatically control pages opened by DSH',
+    autoControlNewTabsHelp: 'Chrome only. Allow DSH chat to open, bind and group new pages without a toolbar click. Chrome grants broad debugger access; Stride limits it to these new tabs. Existing tabs need separate authorization. Page sharing and action confirmations still follow your settings. Turning this off stops automatic page control.',
     approvalNotifications: 'Browser approval notifications',
     approvalNotificationsHelp: 'Notify you when an approval arrives while the side panel is closed',
     autoResumeSession: "Resume this page's conversation",
@@ -616,7 +620,9 @@ const ZH: PanelCopy = {
     sharingAsk: '每次询问',
     sharingOff: '关闭',
     unrestrictedBrowserAccess: '已授权页面内免确认操作',
-    unrestrictedBrowserAccessHelp: '仅对你通过工具栏图标授权的标签页免除操作确认，不会授予其他页面的访问权限。',
+    unrestrictedBrowserAccessHelp: '对已授权标签页免除操作确认，包含开启自动控制后由 DSH 新建的页面；不会授予其他页面的访问权限。',
+    autoControlNewTabs: '自动控制 DSH 新建页面',
+    autoControlNewTabsHelp: '仅 Chrome。允许 DSH 对话新建页面后自动绑定和分组，无需再点工具栏图标。浏览器授予较大的调试权限，Stride 将使用范围限制为这些新标签页。原有页面仍需单独授权。页面分享和操作确认遵循现有设置；关闭后停止自动页面控制。',
     approvalNotifications: '浏览器审批通知',
     approvalNotificationsHelp: '侧栏关闭时收到审批请求，通过系统通知提醒你',
     autoResumeSession: '续接当前页面会话',

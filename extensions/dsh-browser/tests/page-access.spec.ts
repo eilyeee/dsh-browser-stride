@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PageAccess, PAGE_ACCESS_KEY, CONTROL_GROUP_TITLE } from '../src/background/page-access.ts'
+import { debuggerPages } from '../src/background/debugger-pages.ts'
 
 function fixture() {
   const data: Record<string, unknown> = {}
@@ -37,9 +38,72 @@ function fixture() {
   const access = new PageAccess(changed)
   return { access, page, data, changed, inject, sendMessage, set, tabs, groups, ungroup }
 }
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 describe('native page access and visible control group', () => {
+  it('keeps pending automatic grants private through load events and excludes them from earlier requests', async () => {
+    const h = fixture(), created = h.page(42)
+    let finish!: () => void
+    vi.spyOn(debuggerPages, 'attachCreated').mockImplementation(() => new Promise<void>(resolve => { finish = resolve }))
+    vi.spyOn(debuggerPages, 'ready').mockResolvedValue(true)
+    vi.spyOn(debuggerPages, 'has').mockReturnValue(true)
+    const pending = h.access.grantCreated(42, () => true, new AbortController().signal)
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
+    const earlierRequest = h.access.snapshot()
+    const earlierLease = h.access.lease(42)
+    h.access.observe(created)
+    expect(h.access.allows(created)).toBe(false)
+    expect(h.access.has(42)).toBe(false)
+    finish(); await pending
+    expect(h.access.allows(created)).toBe(true)
+    expect(earlierRequest.allows(created)).toBe(false)
+    expect(earlierLease()).toBe(false)
+  })
+  it('grants only the newly created tab under opt-in and detaches it on stop or settings revocation', async () => {
+    const h = fixture(), created = h.page(42), sibling = h.page(7)
+    const attached = new Set<number>()
+    vi.spyOn(debuggerPages, 'attachCreated').mockImplementation(async id => { attached.add(id) })
+    vi.spyOn(debuggerPages, 'ready').mockResolvedValue(true)
+    vi.spyOn(debuggerPages, 'has').mockImplementation(id => attached.has(id))
+    const detach = vi.spyOn(debuggerPages, 'detach').mockImplementation(async id => { attached.delete(id) })
+    await expect(h.access.grantCreated(42, () => false, new AbortController().signal)).rejects.toThrow()
+    expect(debuggerPages.attachCreated).not.toHaveBeenCalled()
+    await h.access.grantCreated(42, () => true, new AbortController().signal)
+    expect(h.access.allows(created)).toBe(true)
+    expect(h.access.allows(sibling)).toBe(false)
+    expect(created.groupId).toBe(50)
+    created.url = 'https://other.example/'; h.access.observe(created)
+    expect(h.access.allows(created)).toBe(true) // This opted-in tab can navigate across HTTP(S) sites.
+    await h.access.revokeAutomatic()
+    expect(detach).toHaveBeenCalledWith(42)
+    expect(h.access.allows(created)).toBe(false)
+  })
+
+  it('never recovers a debugger-created grant after a worker restart', async () => {
+    const h = fixture(), created = h.page(42)
+    vi.spyOn(debuggerPages, 'attachCreated').mockResolvedValue()
+    vi.spyOn(debuggerPages, 'ready').mockResolvedValue(true)
+    vi.spyOn(debuggerPages, 'has').mockReturnValue(true)
+    const detach = vi.spyOn(debuggerPages, 'detach').mockResolvedValue()
+    await h.access.grantCreated(42, () => true, new AbortController().signal)
+    const restarted = new PageAccess(vi.fn()); await restarted.ready
+    expect(detach).toHaveBeenCalledWith(42)
+    expect(restarted.allows(created)).toBe(false)
+    expect((h.data[PAGE_ACCESS_KEY] as { grants: unknown[] }).grants).toEqual([])
+  })
+
+  it('cancels a created-tab grant when opt-in is withdrawn while attaching', async () => {
+    const h = fixture(); h.page(42)
+    let allowed = true
+    vi.spyOn(debuggerPages, 'attachCreated').mockImplementation(async () => { allowed = false })
+    vi.spyOn(debuggerPages, 'ready').mockResolvedValue(true)
+    vi.spyOn(debuggerPages, 'has').mockReturnValue(true)
+    const detach = vi.spyOn(debuggerPages, 'detach').mockResolvedValue()
+    await expect(h.access.grantCreated(42, () => allowed, new AbortController().signal)).rejects.toThrow()
+    expect(h.access.has(42)).toBe(false)
+    expect(detach).toHaveBeenCalledWith(42)
+    expect(chrome.tabs.group).not.toHaveBeenCalled()
+  })
   it('starts denied, groups only native-action grants and excludes other tabs on the same site', async () => {
     const h = fixture(), first = h.page(1), other = h.page(2)
     await h.access.ready

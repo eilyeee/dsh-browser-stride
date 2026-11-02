@@ -23,6 +23,7 @@ import { approvalPromptForCall, originFromUrl } from './authorization.ts'
 import { waitForNextDocumentReady } from './navigation.ts'
 import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
 import { getUiLocale } from '../i18n.ts'
+import { debuggerPages, sendPageMessage } from './debugger-pages.ts'
 
 /** A tool call from the bridge. */
 export interface ToolCall {
@@ -148,6 +149,7 @@ function isInjectablePage(url: string | undefined): boolean {
 
 /** Inject the packaged content script once per tab, coalescing concurrent recovery attempts. */
 async function injectContentScript(tabId: number, frames: TabFrame[]): Promise<void> {
+  if (debuggerPages.has(tabId)) { await debuggerPages.send(tabId, { type: 'DSH_PING' }); return }
   let pending = pendingInjections.get(tabId)
   if (pending === undefined) {
     pending = chrome.scripting.executeScript({
@@ -170,7 +172,7 @@ async function sendAction(
   budget?: ContentBudget,
   includePageDelta: boolean = false,
 ): Promise<unknown> {
-  return chrome.tabs.sendMessage(tabId, {
+  return sendPageMessage(tabId, {
     type: 'DSH_ACTION',
     action: call.name,
     args: withoutFrame(call.args),
@@ -930,6 +932,7 @@ export async function dispatchOpenTab(
   targetStillAllowed: (tabId: number) => boolean,
   commitAction?: () => void,
   keepUnbound = false,
+  authorizeCreatedTab?: (tabId: number) => Promise<void>,
 ): Promise<ToolAnswer> {
   if (isCancelled(call, signal)) return cancelled()
   const parsed = parseHttpUrl(call.args.url)
@@ -991,7 +994,19 @@ export async function dispatchOpenTab(
     return { ok: true, result: { text: `Opened a tab at ${parsed.href}. It has no page access and was not bound. The user must click the DSH Stride toolbar icon on that tab before browser tools can use it.` } }
   }
 
-  const ready = await navigationWait.ready
+  let ready: boolean
+  if (authorizeCreatedTab !== undefined) {
+    navigationWait.cancel()
+    try {
+      await authorizeCreatedTab(tabId)
+      created = await chrome.tabs.get(tabId)
+      ready = true
+    } catch (error) {
+      await removeCreatedTab(tabId)
+      const detail = error instanceof Error ? error.message.slice(0, 300) : 'Automatic control is unavailable.'
+      return isCancelled(call, signal) ? cancelled() : unavailable(`The new tab could not be authorized for automatic control and was closed. ${detail} Check the extension settings and browser debugger status before a new request.`)
+    }
+  } else ready = await navigationWait.ready
   if (isCancelled(call, signal)) {
     await removeCreatedTab(tabId)
     return cancelled()

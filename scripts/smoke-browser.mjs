@@ -530,6 +530,7 @@ try {
   browser = await startExtensionBrowser({
     repoRoot, benchmarkRoot, bridgeUrl: `ws://127.0.0.1:${port}/ext/bridge`,
     deferPairing: true, trustedOrigin: site.origin,
+    chromiumArgs: ['--no-proxy-server', '--host-resolver-rules=MAP stride-auto.test 127.0.0.1, MAP stride-auto-next.test 127.0.0.1'],
   })
   // Exercise the real extension UI, owner HTTP authentication and Host UI.
   // The process launch URL stays inside this isolated temporary profile.
@@ -645,11 +646,69 @@ try {
   await card.getByText('停止中', { exact: true }).waitFor()
   assert.equal(await card.locator('.browser-run-actions').count(), 0)
   await writeFile(`${trigger}.ack-stop`, '', { mode: 0o600 })
+  await waitForPhase('auto-open-ready')
+  await card.getByText('已停止', { exact: true }).waitFor()
+  await browser.panel.getByRole('button', { name: '打开设置', exact: true }).click()
+  const automaticToggle = browser.panel.getByRole('checkbox', { name: '自动控制 DSH 新建页面', exact: false })
+  assert.equal(await automaticToggle.isChecked(), false, 'upgrades do not silently enable debugger control')
+  await automaticToggle.evaluate(input => input.click())
+  assert.equal(await automaticToggle.isChecked(), false, 'synthetic clicks cannot enable automatic control')
+  await automaticToggle.check()
+  await browser.panel.getByRole('button', { name: '保存并连接', exact: true }).click()
+  const automaticOrigin = `http://stride-auto.test:${new URL(site.origin).port}`
+  const automaticInstance = makeTaskInstance('notification_toggle', 1, 'stride-auto-open-smoke', automaticOrigin)
+  const automaticNextUrl = automaticInstance.url.replace('stride-auto.test', 'stride-auto-next.test')
+  await writeFile(`${trigger}.auto-open`, JSON.stringify({ url: automaticInstance.url, nextUrl: automaticNextUrl }), { mode: 0o600 })
+  await browser.panel.getByRole('button', { name: '仅允许这一次', exact: true }).click({ timeout: 20000 }).catch(async () => {
+    const outcome = await readFile(result, 'utf8').then(JSON.parse).catch(() => undefined)
+    const debug = await browser.worker.evaluate(async () => {
+      const saved = await chrome.storage.session.get(['dshPageAccess', 'dshTabAffinity'])
+      return { grants: saved.dshPageAccess?.grants?.map(row => ({ mode: row.mode, grouped: row.groupId !== undefined })),
+        settings: (await chrome.storage.local.get('dshSettings')).dshSettings?.autoControlNewTabs }
+    })
+    throw new Error(`Automatic page action did not request approval: ${JSON.stringify({ outcome, debug })}`)
+  })
+  await waitForPhase('auto-opened')
+  const automaticPage = browser.context.pages().find(page => page.url() === automaticInstance.url)
+  assert.ok(automaticPage, 'DSH opened a new tab without a toolbar grant')
+  assert.equal(await automaticPage.getByRole('checkbox', { name: '邮件通知', exact: true }).isChecked(), true)
+  const automaticGrant = await browser.worker.evaluate(async ({ url, sessionId }) => {
+    const [created] = await chrome.tabs.query({ url })
+    const cached = await chrome.storage.session.get(['dshPageAccess', 'dshTabAffinity'])
+    const grant = cached.dshPageAccess.grants.find(grant => grant.tabId === created.id)
+    const binding = cached.dshTabAffinity.sessionTabs[sessionId]
+    let nativeInjection = false
+    try { await chrome.scripting.executeScript({ target: { tabId: created.id }, func: () => document.title }); nativeInjection = true } catch {}
+    return { mode: grant?.mode, grouped: created.groupId >= 0, bound: binding?.tabId === created.id, nativeInjection }
+  }, { url: automaticInstance.url, sessionId: session.sessionId })
+  assert.deepEqual(automaticGrant, { mode: 'debugger', grouped: true, bound: true, nativeInjection: false })
+  await writeFile(`${trigger}.auto-navigate`, '', { mode: 0o600 })
+  await browser.panel.getByRole('button', { name: '仅允许这一次', exact: true }).click()
+  await waitForPhase('auto-navigated')
+  assert.equal(automaticPage.url(), automaticNextUrl)
+  await browser.panel.getByRole('button', { name: '停止控制此页', exact: true }).click()
+  await browser.panel.waitForFunction(async url => {
+    const [created] = await chrome.tabs.query({ url })
+    const cached = (await chrome.storage.session.get('dshPageAccess')).dshPageAccess
+    return !cached.grants.some(grant => grant.tabId === created.id)
+  }, automaticNextUrl)
+  const stoppedAutomatic = await browser.worker.evaluate(async url => {
+    const [created] = await chrome.tabs.query({ url })
+    const cached = (await chrome.storage.session.get('dshPageAccess')).dshPageAccess
+    let debuggerAttached = true
+    try { await chrome.debugger.sendCommand({ tabId: created.id }, 'Page.getFrameTree') } catch { debuggerAttached = false }
+    return { granted: cached.grants.some(grant => grant.tabId === created.id), grouped: created.groupId >= 0, debuggerAttached }
+  }, automaticNextUrl)
+  assert.equal(stoppedAutomatic.granted, false)
+  assert.equal(stoppedAutomatic.debuggerAttached, false)
+  await writeFile(`${trigger}.auto-verified`, '', { mode: 0o600 })
   const outcome = await waitForResult()
   assert.equal(outcome.ok, true, outcome.error)
-  assert.equal(outcome.calls, 6)
+  assert.equal(outcome.calls, 10)
+  assert.equal(outcome.automaticCalls, 4)
   assert.equal(outcome.blocked, 2)
   assert.equal(outcome.recorded, 6)
+  console.log('Automatic tab control passed: real Host tools opened, bound, grouped, read and clicked a new page without a toolbar action; trusted stop revoked it')
   await card.getByText('已停止', { exact: true }).waitFor()
   assert.equal(await handoffPage.getByRole('checkbox', { name: '邮件通知', exact: true }).isChecked(), true)
   await browser.panel.getByRole('button', { name: '打开设置', exact: true }).click()

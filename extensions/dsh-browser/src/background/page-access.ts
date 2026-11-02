@@ -1,9 +1,10 @@
 import { readPageAccessEpoch, writePageAccessEpoch } from './credential-store.ts'
+import { debuggerPages } from './debugger-pages.ts'
 
-/** Browser action grants access. Group membership, pages and model tools never do. */
+/** Native action or the opted-in newly-created-tab path grants access. Group membership never does. */
 export const PAGE_ACCESS_KEY = 'dshPageAccess'
 export const CONTROL_GROUP_TITLE = 'DSH 控制'
-interface Grant { tabId: number; windowId: number; origin: string; nonce: string; groupId?: number }
+interface Grant { tabId: number; windowId: number; origin: string; nonce: string; groupId?: number; mode?: 'debugger'; pending?: true }
 type Page = Pick<chrome.tabs.Tab, 'id' | 'windowId' | 'url'> & Partial<Pick<chrome.tabs.Tab, 'groupId'>>
 const origin = (url?: string): string | undefined => {
   try { const parsed = new URL(url ?? ''); return /^https?:$/.test(parsed.protocol) ? parsed.origin : undefined } catch { return undefined }
@@ -45,14 +46,19 @@ export class PageAccess {
     const [cached, epoch] = await Promise.all([chrome.storage.session.get(PAGE_ACCESS_KEY), readPageAccessEpoch()])
     this.epoch = epoch
     const value = cached[PAGE_ACCESS_KEY] as { grants?: unknown; epoch?: unknown } | undefined
+    // Debugger sessions are never recovered into authority. Detach only our recorded targets.
+    if (Array.isArray(value?.grants)) for (const row of value.grants) {
+      if (row?.mode === 'debugger' && Number.isSafeInteger(row.tabId) && row.tabId >= 0) await debuggerPages.detach(row.tabId)
+    }
     if (!Array.isArray(value?.grants) || value.epoch !== epoch) return
     let pruned = false
     for (const row of value.grants as Partial<Grant>[]) {
       if (row === null || typeof row !== 'object' || typeof row.tabId !== 'number' || !Number.isSafeInteger(row.tabId) || row.tabId < 0
         || typeof row.windowId !== 'number' || typeof row.origin !== 'string' || origin(row.origin) !== row.origin
-        || typeof row.nonce !== 'string' || row.nonce === ''
+        || typeof row.nonce !== 'string' || row.nonce === '' || (row.mode !== undefined && row.mode !== 'debugger')
         || (row.groupId !== undefined && (typeof row.groupId !== 'number' || !Number.isSafeInteger(row.groupId) || row.groupId < 0))) { pruned = true; continue }
       const grant = row as Grant
+      if (grant.mode === 'debugger') { pruned = true; continue }
       try {
         const native = await chrome.tabs.get(grant.tabId)
         if (native.id !== grant.tabId || native.windowId !== grant.windowId || origin(native.url) !== grant.origin
@@ -66,21 +72,22 @@ export class PageAccess {
       await this.persist()
     }
   }
-  has(tabId: number | undefined): boolean { return !this.restoring && tabId !== undefined && this.grants.has(tabId) }
+  has(tabId: number | undefined): boolean { return !this.restoring && tabId !== undefined && this.grants.has(tabId) && this.grants.get(tabId)?.pending !== true }
   ids(): number[] { return [...this.grants.keys()] }
   allows(tab: Page): boolean {
     const grant = tab.id === undefined ? undefined : this.grants.get(tab.id)
-    return !this.restoring && grant !== undefined && grant.windowId === tab.windowId && grant.origin === origin(tab.url)
+    return !this.restoring && grant !== undefined && grant.pending !== true && grant.windowId === tab.windowId
+      && (grant.mode === 'debugger' ? origin(tab.url) !== undefined && debuggerPages.has(grant.tabId) : grant.origin === origin(tab.url))
       && (grant.groupId === undefined || grant.groupId === tab.groupId)
   }
-  allowsFrame(tabId: number, url: string | undefined): boolean { return !this.restoring && this.grants.get(tabId)?.origin === origin(url) && origin(url) !== undefined }
+  allowsFrame(tabId: number, url: string | undefined): boolean { return this.has(tabId) && this.grants.get(tabId)?.mode !== 'debugger' && this.grants.get(tabId)?.origin === origin(url) && origin(url) !== undefined }
   lease(tabId: number): () => boolean {
-    const captured = this.restoring ? undefined : this.grants.get(tabId)
+    const captured = this.has(tabId) ? this.grants.get(tabId) : undefined
     return () => captured !== undefined && this.grants.get(tabId) === captured
   }
   /** A request cannot inherit a later toolbar grant, including one for the same tab. */
   snapshot(): { allows: (tab: Page) => boolean; current: () => boolean } {
-    const captured = new Map(this.restoring ? [] : this.grants)
+    const captured = new Map(this.restoring ? [] : [...this.grants].filter(([, grant]) => grant.pending !== true))
     return {
       allows: tab => tab.id !== undefined && captured.get(tab.id) === this.grants.get(tab.id) && this.allows(tab),
       current: () => [...captured].every(([tabId, grant]) => this.grants.get(tabId) === grant),
@@ -99,6 +106,7 @@ export class PageAccess {
   /** Called exclusively by chrome.action.onClicked, never by a panel message. */
   async grantFromAction(tab: chrome.tabs.Tab): Promise<void> {
     await this.ready
+    if (tab.id !== undefined && this.grants.get(tab.id)?.mode === 'debugger') return
     const site = origin(tab.url)
     if (tab.id === undefined || site === undefined) throw new Error('page-access-required')
     const grant: Grant = { tabId: tab.id, windowId: tab.windowId, origin: site, nonce: crypto.randomUUID() }
@@ -117,9 +125,40 @@ export class PageAccess {
       throw error
     }
   }
+  /** Only called with the native result of this request's tabs.create, after explicit settings opt-in. */
+  async grantCreated(tabId: number, current: () => boolean, signal: AbortSignal): Promise<void> {
+    await this.ready
+    if (!current() || signal.aborted || this.grants.has(tabId)) throw new Error('Automatic page control was cancelled.')
+    const tab = await chrome.tabs.get(tabId)
+    if (!current() || signal.aborted) throw new Error('Automatic page control was cancelled.')
+    const grant: Grant = { tabId, windowId: tab.windowId, origin: origin(tab.url) ?? 'https://pending.invalid', nonce: crypto.randomUUID(), mode: 'debugger', pending: true }
+    this.grants.set(tabId, grant)
+    const allowed = () => this.grants.get(tabId) === grant && current()
+    try {
+      await this.persist()
+      if (!allowed() || signal.aborted) throw new Error('Automatic page control was cancelled.')
+      await debuggerPages.attachCreated(tabId, allowed)
+      if (!await debuggerPages.ready(tabId, undefined, signal, 8000)) throw new Error('The new page did not become ready for automatic control.')
+      const live = await chrome.tabs.get(tabId)
+      delete grant.pending
+      if (!allowed() || signal.aborted || !this.allows(live)) throw new Error('The new page changed before it could be controlled.')
+      grant.origin = origin(live.url)!
+      if (!live.pinned) await this.joinGroup(grant)
+      if (!allowed() || signal.aborted) throw new Error('Automatic page control was cancelled.')
+      this.changed()
+    } catch (error) {
+      await this.revoke(tabId).catch(() => {})
+      throw error
+    }
+  }
+  async revokeAutomatic(): Promise<void> {
+    await this.ready
+    await Promise.all([...this.grants.values()].filter(grant => grant.mode === 'debugger').map(grant => this.revoke(grant.tabId)))
+  }
   /** Chrome keeps same-origin activeTab grants; Firefox may require another action click. */
   async refresh(tab: Page): Promise<void> {
     if (!this.allows(tab) || tab.id === undefined) return
+    if (this.grants.get(tab.id)?.mode === 'debugger') return
     const lease = this.lease(tab.id)
     try {
       const receiver = await chrome.tabs.sendMessage(tab.id, { type: 'DSH_PING' }, { frameId: 0 }).catch(() => undefined)
@@ -136,6 +175,12 @@ export class PageAccess {
       return
     }
     const grant = this.grants.get(tab.id)
+    // Loading/title events may arrive before debugger attachment. Keep the
+    // staged record private; only window/group escape can revoke it here.
+    if (grant?.pending === true) {
+      if (tab.windowId !== grant.windowId || (grant.groupId !== undefined && tab.groupId !== grant.groupId)) void this.revoke(tab.id).catch(() => {})
+      return
+    }
     if (grant !== undefined && (!this.allows(tab) || (groupChanged && grant.groupId !== undefined && tab.groupId !== grant.groupId))) void this.revoke(tab.id).catch(() => {})
     // Dragging an unapproved page into the group does not grant access.
     else if (grant === undefined && tab.groupId !== undefined && this.groups.get(tab.windowId) === tab.groupId) {
@@ -150,6 +195,7 @@ export class PageAccess {
     const previous = this.grants.get(tabId)
     if (previous === undefined) return Promise.resolve()
     this.grants.delete(tabId)
+    if (previous.mode === 'debugger') void debuggerPages.detach(tabId)
     this.epoch = crypto.randomUUID()
     // Queue durability before notifying other components. An observer failure
     // must not leave a revoked grant in the restart cache. No await occurs here.

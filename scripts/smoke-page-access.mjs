@@ -50,8 +50,10 @@ try {
   const b = await browser.context.newPage(); await b.goto(`${origin}/b`)
   const bId = await activeId(b)
   const unapprovedMetadata = await browser.worker.evaluate(id => chrome.tabs.get(id), bId)
-  assert.equal(unapprovedMetadata.url, undefined, 'unapproved tabs do not expose URLs')
-  assert.equal(unapprovedMetadata.title, undefined, 'unapproved tabs do not expose titles')
+  // Chrome's tabs/debugger permissions are broader than activeTab. Product
+  // authority still requires a native action or an opted-in newly-created tab.
+  assert.equal(unapprovedMetadata.url, `${origin}/b`)
+  assert.equal(unapprovedMetadata.title, 'Synthetic page authorization')
   assert.equal(await nativeCanRead(aId), false, 'native browser permissions deny an unselected tab')
   assert.equal(await nativeCanRead(bId), false)
   assert.equal(await grantCount(), 0)

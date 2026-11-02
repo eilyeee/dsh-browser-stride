@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import { setTimeout as delay } from 'node:timers/promises'
 
 export const name = 'stride-browser-smoke-probe'
-export const inject = ['tools', 'browserRuns']
+export const inject = ['tools', 'browserRuns', 'agents']
 
 export function apply(ctx, config) {
   const controller = new AbortController()
@@ -13,12 +13,13 @@ export function apply(ctx, config) {
   let callNumber = 0
   let blocked = 0
 
-  async function tool(name, args = {}) {
+  async function tool(name, args = {}, agent) {
     const result = await ctx.tools.execute({
       callId: `stride-browser-smoke-${++callNumber}`,
       name,
       arguments: args,
       signal: controller.signal,
+      ...(agent === undefined ? {} : { agent }),
     })
     if (result.isError) throw new Error(`${name}: ${result.error.message}`)
     if (typeof result.value?.text !== 'string') throw new Error(`${name} returned no text`)
@@ -101,7 +102,22 @@ export function apply(ctx, config) {
       assert.notEqual(target[0], records.find(row => row.controlRevision === 0 && row.targetBinding)?.targetBinding)
       assert.equal(ctx.browserRuns.get(active.runId).state, 'stopped')
       assert.equal(ctx.browserRuns.get(active.runId).facts.length, 0, 'transport success must not become business verification')
-      await writeFile(config.result, JSON.stringify({ ok: true, calls: callNumber, recorded: records.length, blocked }), { mode: 0o600 })
+      await writeFile(`${config.result}.phase`, JSON.stringify({ phase: 'auto-open-ready' }), { mode: 0o600 })
+      await waitFor(() => exists(`${config.trigger}.auto-open`), 'new-tab control opt-in')
+      const automatic = JSON.parse(await readFile(`${config.trigger}.auto-open`, 'utf8'))
+      const agent = ctx.agents.get(sessionId)
+      assert.ok(agent, 'the original DSH conversation must still exist')
+      const opened = await tool('browser_open_tab', { url: automatic.url, active: false }, agent)
+      assert.match(opened, /Opened a new background tab/)
+      const snapshot = await tool('browser_snapshot', {}, agent)
+      await tool('browser_click', { elementRef: reference(snapshot, '邮件通知') }, agent)
+      await writeFile(`${config.result}.phase`, JSON.stringify({ phase: 'auto-opened' }), { mode: 0o600 })
+      await waitFor(() => exists(`${config.trigger}.auto-navigate`), 'cross-site automatic page navigation')
+      const navigated = await tool('browser_navigate', { url: automatic.nextUrl }, agent)
+      assert.match(navigated, /Navigation completed/)
+      await writeFile(`${config.result}.phase`, JSON.stringify({ phase: 'auto-navigated' }), { mode: 0o600 })
+      await waitFor(() => exists(`${config.trigger}.auto-verified`), 'new-tab control browser verification')
+      await writeFile(config.result, JSON.stringify({ ok: true, calls: callNumber, recorded: records.length, blocked, automaticCalls: 4 }), { mode: 0o600 })
     } catch (error) {
       await writeFile(config.result, JSON.stringify({ ok: false, error: String(error) }), { mode: 0o600 })
     }

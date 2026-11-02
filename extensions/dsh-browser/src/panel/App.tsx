@@ -808,6 +808,7 @@ export function App(): React.JSX.Element {
         token: '',
         sharePageContent: raw?.sharePageContent ?? 'auto',
         unrestrictedBrowserAccess: raw?.unrestrictedBrowserAccess ?? false,
+        autoControlNewTabs: raw?.autoControlNewTabs ?? false,
         trustedActionOrigins: raw?.trustedActionOrigins ?? [],
         approvalNotifications: raw?.approvalNotifications ?? true,
         autoResumeSession: raw?.autoResumeSession ?? true,
@@ -2024,6 +2025,19 @@ export function App(): React.JSX.Element {
           </label>
         </div>
         <div className="settings-panel preference-toggles">
+          {import.meta.env.EXT_TARGET !== 'firefox' && <label className="setting-toggle">
+            <span className="setting-toggle-copy">
+              <strong>{copy.settings.autoControlNewTabs}</strong>
+              <small>{copy.settings.autoControlNewTabsHelp}</small>
+            </span>
+            <input className="setting-toggle-input" type="checkbox"
+              checked={settings?.autoControlNewTabs ?? false}
+              onChange={event => {
+                if (!event.nativeEvent.isTrusted) return
+                setSettings(current => current === null ? current : { ...current, autoControlNewTabs: event.target.checked })
+              }} />
+            <span className="setting-toggle-control" aria-hidden="true"><span /></span>
+          </label>}
           <label className="setting-toggle">
             <span className="setting-toggle-copy">
               <strong>{copy.settings.unrestrictedBrowserAccess}</strong>
@@ -2193,7 +2207,7 @@ export function App(): React.JSX.Element {
           ))}
         </section>
         <div className="settings-actions">
-          <button className="primary" disabled={pairingBusy || unpairingConnection} onClick={saveSettings}>{copy.settings.save}</button>
+          <button className="primary" disabled={pairingBusy || unpairingConnection} onClick={event => { if (event.nativeEvent.isTrusted) void saveSettings() }}>{copy.settings.save}</button>
           <button className="secondary" onClick={() => {
             void api.cancelBrowserPairing().catch(() => {})
             setShowSettings(false)

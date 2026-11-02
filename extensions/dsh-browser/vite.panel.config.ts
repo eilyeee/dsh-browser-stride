@@ -1,10 +1,11 @@
 import { resolve } from 'node:path'
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
-import { outDir, sharedPlugins } from './vite.shared.ts'
+import { browserTarget, outDir, sharedPlugins } from './vite.shared.ts'
 
 /** Side panel: React application (html entry). */
 export default defineConfig({
+  define: { 'import.meta.env.EXT_TARGET': JSON.stringify(browserTarget) },
   plugins: [react(), ...sharedPlugins],
   build: {
     outDir,

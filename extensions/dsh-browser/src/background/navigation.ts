@@ -5,6 +5,8 @@
  * @module
  */
 
+import { debuggerPages } from './debugger-pages.ts'
+
 /** Default ceiling for replacing a model-driven snapshot round trip. */
 const NAVIGATION_READY_TIMEOUT_MS = 8_000
 
@@ -25,6 +27,15 @@ export function waitForNextDocumentReady(
   signal?: AbortSignal,
   timeoutMs: number = NAVIGATION_READY_TIMEOUT_MS,
 ): NavigationWait {
+  if (debuggerPages.has(tabId)) {
+    const controller = new AbortController()
+    const cancel = () => controller.abort()
+    if (signal?.aborted) cancel()
+    signal?.addEventListener('abort', cancel, { once: true })
+    const ready = debuggerPages.ready(tabId, previousDocumentId, controller.signal, timeoutMs)
+      .finally(() => { signal?.removeEventListener('abort', cancel) })
+    return { ready, cancel }
+  }
   let finish: (ready: boolean) => void = () => {}
   const ready = new Promise<boolean>((resolve) => {
     let settled = false

@@ -9,6 +9,8 @@
     "sidePanel",
     "storage",
     "activeTab",
+    "debugger",
+    "tabs",
     "scripting",
     "alarms",
     "notifications",

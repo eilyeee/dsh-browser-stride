@@ -10,6 +10,7 @@
  */
 
 import type { ContentBudget } from './tools.ts'
+import { debuggerPages } from './debugger-pages.ts'
 
 /** A live document frame in one tab. Main frame id is always zero. */
 export interface TabFrame {
@@ -29,6 +30,7 @@ const MAIN_FRAME_SHARE = 0.8
  * unavailable or the tab is between navigations.
  */
 export async function listTabFrames(tabId: number, mainUrl: string | undefined): Promise<TabFrame[]> {
+  if (debuggerPages.has(tabId)) return debuggerPages.frames(tabId).catch(() => [])
   try {
     const discovered = await chrome.webNavigation?.getAllFrames({ tabId })
     if (discovered !== null && discovered !== undefined && discovered.length > 0) {

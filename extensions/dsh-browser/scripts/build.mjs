@@ -1,7 +1,7 @@
 /**
- * Build all three extension targets sequentially into dist/ (or dist-firefox/
+ * Build all four extension targets sequentially into dist/ (or dist-firefox/
  * with --firefox):
- * background (es|iife) → content (iife) → panel (React). The first target
+ * background (es|iife) → content (iife) → debugger content (iife) → panel (React). The first target
  * cleans the output; the later ones append. Pass --watch for dev rebuilds.
  */
 
@@ -19,6 +19,7 @@ if (process.argv.includes('--firefox')) {
 const configs = [
   'vite.background.config.ts',
   'vite.content.config.ts',
+  'vite.debugger-content.config.ts',
   'vite.panel.config.ts',
 ]
 
