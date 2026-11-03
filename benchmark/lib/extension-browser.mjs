@@ -88,6 +88,11 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
     }, { configuredBridgeUrl: bridgeUrl, configuredPairingCode: pairingCode, configuredOrigin: trustedOrigin, timeoutMs: connectTimeoutMs, deferred: deferPairing })
     async function authorizePage(page = target) {
       await page.bringToFront()
+      const previousNonce = await worker.evaluate(async expected => {
+        const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true })
+        const grants = (await chrome.storage.session.get('dshPageAccess')).dshPageAccess?.grants ?? []
+        return tab?.url === expected ? grants.find(grant => grant.tabId === tab.id)?.nonce : undefined
+      }, page.url())
       const cdp = await context.browser().newBrowserCDPSession()
       try {
         // The browser's native extension action grants activeTab. A worker or
@@ -98,11 +103,13 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
         await cdp.send('Extensions.triggerAction', { id: extensionId, targetId: tab.targetId })
         const deadline = Date.now() + 10000
         while (Date.now() < deadline) {
-          const allowed = await worker.evaluate(async expected => {
+          const allowed = await worker.evaluate(async ({ expected, previousNonce }) => {
             const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true })
             const grants = (await chrome.storage.session.get('dshPageAccess')).dshPageAccess?.grants ?? []
-            return tab?.url === expected && grants.some(grant => grant.tabId === tab.id && grant.origin === new URL(expected).origin && (grant.groupId !== undefined || tab.pinned))
-          }, page.url())
+            return tab?.url === expected && grants.some(grant => grant.tabId === tab.id && grant.origin === new URL(expected).origin
+              && (grant.nonce !== previousNonce || grant.mode === 'debugger')
+              && grant.pending !== true && grant.groupId !== undefined && grant.groupId === tab.groupId)
+          }, { expected: page.url(), previousNonce })
           if (allowed) return
           await page.waitForTimeout(50)
         }

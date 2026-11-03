@@ -32,12 +32,12 @@ describe('browser locale selection', () => {
 
   it('provides localized panel and prompt copy in both languages', () => {
     expect(PANEL_COPY.en.app.newSession).toBe('New chat')
-    expect(PANEL_COPY.en.app.overviewPage).toBe('Give me an overview')
+    expect(PANEL_COPY.en.app.overviewPage).toBe('Summarize the selected page')
     expect(PANEL_COPY.en.approval.allowOnce).toBe('Allow once')
     expect(PANEL_COPY.en.settings.unrestrictedBrowserAccess).toBe('Skip action confirmations on authorized pages')
     expect(PANEL_COPY.en.app.overviewPrompt).toMatch(/^First give me an overview/)
     expect(PANEL_COPY.zh.app.newSession).toBe('新对话')
-    expect(PANEL_COPY.zh.app.overviewPage).toBe('先概览这个页面')
+    expect(PANEL_COPY.zh.app.overviewPage).toBe('先概览选定的页面')
     expect(PANEL_COPY.zh.approval.allowOnce).toBe('仅允许这一次')
     expect(PANEL_COPY.zh.settings.unrestrictedBrowserAccess).toBe('已授权页面内免确认操作')
   })

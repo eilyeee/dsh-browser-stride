@@ -78,7 +78,7 @@ Host 仅凭完全匹配的原连接、会话、控制版本和页面绑定暂停
 
 已认证的浏览器连接可用 `bridge.browserRuns.list` 读取 `{ sessionId }` 的状态摘要，并用 `bridge.browserRuns.control` 提交 `{ sessionId, runId, expectedVersion, control }`。控制只接受 `pause` 和 `stop`。Host 检查会话归属和记录版本；仍在排队的控制随其原连接失效。这些接口不会创建任务、授予浏览器权限、记录事实或恢复执行。
 
-可选的摘要字段 `canRetarget` 为无需恢复、没有等待中、未决或失败写入的暂停任务提供「在已绑定页面继续」。用户先在会话上方绑定目标页面，再点击按钮。worker 检查界面所示的绑定版本和原生目标，生成不透明标识，再以 `{ sessionId, runId, expectedVersion, controlRevision, targetBinding }` 调用 `bridge.browserRuns.retarget`；普通侧栏 RPC 转发不能调用它。Host 检查归属和版本，先登记属于原连接的目标，再持久化 `running`，控制版本按 `target_changed` 和 `resume` 增加两次。旧上下文保持失效，可信 Host 代码须进入新的 `withExecution` 上下文接手；这不会自动启动执行器或续接普通聊天。结果不明确时只刷新状态。线协议仍为 v4；兼容的旧 Host 不提供此能力，旧侧栏忽略该字段。
+可选的摘要字段 `canRetarget` 为无需恢复、没有等待中、未决或失败写入的暂停任务提供「在已绑定页面继续」。用户先在会话上方选择分组内已授权的页面，再点击按钮。worker 检查界面所示的绑定版本和原生目标，生成不透明标识，再以 `{ sessionId, runId, expectedVersion, controlRevision, targetBinding }` 调用 `bridge.browserRuns.retarget`；普通侧栏 RPC 转发不能调用它。Host 检查归属和版本，先登记属于原连接的目标，再持久化 `running`，控制版本按 `target_changed` 和 `resume` 增加两次。旧上下文保持失效，可信 Host 代码须进入新的 `withExecution` 上下文接手；这不会自动启动执行器或续接普通聊天。结果不明确时只刷新状态。线协议仍为 v4；兼容的旧 Host 不提供此能力，旧侧栏忽略该字段。
 
 侧栏在打开且连接时每两秒刷新一次摘要，最多返回 20 项，未结束任务优先，并附总数；不返回判据、事实、页面证据或参数。版本冲突或回复不明确时只重新读取状态，不自动重试控制命令。「停止中」表示执行器尚未确认停止。普通聊天只有在可信 Host 代码创建运行后才出现任务卡片，聊天原有的取消按钮仍单独控制 Agent。
 

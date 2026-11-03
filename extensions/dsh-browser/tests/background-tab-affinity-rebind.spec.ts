@@ -39,7 +39,7 @@ function tab(tabId: number): chrome.tabs.Tab {
     autoDiscardable: true,
     frozen: false,
     lastAccessed: 0,
-    groupId: -1,
+    groupId: 50,
     windowId: 1,
     title: `Tab ${tabId}`,
     url: `https://example.com/${tabId}`,
@@ -150,6 +150,27 @@ describe('background tab-affinity rebind protocol', () => {
     expect(h.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity', state: expect.objectContaining({ detached: true, controlled: null }) }))
     h.onMessage.emit({ type: 'session.active', sessionId: 'selected', isNew: true })
     await vi.waitFor(() => expect(h.postMessage.mock.calls.filter(([m]) => m.type === 'tab-affinity').at(-1)![0].state).toMatchObject({ detached: true, controlled: null }))
+  })
+
+  it('binds new chats and explicit selections only to authorized group pages while human browsing stays separate', async () => {
+    const h = await connectPanelForTest()
+    h.query.mockResolvedValue([{ ...tab(99), groupId: -1 }])
+    h.onMessage.emit({ type: 'session.active', sessionId: 'group-session', isNew: true })
+    await vi.waitFor(() => expect(h.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity', state: expect.objectContaining({ controlled: expect.objectContaining({ tabId: 1 }) }) })))
+    const state = () => h.postMessage.mock.calls.map(([m]) => m).filter(m => m.type === 'tab-affinity').at(-1).state
+    const revision = state().revision
+    h.onMessage.emit({ type: 'tab-affinity.rebind', id: 'choose-background', sessionId: 'group-session', revision, tabId: 2 })
+    await vi.waitFor(() => expect(h.postMessage).toHaveBeenCalledWith({ type: 'tab-affinity.rebind.result', id: 'choose-background', ok: true }))
+    expect(state().controlled.tabId).toBe(2)
+    h.onMessage.emit({ type: 'tab-affinity.rebind', id: 'outside-group', sessionId: 'group-session', revision: state().revision, tabId: 99 })
+    await vi.waitFor(() => expect(h.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity.rebind.result', id: 'outside-group', ok: false })))
+    expect(state().controlled.tabId).toBe(2)
+    h.onMessage.emit({ type: 'tab-affinity.response', revision: state().revision, decision: 'follow', sessionId: 'group-session' })
+    h.onMessage.emit({ type: 'request-status' })
+    expect(state().controlled.tabId).toBe(2)
+    h.onMessage.emit({ type: 'tab-affinity.rebind', id: 'stale-selection', sessionId: 'group-session', revision, tabId: 1 })
+    await vi.waitFor(() => expect(h.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity.rebind.result', id: 'stale-selection', ok: false, error: expect.objectContaining({ code: 'stale-binding' }) })))
+    expect(state().controlled.tabId).toBe(2)
   })
 
   it('acknowledges only after control has moved to the freshly queried active tab', async () => {

@@ -30,31 +30,14 @@ export interface PanelCopy {
     overflow: (shown: string[], total: number) => string
   }
   pageAccess: { required: string; granted: string; revoke: string; failed: string }
-  tabHandoff: {
-    eyebrow: string
-    assistant: string
-    you: string
-    unknownTab: string
-    closedTab: string
-    questionTitle: string
-    questionBody: (controlled: string, active: string) => string
-    keep: string
-    keepAlways: string
-    follow: string
-    backgroundTitle: (controlled: string) => string
-    backgroundBody: (active: string) => string
-    pinnedBody: (active: string) => string
-    askAgain: string
-    followCurrent: string
-    lostTitle: string
-    lostBody: string
-    useCurrent: string
-    boundTitle: string
-    unbind: string
-    unbinding: string
-    detachedTitle: string
-    detachedBody: string
-    unboundTab: string
+  controlGroup: {
+    title: string
+    body: string
+    page: string
+    choose: string
+    empty: string
+    selecting: string
+    failed: string
   }
   question: {
     eyebrow: string
@@ -277,7 +260,7 @@ const EN: PanelCopy = {
       browser_navigate: 'Open page',
       browser_open_tab: 'Open new tab',
       browser_list_tabs: 'List open tabs',
-      browser_follow_tab: 'Follow tab',
+      browser_follow_tab: 'Select group page',
       browser_close_tab: 'Close tab',
       browser_back: 'Go back',
       browser_forward: 'Go forward',
@@ -287,32 +270,15 @@ const EN: PanelCopy = {
     },
     overflow: (shown, total) => `${shown.join(' → ')} → ${total - shown.length} more`,
   },
-  pageAccess: { required: 'Click the DSH Stride toolbar icon on a page to authorize that tab. Switching tabs does not grant access.', granted: 'The target page is authorized. Moving other tabs into the DSH 控制 group does not authorize them.', revoke: 'Stop controlling this page', failed: 'Stopping page control was not confirmed. Reload the extension and check page access.' },
-  tabHandoff: {
-    eyebrow: 'Page handoff',
-    assistant: 'Assistant',
-    you: 'You',
-    unknownTab: 'Untitled tab',
-    closedTab: 'Closed tab',
-    questionTitle: 'Follow your current page?',
-    questionBody: (controlled, active) => `It is still bound to “${controlled}”, while you moved to “${active}”. Browser actions are paused until you choose.`,
-    keep: 'Stay on original',
-    keepAlways: 'Stay & stop asking',
-    follow: 'Follow current page',
-    backgroundTitle: () => 'Assistant stays on the original page',
-    backgroundBody: (active) => `You are viewing “${active}”. Future browser actions still run on the original page.`,
-    pinnedBody: (active) => `You are viewing “${active}”. Future browser actions still run on the original page, and switching tabs will not ask again.`,
-    askAgain: 'Ask on tab switch',
-    followCurrent: 'Follow current page',
-    boundTitle: 'Bound page',
-    unbind: 'Unbind page',
-    unbinding: 'Unbinding…',
-    detachedTitle: 'Page unbound',
-    detachedBody: 'Select a page explicitly before using browser tools again. Your conversation and DSH pairing are kept.',
-    unboundTab: 'No bound page',
-    lostTitle: 'The controlled tab was closed',
-    lostBody: 'Browser actions are paused to avoid operating the wrong page.',
-    useCurrent: 'Use current page',
+  pageAccess: { required: 'Click the DSH Stride toolbar icon on an unpinned page to authorize it and add it to the DSH control group.', granted: 'The target page is authorized. Moving other tabs into the DSH 控制 group does not authorize them.', revoke: 'Stop controlling this page', failed: 'Stopping page control was not confirmed. Reload the extension and check page access.' },
+  controlGroup: {
+    title: 'DSH control group',
+    body: 'DSH uses authorized pages in its group. Switching your tabs does not change its target.',
+    page: 'Control-group page',
+    choose: 'Select a group page',
+    empty: 'No group page is authorized. Click the toolbar icon on an unpinned page to add it.',
+    selecting: 'Selecting group page…',
+    failed: 'Page selection was not confirmed. Check the selected group page and try again.',
   },
   question: {
     eyebrow: 'Waiting for your answer',
@@ -436,10 +402,10 @@ const EN: PanelCopy = {
     deleteSessionConfirm: (title) => `Delete “${title}”? Its conversation history will be removed permanently.`,
     deleteSessionFailed: (reason) => `Delete failed: ${reason}`,
     deletePurgeFailed: (reason) => `Removed from the list, but file cleanup failed (it may reappear after dsh restarts): ${reason}`,
-    emptyTitle: 'Hand me the current page',
+    emptyTitle: 'Work with pages in the DSH group',
     emptyDescription: 'I can read the page, find information, and click, fill, or navigate for you.',
-    overviewPage: 'Give me an overview',
-    overviewPrompt: 'First give me an overview of the current page, tell me the most important information, and wait for my next instruction.',
+    overviewPage: 'Summarize the selected page',
+    overviewPrompt: 'First give me an overview of the selected authorized group page, tell me the most important information, and wait for my next instruction.',
     assistant: 'Assistant',
     assistantWorking: 'Assistant is working',
     organizingResults: 'Organizing results',
@@ -546,7 +512,7 @@ const ZH: PanelCopy = {
       browser_navigate: '打开页面',
       browser_open_tab: '打开新标签页',
       browser_list_tabs: '列出标签页',
-      browser_follow_tab: '跟随标签页',
+      browser_follow_tab: '选择分组页面',
       browser_close_tab: '关闭标签页',
       browser_back: '返回上一页',
       browser_forward: '前进下一页',
@@ -556,32 +522,15 @@ const ZH: PanelCopy = {
     },
     overflow: (shown, total) => `${shown.join(' → ')} 等${total}个工具`,
   },
-  pageAccess: { required: '请在目标页面点击工具栏上的 DSH Stride 图标授权此页。切换标签页不会自动授权。', granted: '目标页面已授权。手动拖入「DSH 控制」分组不会自动授权其他页面。', revoke: '停止控制此页', failed: '停止控制的结果尚未确认，请重新加载扩展后核对页面授权。' },
-  tabHandoff: {
-    eyebrow: '页面交接',
-    assistant: '助手',
-    you: '你',
-    unknownTab: '未命名标签页',
-    closedTab: '已关闭的标签页',
-    questionTitle: '助手要跟随当前页面吗？',
-    questionBody: (controlled, active) => `助手仍绑定“${controlled}”，你刚切到“${active}”。选择前，浏览器操作会暂停。`,
-    keep: '留在原页面',
-    keepAlways: '留在原页面并不再询问',
-    follow: '跟随当前页面',
-    backgroundTitle: () => '助手仍在原页面',
-    backgroundBody: (active) => `你正在查看“${active}”，后续浏览器操作仍会在原页面执行。`,
-    pinnedBody: (active) => `你正在查看“${active}”，后续浏览器操作仍会在原页面执行；切换标签页时不会再询问。`,
-    askAgain: '切换标签页时重新询问',
-    followCurrent: '改为跟随当前页',
-    boundTitle: '当前绑定页面',
-    unbind: '解绑页面',
-    unbinding: '正在解绑…',
-    detachedTitle: '页面已解绑',
-    detachedBody: '重新选择页面后才能继续浏览器操作。会话和 DSH 配对保留。',
-    unboundTab: '未绑定页面',
-    lostTitle: '受控标签页已关闭',
-    lostBody: '为避免操作错页，浏览器操作已暂停。',
-    useCurrent: '使用当前页面',
+  pageAccess: { required: '请在未固定的目标页面点击工具栏上的 DSH Stride 图标，将它授权并加入「DSH 控制」分组。', granted: '目标页面已授权。手动拖入「DSH 控制」分组不会自动授权其他页面。', revoke: '停止控制此页', failed: '停止控制的结果尚未确认，请重新加载扩展后核对页面授权。' },
+  controlGroup: {
+    title: 'DSH 控制分组',
+    body: 'DSH 只操作分组内已授权的页面。你切换标签页时，控制目标保持不变。',
+    page: '分组内的控制页面',
+    choose: '选择分组内页面',
+    empty: '还没有已授权的分组页面。请在未固定的页面点击工具栏图标添加。',
+    selecting: '正在选择分组页面…',
+    failed: '选页结果尚未确认，请核对分组内的控制页面后重试。',
   },
   question: {
     eyebrow: '等待你的回答',
@@ -705,10 +654,10 @@ const ZH: PanelCopy = {
     deleteSessionConfirm: (title) => `确定删除「${title}」吗？对话历史将被永久移除。`,
     deleteSessionFailed: (reason) => `删除失败：${reason}`,
     deletePurgeFailed: (reason) => `已从列表移除，但文件清理失败（dsh 重启后可能再次出现）：${reason}`,
-    emptyTitle: '把当前页面交给我',
+    emptyTitle: '在 DSH 分组里处理网页',
     emptyDescription: '我可以阅读页面、查找信息，也可以替你点击、填写和导航。',
-    overviewPage: '先概览这个页面',
-    overviewPrompt: '请先概览当前页面，告诉我最重要的信息，并等待我的下一步指令。',
+    overviewPage: '先概览选定的页面',
+    overviewPrompt: '请先概览已选定的分组内授权页面，告诉我最重要的信息，并等待我的下一步指令。',
     assistant: '助手',
     assistantWorking: '助手正在处理',
     organizingResults: '正在整理结果',

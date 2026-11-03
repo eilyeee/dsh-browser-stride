@@ -1,16 +1,7 @@
 /**
- * Pure state machine for binding browser tools to one user-visible tab.
- *
- * The controller deliberately separates Chrome event handling from the
- * affinity rules so transitions can be tested without a browser runtime.
- * A manual tab switch never silently changes the tool target: it creates a
- * handoff decision, and tool dispatch remains blocked until the user chooses.
- * `keep-always` is the one way out of that per-switch prompt: it pins the
- * controlled tab so later switches resolve straight to `background` instead of
- * asking again, and `ask-again` reverses it without disturbing the binding.
- * Pinning never widens what the tools may touch — the target is still exactly
- * the tab the user already approved — and any change of binding clears it.
- *
+ * Session targets remain on explicitly authorized group pages. Human tab/window
+ * focus is metadata only: it never pauses tools or changes their selected page.
+ * Native page authorization is checked separately at dispatch.
  * @module
  */
 
@@ -22,23 +13,13 @@ export interface AffinityTab {
   url: string
 }
 
-export type TabAffinityStatus = 'unbound' | 'following' | 'handoff' | 'background' | 'lost'
-export type TabAffinityDecision = 'keep' | 'follow' | 'keep-always' | 'ask-again'
-
-/** Narrow an untrusted panel message field to a decision. */
-export function isTabAffinityDecision(value: unknown): value is TabAffinityDecision {
-  return value === 'keep' || value === 'follow'
-    || value === 'keep-always' || value === 'ask-again'
-}
-
+export type TabAffinityStatus = 'unbound' | 'following' | 'background' | 'lost'
 /** Serializable state sent from the service worker to every side panel. */
 export interface TabAffinityState {
   revision: number
   status: TabAffinityStatus
   controlled: AffinityTab | null
   active: AffinityTab | null
-  /** True once the user chose `keep-always`; tab switches stop prompting. */
-  pinned: boolean
   /** Explicit user revocation, distinct from a closed tab. */
   detached?: true
 }
@@ -46,7 +27,6 @@ export interface TabAffinityState {
 export type TabTargetResolution =
   | { kind: 'initial' }
   | { kind: 'target'; tab: AffinityTab }
-  | { kind: 'handoff' }
   | { kind: 'lost' }
 
 function sameTab(left: AffinityTab | null, right: AffinityTab | null): boolean {
@@ -60,8 +40,6 @@ function sameTab(left: AffinityTab | null, right: AffinityTab | null): boolean {
 export class TabAffinityController {
   private controlled: AffinityTab | null = null
   private active: AffinityTab | null = null
-  private keptActiveTabId: number | null = null
-  private pinned = false
   private hasBound = false
   private lost = false
   private revision = 0
@@ -76,7 +54,6 @@ export class TabAffinityController {
       status: this.status(),
       controlled: this.controlled === null ? null : { ...this.controlled },
       active: this.active === null ? null : { ...this.active },
-      pinned: this.pinned,
       ...(this.detached ? { detached: true as const } : {}),
     }
   }
@@ -109,7 +86,7 @@ export class TabAffinityController {
 
   restoreDetached(): void {
     this.controlled = null; this.hasBound = true; this.lost = true; this.detached = true
-    this.pinned = false; this.keptActiveTabId = null; this.revision += 1
+    this.revision += 1
   }
 
   isDetached(sessionId?: string): boolean {
@@ -141,9 +118,7 @@ export class TabAffinityController {
   focusSession(sessionId: string): boolean {
     const previousFocusedSessionId = this.focusedSessionId
     const previousControlled = this.controlled
-    const previousKept = this.keptActiveTabId
     const previousLost = this.lost
-    const previousPinned = this.pinned
     const previousDetached = this.detached
     this.focusedSessionId = sessionId
     const tab = this.sessionTabs.get(sessionId)
@@ -151,30 +126,16 @@ export class TabAffinityController {
     if (this.detached) this.detachedSessions.add(sessionId)
     if (tab === undefined) {
       this.controlled = null
-      this.keptActiveTabId = null
-      this.pinned = false
       this.hasBound = true
       this.lost = true
     } else {
       this.controlled = { ...tab }
       this.hasBound = true
       this.lost = false
-      this.keptActiveTabId = this.active !== null && this.active.tabId !== tab.tabId
-        ? this.active.tabId
-        : null
-      // A pin belongs to the tab it was made for, so it survives re-focusing the
-      // same binding (session resume replays the focused session) and is dropped
-      // only when focus actually moves the controlled tab. Identity here is the
-      // tab id alone, not sameTab(): that compares title and url for change
-      // detection, and a restored session snapshot routinely disagrees with the
-      // live tab on both after the page has navigated.
-      if (previousControlled?.tabId !== this.controlled.tabId) this.pinned = false
     }
     const changed = previousFocusedSessionId !== sessionId
       || !sameTab(previousControlled, this.controlled)
-      || previousKept !== this.keptActiveTabId
       || previousLost !== this.lost
-      || previousPinned !== this.pinned
       || previousDetached !== this.detached
     if (changed) this.revision += 1
     return changed
@@ -184,31 +145,26 @@ export class TabAffinityController {
   observeActive(tab: AffinityTab): boolean {
     const previousActive = this.active
     const previousControlled = this.controlled
-    const previousKept = this.keptActiveTabId
     this.active = { ...tab }
     if (this.controlled?.tabId === tab.tabId) {
       this.controlled = { ...tab }
-      this.keptActiveTabId = null
-    } else if (previousActive?.tabId !== tab.tabId) {
-      this.keptActiveTabId = null
     }
-    return this.bumpIfChanged(previousActive, previousControlled, previousKept)
+    return this.bumpIfChanged(previousActive, previousControlled)
   }
 
   /** Refresh title/URL metadata without interpreting it as a tab switch. */
   observeTab(tab: AffinityTab): boolean {
     const previousActive = this.active
     const previousControlled = this.controlled
-    const previousKept = this.keptActiveTabId
     if (this.active?.tabId === tab.tabId) this.active = { ...tab }
     if (this.controlled?.tabId === tab.tabId) this.controlled = { ...tab }
     for (const [sid, sTab] of this.sessionTabs.entries()) {
       if (sTab.tabId === tab.tabId) this.sessionTabs.set(sid, { ...tab })
     }
-    return this.bumpIfChanged(previousActive, previousControlled, previousKept)
+    return this.bumpIfChanged(previousActive, previousControlled)
   }
 
-  /** Bind the first prompt/direct browser call to the then-active tab. */
+  /** Bind the first prompt/direct call to a separately authorized group page. */
   bindInitial(tab: AffinityTab, sessionId?: string): boolean {
     const sid = sessionId?.trim()
     if (sid !== undefined && sid !== '') {
@@ -217,22 +173,16 @@ export class TabAffinityController {
       this.sessionTabs.set(sid, { ...tab })
       if (this.focusedSessionId === null) this.focusedSessionId = sid
       if (this.focusedSessionId === sid) {
-        this.active = { ...tab }
         this.controlled = { ...tab }
         this.hasBound = true
         this.lost = false
-        this.keptActiveTabId = null
-        this.pinned = false
       }
       this.revision += 1
       return true
     }
     if (this.controlled !== null || this.hasBound || this.lost) return false
-    this.active = { ...tab }
     this.controlled = { ...tab }
     this.hasBound = true
-    this.keptActiveTabId = null
-    this.pinned = false
     this.revision += 1
     return true
   }
@@ -245,10 +195,7 @@ export class TabAffinityController {
     this.sessionTabs.set(sid, { ...tab })
     this.focusedSessionId = sid
     this.detached = false
-    this.active = { ...tab }
     this.controlled = { ...tab }
-    this.keptActiveTabId = null
-    this.pinned = false
     this.hasBound = true
     this.lost = false
     if (!sameTab(previous ?? null, tab)) this.revision += 1
@@ -257,13 +204,11 @@ export class TabAffinityController {
 
   /** Explicitly rebind to the active tab for the named session. */
   rebindActive(tab: AffinityTab, sessionId?: string): boolean {
+    this.active = { ...tab }
     const sid = sessionId?.trim()
     this.detached = false
     if (sid !== undefined) this.detachedSessions.delete(sid)
-    this.active = { ...tab }
     this.controlled = { ...tab }
-    this.keptActiveTabId = null
-    this.pinned = false
     this.hasBound = true
     this.lost = false
     if (sid !== undefined && sid !== '') {
@@ -280,10 +225,6 @@ export class TabAffinityController {
     this.detached = false
     if (sid !== undefined) this.detachedSessions.delete(sid)
     this.controlled = { ...tab }
-    this.keptActiveTabId = this.active !== null && this.active.tabId !== tab.tabId
-      ? this.active.tabId
-      : null
-    this.pinned = false
     this.hasBound = true
     this.lost = false
     if (sid !== undefined && sid !== '') {
@@ -299,19 +240,6 @@ export class TabAffinityController {
     if (this.controlled !== null || this.hasBound || this.lost) return false
     this.controlled = { ...tab }
     this.hasBound = true
-    this.revision += 1
-    return true
-  }
-
-  /**
-   * Rehydrate a `keep-always` choice after an MV3 worker restart.
-   *
-   * Only valid once a controlled tab exists, so a stale pin can never suppress
-   * the handoff prompt for a binding the user has not approved.
-   */
-  restorePinned(): boolean {
-    if (this.controlled === null || this.pinned) return false
-    this.pinned = true
     this.revision += 1
     return true
   }
@@ -349,16 +277,13 @@ export class TabAffinityController {
     }
     const previousActive = this.active
     const previousControlled = this.controlled
-    const previousKept = this.keptActiveTabId
     if (this.controlled?.tabId === tabId) {
       this.controlled = null
-      this.keptActiveTabId = null
-      this.pinned = false
       this.hasBound = true
       this.lost = true
     }
     if (this.active?.tabId === tabId) this.active = null
-    return this.bumpIfChanged(previousActive, previousControlled, previousKept) || sessionRemoved
+    return this.bumpIfChanged(previousActive, previousControlled) || sessionRemoved
   }
 
   /** Transfer tracked identity when Chrome replaces a tab without a user switch. */
@@ -372,60 +297,19 @@ export class TabAffinityController {
       }
     }
     if (this.controlled?.tabId !== removedTabId
-      && this.active?.tabId !== removedTabId
-      && this.keptActiveTabId !== removedTabId) {
+      && this.active?.tabId !== removedTabId) {
       if (sessionReplaced) this.revision += 1
       return sessionReplaced
     }
     const previousActive = this.active
     const previousControlled = this.controlled
-    const previousKept = this.keptActiveTabId
     if (this.controlled?.tabId === removedTabId) {
       this.controlled = { ...this.controlled, tabId: addedTabId }
     }
     if (this.active?.tabId === removedTabId) {
       this.active = { ...this.active, tabId: addedTabId }
     }
-    if (this.keptActiveTabId === removedTabId) this.keptActiveTabId = addedTabId
-    return this.bumpIfChanged(previousActive, previousControlled, previousKept) || sessionReplaced
-  }
-
-  /** Apply a panel choice only if it still describes the visible revision. */
-  decide(decision: TabAffinityDecision, revision: number, sessionId?: string): boolean {
-    if (revision !== this.revision) return false
-    const currentStatus = this.status()
-    if (decision === 'ask-again') {
-      // Undo a pin in place. Dropping keptActiveTabId re-raises the prompt for
-      // the switch the pin was suppressing, so control stays user-confirmed.
-      if (!this.pinned) return false
-      this.pinned = false
-      this.keptActiveTabId = null
-      this.revision += 1
-      return true
-    }
-    if (decision === 'keep' || decision === 'keep-always') {
-      if (currentStatus !== 'handoff' || this.active === null) return false
-      this.keptActiveTabId = this.active.tabId
-      if (decision === 'keep-always') this.pinned = true
-      this.revision += 1
-      return true
-    }
-    if (this.active === null || (currentStatus !== 'background' && currentStatus !== 'lost' && currentStatus !== 'handoff')) {
-      return false
-    }
-    this.controlled = { ...this.active }
-    this.keptActiveTabId = null
-    this.pinned = false
-    this.hasBound = true
-    this.lost = false
-    if (sessionId !== undefined && sessionId.trim() !== '') {
-      this.detachedSessions.delete(sessionId)
-      this.sessionTabs.set(sessionId, { ...this.active })
-      this.focusedSessionId = sessionId
-    }
-    this.detached = false
-    this.revision += 1
-    return true
+    return this.bumpIfChanged(previousActive, previousControlled) || sessionReplaced
   }
 
   /** Resolve whether a tool may run and, if so, which tab owns it. */
@@ -437,7 +321,6 @@ export class TabAffinityController {
     switch (this.status()) {
       case 'unbound': return { kind: 'initial' }
       case 'lost': return { kind: 'lost' }
-      case 'handoff': return { kind: 'handoff' }
       case 'following':
       case 'background':
         return { kind: 'target', tab: { ...this.controlled! } }
@@ -464,19 +347,18 @@ export class TabAffinityController {
   private status(): TabAffinityStatus {
     if (this.controlled === null) return this.lost ? 'lost' : 'unbound'
     if (this.active?.tabId === this.controlled.tabId) return 'following'
-    if (this.active !== null && !this.pinned && this.keptActiveTabId !== this.active.tabId) return 'handoff'
     return 'background'
   }
 
   private bumpIfChanged(
     previousActive: AffinityTab | null,
     previousControlled: AffinityTab | null,
-    previousKept: number | null,
   ): boolean {
     const changed = !sameTab(previousActive, this.active)
       || !sameTab(previousControlled, this.controlled)
-      || previousKept !== this.keptActiveTabId
-    if (changed) this.revision += 1
+    // Switching an unrelated human page cannot stale an in-flight native task
+    // selection. Only selected-page metadata changes advance its revision.
+    if (!sameTab(previousControlled, this.controlled)) this.revision += 1
     return changed
   }
 }

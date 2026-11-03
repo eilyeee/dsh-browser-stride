@@ -13,7 +13,7 @@ import { BRIDGE_SESSION_PURGE_METHOD, DEFAULT_SNAPSHOT_MAX_CHARS } from '@eilyee
 import type { BridgeCaps } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 import type { ServerFrame } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 import type { BridgeState } from '../background/bridge.ts'
-import type { AffinityTab, TabAffinityDecision, TabAffinityState } from '../background/tab-affinity.ts'
+import type { AffinityTab, TabAffinityState } from '../background/tab-affinity.ts'
 import { connectPanel, PanelRpcError, type PanelApi, type PanelSettings, type PageAccessStatus } from './api.ts'
 import { renderMarkdown } from './markdown.ts'
 import whaleUrl from '../../assets/icons/deepseek-256.png'
@@ -387,74 +387,29 @@ function tabLabel(tab: AffinityTab | null, unknownTab: string): string {
   }
 }
 
-export function TabAffinityBanner({
-  state,
-  copy,
-  onDecision,
-  activeAuthorized = true,
-}: {
+export function ControlGroupStatus({ state, pages, copy, onSelect }: {
   state: TabAffinityState | null
+  pages: AffinityTab[]
   copy: PanelCopy
-  onDecision: (decision: TabAffinityDecision) => void
-  activeAuthorized?: boolean
-}): React.JSX.Element | null {
-  if (state === null || state.status === 'unbound') return null
-  const controlled = tabLabel(state.controlled, state.detached ? copy.tabHandoff.unboundTab : copy.tabHandoff.closedTab)
-  const active = tabLabel(state.active, copy.tabHandoff.unknownTab)
-  const lost = state.status === 'lost'
-  const handoff = state.status === 'handoff'
-  const following = state.status === 'following'
-  const title = state.detached ? copy.tabHandoff.detachedTitle : following ? copy.tabHandoff.boundTitle : lost
-    ? copy.tabHandoff.lostTitle
-    : handoff
-      ? copy.tabHandoff.questionTitle
-      : copy.tabHandoff.backgroundTitle(controlled)
-  const body = state.detached ? copy.tabHandoff.detachedBody : following ? controlled : lost
-    ? copy.tabHandoff.lostBody
-    : handoff
-      ? copy.tabHandoff.questionBody(controlled, active)
-      : state.pinned
-        ? copy.tabHandoff.pinnedBody(active)
-        : copy.tabHandoff.backgroundBody(active)
-
-  return (
-    <section className={`tab-affinity ${state.detached ? 'detached' : state.status}`} role={handoff || (lost && !state.detached) ? 'alert' : 'status'}>
-      <div className="tab-affinity-heading">
-        <span className="eyebrow">{copy.tabHandoff.eyebrow}</span>
-        <strong>{title}</strong>
-      </div>
-      {!following && <div className="tab-affinity-route" aria-hidden="true">
-        <span className={`tab-affinity-node ${lost ? 'closed' : 'controlled'}`}>
-          <small>{copy.tabHandoff.assistant}</small>
-          <span title={controlled}>{controlled}</span>
-        </span>
-        <span className="tab-affinity-arrow">→</span>
-        <span className="tab-affinity-node active">
-          <small>{copy.tabHandoff.you}</small>
-          <span title={active}>{active}</span>
-        </span>
-      </div>}
-      <p>{body}</p>
-      <div className="tab-affinity-actions">
-        {handoff && <button className="keep" onClick={() => onDecision('keep')}>{copy.tabHandoff.keep}</button>}
-        {!following && state.active !== null && (
-          <button className="follow" disabled={!activeAuthorized} onClick={event => { if (!state.detached || event.nativeEvent.isTrusted) onDecision('follow') }}>
-            {lost ? copy.tabHandoff.useCurrent : handoff ? copy.tabHandoff.follow : copy.tabHandoff.followCurrent}
-          </button>
-        )}
-        {handoff && (
-          <button className="keep-always" onClick={() => onDecision('keep-always')}>
-            {copy.tabHandoff.keepAlways}
-          </button>
-        )}
-        {!handoff && !lost && state.pinned && (
-          <button className="keep-always" onClick={() => onDecision('ask-again')}>
-            {copy.tabHandoff.askAgain}
-          </button>
-        )}
-      </div>
-    </section>
-  )
+  onSelect: (tabId: number) => Promise<void>
+}): React.JSX.Element {
+  const [selecting, setSelecting] = useState(false)
+  const [selectionError, setSelectionError] = useState('')
+  return <section className="tab-affinity control-group" role="status">
+    <strong>{copy.controlGroup.title}</strong>
+    <p>{copy.controlGroup.body}</p>
+    {pages.length === 0 ? <p>{copy.controlGroup.empty}</p> : <div className="control-group-pages" role="group" aria-label={copy.controlGroup.page}>
+      {pages.map(page => <button key={page.tabId} type="button" data-tab-id={page.tabId}
+        title={page.url} aria-pressed={page.tabId === state?.controlled?.tabId} disabled={selecting}
+        onClick={event => {
+          if (!event.nativeEvent.isTrusted) return
+          setSelecting(true); setSelectionError('')
+          void onSelect(page.tabId).catch(() => setSelectionError(copy.controlGroup.failed)).finally(() => setSelecting(false))
+        }}>{tabLabel(page, copy.controlGroup.choose)}</button>)}
+    </div>}
+    {selecting && <p>{copy.controlGroup.selecting}</p>}
+    {selectionError !== '' && <p role="alert">{selectionError}</p>}
+  </section>
 }
 
 function ApprovalDialog({
@@ -1902,13 +1857,9 @@ export function App(): React.JSX.Element {
     }
   }
 
-  async function decideTabAffinity(decision: TabAffinityDecision): Promise<void> {
+  async function selectGroupPage(tabId: number): Promise<void> {
     if (tabAffinity === null) return
-    try {
-      await api.resolveTabAffinity(tabAffinity.revision, decision, sessionRef.current)
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
-    }
+    await api.rebindTabAffinity({ tabId, revision: tabAffinity.revision, sessionId: sessionRef.current })
   }
 
   function addTrustedOrigin(): void {
@@ -2262,7 +2213,7 @@ export function App(): React.JSX.Element {
           if (event.nativeEvent.isTrusted) void api.revokePageAccess(pageAccess.revocableTabId!).catch(() => setError(copy.pageAccess.failed))
         }}>{copy.pageAccess.revoke}</button>}
       </section>
-      <TabAffinityBanner state={tabAffinity} copy={copy} onDecision={decideTabAffinity} activeAuthorized={pageAccess.activeGranted} />
+      <ControlGroupStatus state={tabAffinity} pages={pageAccess.pages ?? []} copy={copy} onSelect={selectGroupPage} />
       {showSessionPicker && (
         <section className="session-picker" aria-label={copy.app.sessions}>
           <div className="session-picker-head">
@@ -2308,7 +2259,7 @@ export function App(): React.JSX.Element {
       <BrowserRuns api={api} sessionId={sessionRef.current} connected={state === 'connected' && !sessionChanging} copy={copy.runs}
         supportsNewPages={import.meta.env.EXT_TARGET !== 'firefox'}
         {...(automaticControlSaved && tabAffinity !== null ? { newPageRevision: tabAffinity.revision } : {})}
-        {...(pageAccess.activeGranted && tabAffinity?.active !== undefined && tabAffinity.active !== null ? { startRevision: tabAffinity.revision } : {})}
+        {...(pageAccess.controlledGranted && tabAffinity?.controlled !== undefined && tabAffinity.controlled !== null ? { startRevision: tabAffinity.revision } : {})}
         {...(pageAccess.controlledGranted && tabAffinity !== null && (tabAffinity.status === 'following' || tabAffinity.status === 'background') && tabAffinity.controlled !== null ? { targetRevision: tabAffinity.revision } : {})} />
       <div className="messages-pane">
       <div className="messages" ref={scrollRef} onScroll={syncScrollBottom}>

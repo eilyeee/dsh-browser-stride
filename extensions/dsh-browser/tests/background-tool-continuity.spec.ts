@@ -74,7 +74,7 @@ function browserTab(url: string): chrome.tabs.Tab {
     autoDiscardable: true,
     frozen: false,
     lastAccessed: 0,
-    groupId: -1,
+    groupId: 50,
     windowId: 1,
     title: 'Page',
     url,

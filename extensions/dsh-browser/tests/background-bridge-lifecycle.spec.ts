@@ -87,6 +87,7 @@ function mockChrome(options: {
   }))
   const onConnect = chromeEvent<[chrome.runtime.Port]>()
   const actionClick = chromeEvent<[chrome.tabs.Tab]>()
+  const onActivated = chromeEvent<[{ tabId: number; windowId: number }]>()
   const onUpdated = chromeEvent<[number, Parameters<Parameters<typeof chrome.tabs.onUpdated.addListener>[0]>[1], chrome.tabs.Tab]>()
   let pageState = options.authorizedPages === false ? undefined : authorizedExamplePages()[PAGE_ACCESS_KEY]
   const onCommitted = chromeEvent<[{ tabId: number; frameId: number }]>()
@@ -126,13 +127,15 @@ function mockChrome(options: {
         remove: vi.fn(async () => {}),
       },
     },
+    tabGroups: { get: vi.fn(async () => ({ id: 50, windowId: 1 })), update: vi.fn(async () => ({})), query: vi.fn(async () => []) },
     tabs: {
-      get: vi.fn(options.tabGet ?? (async (tabId: number) => ({ id: tabId, windowId: 1, title: 'Tab', url: 'https://example.com/' } as chrome.tabs.Tab))),
-      query: vi.fn(options.tabQuery ?? (async () => [{ id: 1, windowId: 1, title: 'Tab', url: 'https://example.com/' }] as chrome.tabs.Tab[])),
+      group: vi.fn(async () => 50), ungroup: vi.fn(async () => {}),
+      get: vi.fn(options.tabGet ?? (async (tabId: number) => ({ id: tabId, windowId: 1, groupId: 50, title: 'Tab', url: 'https://example.com/' } as chrome.tabs.Tab))),
+      query: vi.fn(options.tabQuery ?? (async () => [{ id: 1, windowId: 1, groupId: 50, title: 'Tab', url: 'https://example.com/' }] as chrome.tabs.Tab[])),
       remove: vi.fn(options.tabRemove ?? (async () => {})),
-      create: vi.fn(options.tabCreate ?? (async () => ({ id: 2, windowId: 1, status: 'complete', url: 'https://example.com/' } as chrome.tabs.Tab))),
+      create: vi.fn(options.tabCreate ?? (async () => ({ id: 2, windowId: 1, groupId: 50, status: 'complete', url: 'https://example.com/' } as chrome.tabs.Tab))),
       sendMessage: vi.fn(options.tabSendMessage ?? (async () => {})),
-      onActivated: chromeEvent<[{ tabId: number; windowId: number }]>(),
+      onActivated,
       onUpdated,
       onReplaced: chromeEvent<[number, number]>(),
       onRemoved: chromeEvent<[number]>(),
@@ -157,7 +160,7 @@ function mockChrome(options: {
       onRemoved: chromeEvent<[number]>(),
     },
   } as unknown as typeof chrome)
-  return { alarms, onConnect, onCommitted, actionClick, onUpdated, tabs: chrome.tabs }
+  return { alarms, onConnect, onCommitted, actionClick, onActivated, onUpdated, tabs: chrome.tabs }
 }
 
 afterEach(() => {
@@ -239,8 +242,9 @@ describe('background bridge lifecycle', () => {
       await vi.waitFor(() => expect(chrome.scripting.executeScript).toHaveBeenCalled())
       panel.onMessage.emit({ type: 'page-access.revoke', id: 'stop-before-task', tabId: 1 })
       await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith({ type: 'page-access.revoke.result', id: 'stop-before-task', ok: true }))
+      panel.postMessage.mockClear()
       h.actionClick.emit(await chrome.tabs.get(1))
-      await vi.waitFor(() => expect(vi.mocked(chrome.scripting.executeScript).mock.calls.length).toBe(2))
+      await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'page-access', activeGranted: true })))
       socket.receive({ t: 'tool.call', id: 'approved-snapshot', name: 'browser_snapshot', args: {}, expiresAt: Date.now() + 10000 })
       await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'approved-snapshot', ok: true })))
       panel.onMessage.emit({ type: 'page-access.revoke', id: 'stop-page', tabId: 1 })
@@ -252,7 +256,7 @@ describe('background bridge lifecycle', () => {
 
   it('requires another Firefox authorization after a new loopback document starts loading', async () => {
     vi.stubEnv('EXT_TARGET', 'firefox')
-    const native = { id: 1, windowId: 1, url: 'http://127.0.0.1:39001/page', title: 'Synthetic loopback page' } as chrome.tabs.Tab
+    const native = { id: 1, windowId: 1, groupId: 50, url: 'http://127.0.0.1:39001/page', title: 'Synthetic loopback page' } as chrome.tabs.Tab
     const h = mockChrome({ authorizedPages: false, localGet: async () => ({ dshSettings: { bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge' } }),
       tabGet: async () => native, tabQuery: async () => [native],
     })
@@ -271,7 +275,7 @@ describe('background bridge lifecycle', () => {
 
   it('does not close a newly reauthorized tab for a request that arrived under its old grant', async () => {
     let waiting = false, hold = false, finish!: (tab: chrome.tabs.Tab) => void
-    const native = { id: 1, windowId: 1, url: 'https://example.com/', title: 'Synthetic page' } as chrome.tabs.Tab
+    const native = { id: 1, windowId: 1, groupId: 50, url: 'https://example.com/', title: 'Synthetic page' } as chrome.tabs.Tab
     const h = mockChrome({ localGet: async () => ({ dshSettings: { bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge', unrestrictedBrowserAccess: true } }),
       tabGet: async id => {
         if (hold && id === 1) { hold = false; waiting = true; return new Promise(resolve => { finish = resolve }) }
@@ -354,7 +358,7 @@ describe('background bridge lifecycle', () => {
     let finish!: () => void
     const hold = new Promise<void>(resolve => { finish = resolve })
     const h = mockChrome({ localGet: async () => ({ dshSettings: { bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge', unrestrictedBrowserAccess: true } }),
-      tabCreate: async () => { await hold; return { id: 2, windowId: 1, status: 'complete', url: 'https://example.com/' } as chrome.tabs.Tab } })
+      tabCreate: async () => { await hold; return { id: 2, windowId: 1, groupId: 50, status: 'complete', url: 'https://example.com/' } as chrome.tabs.Tab } })
     vi.stubGlobal('WebSocket', FakeWebSocket)
     await import('../src/background/index.ts')
     const panel = panelPort(); h.onConnect.emit(panel.port)
@@ -415,7 +419,7 @@ describe('background bridge lifecycle', () => {
 
   it('keeps explicit page revocation after a worker or extension restart, even with stale saved bindings', async () => {
     const h = mockChrome({ localGet: async () => ({ dshDetachedSessions: { sessionIds: ['selected'], detached: true } }),
-      sessionGet: async key => key === 'dshTabAffinity' ? { dshTabAffinity: { controlledTabId: 1, focusedSessionId: 'selected', sessionTabs: { selected: { tabId: 1, windowId: 1, title: 'Tab', url: 'https://example.com/' } } } } : {} })
+      sessionGet: async key => key === 'dshTabAffinity' ? { dshTabAffinity: { controlledTabId: 1, focusedSessionId: 'selected', sessionTabs: { selected: { tabId: 1, windowId: 1, groupId: 50, title: 'Tab', url: 'https://example.com/' } } } } : {} })
     vi.stubGlobal('WebSocket', FakeWebSocket)
     await import('../src/background/index.ts')
     const panel = panelPort(); h.onConnect.emit(panel.port)
@@ -443,6 +447,8 @@ describe('background bridge lifecycle', () => {
     expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'rpc.result', id: 'generic', ok: false }))
     expect(socket.sent).not.toContainEqual(expect.objectContaining({ t: 'rpc', method }))
     const state = panel.postMessage.mock.calls.map(([message]) => message as { type: string; state?: { revision: number } }).filter(message => message.type === 'tab-affinity').at(-1)!.state!
+    fixture.onActivated.emit({ tabId: 99, windowId: 1 })
+    await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity', state: expect.objectContaining({ status: 'background', active: expect.objectContaining({ tabId: 99 }), controlled: expect.objectContaining({ tabId: 1 }), revision: state.revision }) })))
     panel.onMessage.emit({ type: 'browser-run.retarget', id: 'select', sessionId: 'handoff-session', runId: 'run_selected', expectedVersion: 2, controlRevision: start ? 0 : 1,
       affinityRevision: state.revision, ...(start ? { start: true, task: true } : {}), targetBinding: 'forged-panel-value', targetUrl: 'https://forged.test/' })
     await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'rpc', method })))
@@ -853,7 +859,7 @@ describe('background bridge lifecycle', () => {
       }),
       tabGet: async id => {
         if (holdNativeLookup) { lookupStarted = true; return await tabLookup }
-        return { id, windowId: 1, title: 'Tab', url: 'https://example.com/' } as chrome.tabs.Tab
+        return { id, windowId: 1, groupId: 50, title: 'Tab', url: 'https://example.com/' } as chrome.tabs.Tab
       },
     })
     vi.stubGlobal('WebSocket', FakeWebSocket)
@@ -893,7 +899,7 @@ describe('background bridge lifecycle', () => {
     await new Promise((resolve) => { setTimeout(resolve, 0) })
     expect(chrome.storage.local.set).not.toHaveBeenCalled()
 
-    finishTabLookup({ id: 1, windowId: 1, title: 'Tab', url: 'https://example.com/' } as chrome.tabs.Tab)
+    finishTabLookup({ id: 1, windowId: 1, groupId: 50, title: 'Tab', url: 'https://example.com/' } as chrome.tabs.Tab)
     await vi.waitFor(() => {
       expect(socket.sent).toContainEqual({
         t: 'tool.result', action: expect.objectContaining({ actionId: expect.any(String), requestDigest: expect.stringMatching(/^[a-f0-9]{64}$/) }),
@@ -990,7 +996,7 @@ describe('background bridge lifecycle', () => {
       localSet: async (items) => {
         persistedAccess.push((items.dshSettings as { unrestrictedBrowserAccess: boolean }).unrestrictedBrowserAccess)
       },
-      tabGet: async (tabId) => ({ id: tabId, windowId: 1, title: `Tab ${tabId}`, url: `https://example.com/${tabId}` } as chrome.tabs.Tab),
+      tabGet: async (tabId) => ({ id: tabId, windowId: 1, groupId: 50, title: `Tab ${tabId}`, url: `https://example.com/${tabId}` } as chrome.tabs.Tab),
       tabRemove: async (tabId) => {
         if (tabId === 1) await firstClose
       },
@@ -1126,7 +1132,7 @@ describe('background bridge lifecycle', () => {
   })
 
   it.each(['reconnect', 'same-tab rebind', 'same-URL navigation'])('does not persist an old navigation checkpoint after %s', async (change) => {
-    let tab = { id: 1, windowId: 1, title: 'Authorized start page', url: 'https://example.com/blank' } as chrome.tabs.Tab
+    let tab = { id: 1, windowId: 1, groupId: 50, title: 'Authorized start page', url: 'https://example.com/blank' } as chrome.tabs.Tab
     let pauseCheckpoint = false
     let checkpointStarted = false
     let finishCheckpoint!: (tab: chrome.tabs.Tab) => void
@@ -1308,7 +1314,7 @@ describe('background bridge lifecycle', () => {
     let holdTarget = false
     let releaseTarget!: (tabs: chrome.tabs.Tab[]) => void
     const target = new Promise<chrome.tabs.Tab[]>((resolve) => { releaseTarget = resolve })
-    const tab = { id: 1, windowId: 1, title: 'Tab', url: 'https://example.com/' } as chrome.tabs.Tab
+    const tab = { id: 1, windowId: 1, groupId: 50, title: 'Tab', url: 'https://example.com/' } as chrome.tabs.Tab
     const chromeMock = mockChrome({
       localGet: async () => ({
         dshSettings: {
@@ -1317,7 +1323,7 @@ describe('background bridge lifecycle', () => {
           sharePageContent: 'auto',
         },
       }),
-      tabQuery: async (queryInfo) => holdTarget && queryInfo.active === true ? await target : [tab],
+      tabGet: async () => { if (holdTarget) { holdTarget = false; return (await target)[0]! }; return tab },
       tabSendMessage: async (_tabId, message) => (message as { type?: unknown }).type === 'DSH_ACTION'
         ? { ok: true, result: { text: 'Pressed Enter.' } }
         : undefined,
@@ -1345,7 +1351,7 @@ describe('background bridge lifecycle', () => {
       expiresAt: Date.now() + 10_000,
     })
     await vi.waitFor(() => {
-      expect(chromeMock.tabs.query).toHaveBeenCalledWith({ active: true, lastFocusedWindow: true })
+      expect(holdTarget).toBe(false)
     })
 
     panel.onMessage.emit({ type: 'settings', settings: { unrestrictedBrowserAccess: true } })

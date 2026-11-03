@@ -223,6 +223,9 @@ async function verifyPersistentExecutionFence() {
     await new Promise((resolveListen, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolveListen) })
     url = `ws://127.0.0.1:${server.address().port}/ext/bridge`
     await connectPanel()
+    // The previous fixture may have closed its selected group page. Explicitly
+    // select this fixture's authorized target rather than inheriting human focus.
+    await browser.bindSession('session-synthetic-persistent-execution')
     const args = { url: destination }
     const first = await command('synthetic-first-attempt', args)
     assert.equal(first.ok, true, JSON.stringify(first.error))

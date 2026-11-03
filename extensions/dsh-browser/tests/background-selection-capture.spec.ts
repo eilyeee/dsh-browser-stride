@@ -35,7 +35,7 @@ function tab(tabId: number, overrides: Partial<chrome.tabs.Tab> = {}): chrome.ta
     autoDiscardable: true,
     frozen: false,
     lastAccessed: 0,
-    groupId: -1,
+    groupId: 50,
     windowId: 1,
     title: `Tab ${tabId}`,
     url: `https://example.com/${tabId}`,

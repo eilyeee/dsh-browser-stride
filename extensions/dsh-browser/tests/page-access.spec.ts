@@ -188,6 +188,31 @@ describe('native page access and visible control group', () => {
     expect(separateWindow.groupId).not.toBe(first.groupId)
   })
 
+  it.each(['pinned', 'group-failure', 'unsupported'])('does not authorize an ungrouped Chrome page: %s', async reason => {
+    const h = fixture(), tab = h.page(1)
+    if (reason === 'pinned') tab.pinned = true
+    if (reason === 'group-failure') vi.mocked(chrome.tabs.group).mockRejectedValue(new Error('Cannot group'))
+    if (reason === 'unsupported') Object.assign(chrome.tabs, { group: undefined })
+    await expect(h.access.grantFromAction(tab)).rejects.toThrow()
+    expect(h.access.allows(tab)).toBe(false)
+    expect(h.access.has(1)).toBe(false)
+    const restored = new PageAccess(vi.fn()); await restored.ready
+    expect(restored.allows(tab)).toBe(false)
+  })
+
+  it('keeps a pending group grant unavailable until native grouping and persistence finish', async () => {
+    const h = fixture(), tab = h.page(1)
+    let finish!: () => void
+    const update = vi.mocked(chrome.tabGroups.update)
+    update.mockImplementationOnce(() => new Promise(resolve => { finish = () => resolve({} as chrome.tabGroups.TabGroup) }))
+    const grant = h.access.grantFromAction(tab)
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
+    expect(h.access.has(1)).toBe(false)
+    expect(h.access.allows(tab)).toBe(false)
+    finish(); await grant
+    expect(h.access.allows(tab)).toBe(true)
+  })
+
   it('keeps the live document receiver during a late load-complete event', async () => {
     const h = fixture(), tab = h.page(1)
     await h.access.grantFromAction(tab)
@@ -232,7 +257,7 @@ describe('native page access and visible control group', () => {
     await expect(h.access.grantFromAction(h.page(1, 1, 'chrome://settings/'))).rejects.toThrow('page-access-required')
     expect(h.inject).not.toHaveBeenCalled()
     h.inject.mockRejectedValue(new Error('Cannot access contents'))
-    await expect(h.access.grantFromAction(h.page(2))).rejects.toThrow('page-access-required')
+    await expect(h.access.grantFromAction(h.page(2))).rejects.toThrow('Cannot access contents')
     expect(h.access.has(2)).toBe(false)
     expect(chrome.tabs.group).not.toHaveBeenCalled()
   })
@@ -250,11 +275,10 @@ describe('native page access and visible control group', () => {
 
   it('does not restore a grant after revocation storage failed and the worker restarted', async () => {
     const h = fixture(), tab = h.page(1)
-    tab.pinned = true
-    vi.mocked(chrome.tabs.group).mockRejectedValueOnce(new Error('Pinned tabs cannot be grouped'))
     await h.access.grantFromAction(tab)
-    expect(chrome.tabs.group).not.toHaveBeenCalled()
-    expect((h.data[PAGE_ACCESS_KEY] as { grants: Array<{ groupId?: number }> }).grants[0]?.groupId).toBeUndefined()
+    // Keep native group metadata unchanged so the private revocation record,
+    // rather than group exit, must reject the stale session cache.
+    h.ungroup.mockImplementation(async () => {})
     h.set.mockRejectedValueOnce(new Error('session storage unavailable'))
     await expect(h.access.revoke(1)).rejects.toThrow('session storage unavailable')
     const restarted = new PageAccess(vi.fn()); await restarted.ready

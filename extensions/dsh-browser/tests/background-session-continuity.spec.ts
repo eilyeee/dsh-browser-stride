@@ -35,7 +35,7 @@ function tab(id: number, url: string, windowId = 1): chrome.tabs.Tab {
     autoDiscardable: true,
     frozen: false,
     lastAccessed: 0,
-    groupId: -1,
+    groupId: 50,
     windowId,
     title: `Tab ${id}`,
     url,

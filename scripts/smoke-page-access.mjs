@@ -40,6 +40,23 @@ async function rebind(id = 'permission-bind') {
     port.onMessage.addListener(listener); port.postMessage({ type: 'tab-affinity.rebind', id })
   }), id)
 }
+async function affinity() {
+  return browser.panel.evaluate(() => new Promise(done => {
+    const port = window.__dshBenchmarkPort
+    const listener = message => { if (message.type === 'tab-affinity') { port.onMessage.removeListener(listener); done(message.state) } }
+    port.onMessage.addListener(listener); port.postMessage({ type: 'request-status' })
+  }))
+}
+async function triggerAction(page) {
+  await page.bringToFront()
+  const cdp = await browser.context.browser().newBrowserCDPSession()
+  try {
+    const { targetInfos } = await cdp.send('Target.getTargets', { filter: [{ type: 'tab', exclude: false }, { exclude: true }] })
+    const tab = targetInfos.find(value => value.url === page.url())
+    assert.ok(tab)
+    await cdp.send('Extensions.triggerAction', { id: new URL(browser.worker.url()).host, targetId: tab.targetId })
+  } finally { await cdp.detach() }
+}
 try {
   browser = await startExtensionBrowser({ repoRoot: root, benchmarkRoot: join(root, 'benchmark'),
     bridgeUrl: `ws://127.0.0.1:${port}/ext/bridge`, deferPairing: true, trustedOrigin: origin,
@@ -68,6 +85,16 @@ try {
   const snapshot = await browser.worker.evaluate(tabId => chrome.tabs.sendMessage(tabId, { type: 'DSH_ACTION', action: 'browser_snapshot', args: {} }), aId)
   assert.equal(snapshot.ok, true, JSON.stringify(snapshot))
   assert.match(snapshot.result.text, /synthetic-page-marker/)
+  // An unrelated human tab cannot pause or redirect the selected group page.
+  const originalRevision = (await affinity()).revision
+  await b.bringToFront()
+  await wait(async () => (await affinity()).active?.tabId === bId, 'human switched outside group')
+  const background = await affinity()
+  assert.equal(background.controlled.tabId, aId)
+  assert.equal(background.status, 'background')
+  assert.equal(background.revision, originalRevision)
+  assert.equal(await browser.panel.getByRole('button', { name: /跟随|留在原页面/ }).count(), 0)
+  assert.equal(await browser.panel.getByRole('group', { name: '分组内的控制页面' }).getByRole('button').count(), 1, 'only the authorized group page is offered')
   const group = await browser.worker.evaluate(async tabId => (await chrome.tabs.get(tabId)).groupId, aId)
   assert.ok(group >= 0)
   await browser.worker.evaluate(async ({ tabId, groupId }) => { await chrome.tabs.group({ tabIds: tabId, groupId }) }, { tabId: bId, groupId: group })
@@ -77,7 +104,13 @@ try {
   await browser.authorizePage(b)
   assert.equal(await grantCount(), 2)
   assert.equal(await browser.worker.evaluate(async tabId => (await chrome.tabs.get(tabId)).groupId, bId), group)
-  await b.bringToFront(); assert.equal((await rebind('authorized-b')).ok, true)
+  // Select an authorized group member in the actual UI, without following human focus.
+  const groupChoice = browser.panel.locator(`.control-group-pages [data-tab-id="${bId}"]`)
+  await groupChoice.evaluate(button => button.click())
+  await delay(150)
+  assert.equal((await affinity()).controlled.tabId, aId, 'synthetic group selection cannot rebind')
+  await groupChoice.click()
+  await wait(async () => (await affinity()).controlled?.tabId === bId, 'explicit group-page selection')
   const stop = browser.panel.getByRole('button', { name: '停止控制此页', exact: true })
   await stop.waitFor(); await stop.evaluate(button => button.click()); await delay(150)
   assert.equal(await grantCount(), 2, 'synthetic clicks cannot revoke the selected page')
@@ -93,17 +126,22 @@ try {
   await a.reload()
   await wait(async () => (await grantCount()) === 1, 'same-origin reload retains Chrome grant')
   assert.equal(await nativeCanRead(aId), true)
-  // A pinned tab has no group to remove. This isolates durable revocation from
-  // group-based restoration checks when the replaceable session cache fails.
+  // Pinning removes group membership; a new native click cannot bypass group-only control.
   await browser.worker.evaluate(id => chrome.tabs.update(id, { pinned: true }), aId)
   await wait(async () => (await grantCount()) === 0, 'pinning removes the controlled group grant')
-  await browser.authorizePage(a)
+  await triggerAction(a)
+  await delay(200)
+  assert.equal(await grantCount(), 0)
+  assert.equal((await rebind('pinned-cannot-control')).ok, false)
   const pinned = await browser.worker.evaluate(id => chrome.tabs.get(id), aId)
-  assert.equal(pinned.pinned, true, 'page authorization preserves pinning')
+  assert.equal(pinned.pinned, true, 'authorization never changes the human pin preference')
   assert.equal(pinned.groupId, -1)
+  await browser.worker.evaluate(id => chrome.tabs.update(id, { pinned: false }), aId)
+  await browser.authorizePage(a)
   await a.bringToFront(); assert.equal((await rebind('before-cache-fault')).ok, true)
   await browser.worker.evaluate(() => {
     const save = chrome.storage.session.set.bind(chrome.storage.session)
+    chrome.tabs.ungroup = async () => { throw new Error('Synthetic group-cleanup failure') }
     let failed = false
     chrome.storage.session.set = async value => {
       if (!failed && Object.hasOwn(value, 'dshPageAccess')) { failed = true; throw new Error('Synthetic session-cache failure') }
@@ -119,8 +157,6 @@ try {
   assert.equal((await rebind('stale-cache-cannot-restore')).ok, false, 'the private revocation must override the stale session cache')
   await browser.authorizePage(a)
   await a.bringToFront(); assert.equal((await rebind('explicit-grant-after-fault')).ok, true)
-  await browser.worker.evaluate(id => chrome.tabs.update(id, { pinned: false }), aId)
-  await browser.authorizePage(a)
   // A stale/reused tab id can still expose matching metadata under Chrome's
   // tabs permission. Recovery must also verify actual native scripting access.
   const stale = await browser.context.newPage()
@@ -131,8 +167,9 @@ try {
     const cache = (await chrome.storage.session.get('dshPageAccess')).dshPageAccess
     const original = cache.grants.find(grant => grant.tabId === originalId)
     if (original === undefined) throw new Error('Missing original synthetic grant')
-    const { groupId: _group, ...row } = original
-    await chrome.storage.session.set({ dshPageAccess: { ...cache, grants: [{ ...row, tabId: replacementId }] } })
+    chrome.tabs.ungroup = async () => {} // Preserve native group metadata while corrupting only the synthetic cache.
+    await chrome.tabs.group({ tabIds: replacementId, groupId: original.groupId })
+    await chrome.storage.session.set({ dshPageAccess: { ...cache, grants: [{ ...original, tabId: replacementId }] } })
   }, { originalId: aId, replacementId: staleId })
   Object.assign(browser, await browser.restartWorker())
   await stale.bringToFront()
@@ -148,7 +185,7 @@ try {
   assert.equal(await grantCount(), 0, 'browser restart does not restore page grants')
   assert.equal(await nativeCanRead(await activeId(browser.target)), false)
   assert.equal((await browser.worker.evaluate(() => chrome.tabGroups.query({ title: 'DSH 控制' }))).length, 0)
-  console.log('Page permission smoke passed: native activeTab grant, sibling isolation, visible group, no authorization by dragging, trusted stop, cross-origin revocation, Chrome reload, stale-cache revocation, native scripting recheck during worker recovery and browser restart. No model called.')
+  console.log('Page permission smoke passed: native activeTab grant, sibling isolation, visible group, independent human browsing, explicit in-group selection, no human-follow controls, no authorization by dragging, pinned-page denial, trusted stop, cross-origin revocation, Chrome reload, stale-cache revocation, native scripting recheck during worker recovery and browser restart. No model called.')
 } finally {
   await browser?.close().catch(() => {})
   await new Promise(done => site.close(done))

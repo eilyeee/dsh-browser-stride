@@ -149,7 +149,7 @@ describe('panel protocol', () => {
     })
   })
 
-  it('delivers tab-affinity state and sends revision-bound handoff choices', () => {
+  it('delivers a stable control-group target while the human views another page', () => {
     let receive: ((message: unknown) => void) | undefined
     const postMessage = vi.fn()
     const port = {
@@ -163,22 +163,14 @@ describe('panel protocol', () => {
     api.onTabAffinity(listener)
     const state: TabAffinityState = {
       revision: 4,
-      status: 'handoff',
+      status: 'background',
       controlled: { tabId: 1, windowId: 2, title: 'Original', url: 'https://original.example/' },
       active: { tabId: 3, windowId: 2, title: 'Current', url: 'https://current.example/' },
-      pinned: false,
     }
 
     receive?.({ type: 'tab-affinity', state })
-    api.resolveTabAffinity(state.revision, 'follow', 'session-1')
 
     expect(listener).toHaveBeenCalledWith(state)
-    expect(postMessage).toHaveBeenCalledWith({
-      type: 'tab-affinity.response',
-      revision: 4,
-      decision: 'follow',
-      sessionId: 'session-1',
-    })
   })
 
   it('waits for a correlated acknowledgement before completing a tab rebind', async () => {

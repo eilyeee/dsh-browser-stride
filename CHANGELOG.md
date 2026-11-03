@@ -90,8 +90,9 @@ no release version has been assigned yet.
   rechecks native tab/window/origin/group identity and processes startup events.
   Tab-management requests retain their original grants across waits and cannot
   acquire a later authorization. Authorized pages expose Stop control even before
-  binding a task. Pinned pages keep their pinned state, and Firefox loopback
-  navigation requires a fresh grant just like navigation on other sites.
+  binding a task. Native pinning is preserved; Chrome control now requires an
+  unpinned page. Firefox loopback navigation requires a fresh grant just like
+  navigation on other sites.
 
 - Settled browser requests clear their original approval wait even after timeout,
   cancellation or disconnect, so subsequent task time is counted. Reaching the
@@ -268,6 +269,13 @@ no release version has been assigned yet.
   and `CHANGELOG.md`.
 
 ### Changed
+
+- Chrome controls only authorized members of its DSH control group. Human tab
+  switches no longer pause tools, retarget tasks or prompt for a keep/follow
+  choice. The side panel selects from authorized group pages; initial task
+  startup uses that selection even while the user browses elsewhere. Pinned
+  pages must be unpinned first, and failed grouping grants no control. Native
+  page loss and group exit still revoke authority and pause the exact task.
 
 - The workspace is named `dsh-browser-stride`; upstream provenance and the
   source directory layout are preserved.

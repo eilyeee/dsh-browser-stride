@@ -90,9 +90,7 @@ import {
 import { TransientEventCache } from './transient-events.ts'
 import {
   TabAffinityController,
-  isTabAffinityDecision,
   type AffinityTab,
-  type TabAffinityDecision,
 } from './tab-affinity.ts'
 import { bindOpenedTabAffinity } from './open-tab-binding.ts'
 import { FocusedWindowTracker } from './focused-window.ts'
@@ -188,7 +186,7 @@ const TAB_AFFINITY_STORAGE_KEY = 'dshTabAffinity'
 const DETACHED_SESSIONS_STORAGE_KEY = 'dshDetachedSessions'
 
 type StoredTabAffinity = { detached?: true; detachedSessions?: string[] } & (
-  | { controlledTabId: number; keptActiveTabId?: number; pinned?: true; sessionTabs?: Record<string, AffinityTab>; focusedSessionId?: string }
+  | { controlledTabId: number; sessionTabs?: Record<string, AffinityTab>; focusedSessionId?: string }
   | { lost: true; sessionTabs?: Record<string, AffinityTab>; focusedSessionId?: string })
 
 let settings: Settings = { ...SETTINGS_DEFAULTS }
@@ -267,19 +265,19 @@ let lastPersistedDetachment: string | undefined
 let affinityPersistence = Promise.resolve()
 /** Per-session snapshot refreshes preserve prompt ordering without cross-session cancellation. */
 const sessionSnapshotRefreshes = new Map<string, Promise<void>>()
-interface ActiveFollowRefresh {
+interface ActiveTargetRefresh {
   controller: AbortController
   unrestrictedAccess: boolean
   settled: Promise<void>
   settle: () => void
 }
 
-const activeFollowRefreshes = new Map<string, ActiveFollowRefresh>()
+const activeTargetRefreshes = new Map<string, ActiveTargetRefresh>()
 const unbindingSessions = new Set<string>()
 const TAB_AFFINITY_REBIND_TIMEOUT_MS = 10_000
 
 class TabAffinityRebindError extends Error {
-  constructor(readonly code: 'no-active-tab' | 'timeout' | 'cancelled' | 'page-access-required', message: string) {
+  constructor(readonly code: 'no-active-tab' | 'timeout' | 'cancelled' | 'page-access-required' | 'stale-binding', message: string) {
     super(message)
     this.name = 'TabAffinityRebindError'
   }
@@ -461,12 +459,29 @@ function broadcastStatus(): void {
   }
 }
 
+let pageAccessBroadcastRevision = 0
+let controlPages: AffinityTab[] = []
 function broadcastPageAccess(): void {
+  const revision = ++pageAccessBroadcastRevision
   const state = tabAffinity.snapshot()
   const message = { type: 'page-access', activeGranted: pageAccess.has(state.active?.tabId),
     controlledGranted: pageAccess.has(state.controlled?.tabId), controlledTabId: state.controlled?.tabId ?? null,
     revocableTabId: pageAccess.has(state.controlled?.tabId) ? state.controlled!.tabId : pageAccess.has(state.active?.tabId) ? state.active!.tabId : null }
-  for (const port of panelPorts) { try { port.postMessage(message) } catch { /* closed */ } }
+  const post = (pages: AffinityTab[]) => {
+    for (const port of panelPorts) { try { port.postMessage({ ...message, pages }) } catch { /* closed */ } }
+  }
+  // Withdraw revoked choices immediately; native reads cannot restore an older list.
+  post(controlPages.filter(page => pageAccess.has(page.tabId)))
+  void Promise.all(pageAccess.ids().map(async id => {
+    try {
+      const tab = await chrome.tabs.get(id)
+      return pageAccess.allows(tab) ? summarizeTab(tab) : null
+    } catch { return null }
+  })).then(pages => {
+    if (revision !== pageAccessBroadcastRevision) return
+    controlPages = pages.filter((page): page is AffinityTab => page !== null && pageAccess.has(page.tabId))
+    post(controlPages)
+  })
 }
 
 function broadcastTabAffinity(): void {
@@ -721,9 +736,11 @@ function forgetTarget(tabId: number): void {
 
 function selectedTargetIdentity(sessionId?: string): ToolTargetIdentity | undefined {
   const selected = tabAffinity.resolveTarget(sessionId)
+  const active = tabAffinity.snapshot().active
+  const initial = active !== null && pageAccess.has(active.tabId) ? active : controlPages.find(page => pageAccess.has(page.tabId))
   const tab = selected.kind === 'target' ? selected.tab
-    : selected.kind === 'initial' ? tabAffinity.snapshot().active : null
-  return tab === null ? undefined : { tabId: tab.tabId, windowId: tab.windowId, url: tab.url }
+    : selected.kind === 'initial' ? initial : undefined
+  return tab == null ? undefined : { tabId: tab.tabId, windowId: tab.windowId, url: tab.url }
 }
 
 const pageAccessFailure = (): ToolAnswer => ({ ok: false, error: { code: 'content-unavailable', message: 'This page has not been authorized. Open it and click the DSH Stride toolbar icon to grant temporary access to this tab.' } })
@@ -734,7 +751,7 @@ const staleTarget = (): ToolAnswer => ({ ok: false, error: { code: 'action-faile
 /** Pin before receipt storage, approvals or the write queue can await anything. */
 function captureToolTarget(sessionId?: string): ToolTargetLease | ToolAnswer {
   const selected = tabAffinity.resolveTarget(sessionId)
-  if (selected.kind === 'handoff' || selected.kind === 'lost') return affinityFailure(selected.kind)
+  if (selected.kind === 'lost') return affinityFailure(selected.kind)
   const target = selectedTargetIdentity(sessionId)
   if (target !== undefined && !pageAccess.has(target.tabId)) return pageAccessFailure()
   return target === undefined ? affinityFailure('missing') : targetLeases.capture(sessionId, target, () => selectedTargetIdentity(sessionId))
@@ -787,10 +804,6 @@ function storedAffinity(): StoredTabAffinity | null {
   if (state.controlled !== null) {
     return {
       controlledTabId: state.controlled.tabId,
-      ...(state.status === 'background' && state.active !== null
-        ? { keptActiveTabId: state.active.tabId }
-        : {}),
-      ...(state.pinned ? { pinned: true as const } : {}),
       ...(hasSessionTabs ? { sessionTabs } : {}),
       ...focus,
     }
@@ -823,19 +836,8 @@ function persistTabAffinity(strict = false): Promise<void> {
 }
 
 function observeActiveSummary(summary: AffinityTab): void {
-  const previousStatus = tabAffinity.snapshot().status
   if (!tabAffinity.observeActive(summary)) return
   revokeStaleTargetCalls()
-  if (previousStatus !== 'handoff' && tabAffinity.snapshot().status === 'handoff') {
-    const focused = tabAffinity.focusedSession()
-    invalidateSessionTarget(focused ?? undefined)
-    if (focused !== null) {
-      activeFollowRefreshes.get(focused)?.controller.abort()
-      cancelPendingApprovals(focused)
-    } else {
-      cancelPendingApprovals()
-    }
-  }
   persistTabAffinity()
   broadcastTabAffinity()
 }
@@ -886,14 +888,9 @@ async function restoreTabAffinity(): Promise<void> {
     const focusedSessionId = (candidate as { focusedSessionId?: unknown } | undefined)?.focusedSessionId
     const focus = typeof focusedSessionId === 'string' && focusedSessionId.trim() !== '' ? { focusedSessionId } : {}
     if (typeof controlledTabId === 'number' && Number.isInteger(controlledTabId) && controlledTabId >= 0) {
-      const keptActiveTabId = (candidate as { keptActiveTabId?: unknown }).keptActiveTabId
       const sessionTabs = (candidate as { sessionTabs?: Record<string, AffinityTab> }).sessionTabs
       record = {
         controlledTabId,
-        ...(typeof keptActiveTabId === 'number' && Number.isInteger(keptActiveTabId) && keptActiveTabId >= 0
-          ? { keptActiveTabId }
-          : {}),
-        ...((candidate as { pinned?: unknown }).pinned === true ? { pinned: true as const } : {}),
         ...(typeof sessionTabs === 'object' && sessionTabs !== null ? { sessionTabs } : {}),
         ...focus,
       }
@@ -947,16 +944,7 @@ async function restoreTabAffinity(): Promise<void> {
   }
   if (durableUnavailable || durableDetached?.detached === true || record?.detached === true) tabAffinity.restoreDetached()
 
-  // Restore the pin before syncing the active tab: otherwise the sync would
-  // surface a handoff prompt for a switch the user already said not to ask about.
-  if (record !== null && 'pinned' in record && record.pinned === true) tabAffinity.restorePinned()
   await syncActiveTab()
-  if (record !== null && 'keptActiveTabId' in record) {
-    const state = tabAffinity.snapshot()
-    if (state.status === 'handoff' && state.active?.tabId === record.keptActiveTabId) {
-      tabAffinity.decide('keep', state.revision)
-    }
-  }
   persistTabAffinity()
   broadcastTabAffinity()
 }
@@ -1016,12 +1004,24 @@ function refreshPanelResumeHints(): void {
   }
 }
 
-/** Bind at prompt submission so a switch while the model is thinking is visible. */
+/** Choose only a live, authorized control-group page; human focus grants nothing. */
+async function groupTarget(): Promise<chrome.tabs.Tab | undefined> {
+  await pageAccess.ready
+  const state = tabAffinity.snapshot()
+  const ids = [...new Set([state.controlled?.tabId, state.active?.tabId, ...pageAccess.ids()])]
+  for (const id of ids) {
+    if (id === undefined) continue
+    try { const tab = await chrome.tabs.get(id); if (pageAccess.allows(tab)) return tab } catch { /* closed */ }
+  }
+  return undefined
+}
+
+/** Bind a first prompt to an authorized group target, never an unrelated active page. */
 async function ensureInitialTabBinding(sessionId?: string): Promise<boolean> {
   await affinityReady
   if (tabAffinity.resolveTarget(sessionId).kind !== 'initial') return true
   try {
-    const tab = await syncActiveTab()
+    const tab = await groupTarget()
     const summary = tab === undefined ? null : summarizeTab(tab)
     if (summary === null || tab === undefined || !pageAccess.allows(tab)) return false
     if (tabAffinity.bindInitial(summary, sessionId)) {
@@ -1034,21 +1034,15 @@ async function ensureInitialTabBinding(sessionId?: string): Promise<boolean> {
   }
 }
 
-function affinityFailure(kind: 'handoff' | 'lost' | 'missing' | 'detached'): ToolAnswer {
+function affinityFailure(kind: 'lost' | 'missing' | 'detached'): ToolAnswer {
   if (kind === 'detached') return { ok: false, error: { code: 'action-failed', message: 'The user unbound this page. Browser tools cannot rebind it; the user must explicitly select a page in the extension.' } }
-  if (kind === 'handoff') {
-    return {
-      ok: false,
-      error: { code: 'action-failed', message: 'The user switched tabs, so browser operations are paused. In the side panel, choose whether to keep the previous page or follow the current page.' },
-    }
-  }
   if (kind === 'lost') {
     return {
       ok: false,
-      error: { code: 'content-unavailable', message: 'The controlled tab was closed. Select the current page in the side panel before retrying.' },
+      error: { code: 'content-unavailable', message: 'The controlled page is unavailable. Select an authorized control-group page in the side panel before retrying.' },
     }
   }
-  return { ok: false, error: { code: 'no-active-tab', message: 'No active tab is available for browser operations.' } }
+  return { ok: false, error: { code: 'no-active-tab', message: 'No authorized control-group page is selected for browser operations.' } }
 }
 
 /** Resolve one stable tab target without allowing a manual switch to drift it. */
@@ -1056,7 +1050,6 @@ async function resolveToolTab(sessionId?: string): Promise<Pick<chrome.tabs.Tab,
   await affinityReady
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const resolution = tabAffinity.resolveTarget(sessionId)
-    if (resolution.kind === 'handoff') return affinityFailure('handoff')
     if (resolution.kind === 'lost') return affinityFailure('lost')
     if (resolution.kind === 'initial') {
       if (!await ensureInitialTabBinding(sessionId)) return affinityFailure('missing')
@@ -1068,14 +1061,13 @@ async function resolveToolTab(sessionId?: string): Promise<Pick<chrome.tabs.Tab,
       if (summary === null) return affinityFailure('missing')
       if (tabAffinity.observeTab(summary)) broadcastTabAffinity()
       const current = tabAffinity.resolveTarget(sessionId)
-      if (current.kind === 'handoff') return affinityFailure('handoff')
       if (current.kind === 'lost') return affinityFailure('lost')
       if (current.kind === 'target' && current.tab.tabId === summary.tabId) return pageAccess.allows(tab) ? tab : pageAccessFailure()
     } catch {
       const affectedSessions = tabAffinity.sessionIdsForTab(resolution.tab.tabId)
       if (tabAffinity.removeTab(resolution.tab.tabId)) {
         for (const sid of affectedSessions) {
-          activeFollowRefreshes.get(sid)?.controller.abort()
+          activeTargetRefreshes.get(sid)?.controller.abort()
           cancelPendingApprovals(sid)
         }
         persistTabAffinity()
@@ -1084,18 +1076,16 @@ async function resolveToolTab(sessionId?: string): Promise<Pick<chrome.tabs.Tab,
       return affinityFailure('lost')
     }
   }
-  return affinityFailure('handoff')
+  return affinityFailure('missing')
 }
 
 /**
  * Pick a window for browser_open_tab without requiring an already-controlled page.
- * Handoff still blocks: the user must finish the keep/follow choice first.
  */
 async function resolveOpenTabWindow(sessionId?: string): Promise<{ windowId: number } | ToolAnswer> {
   await affinityReady
   if (tabAffinity.isDetached(sessionId)) return affinityFailure('detached')
   const resolution = tabAffinity.resolveTarget(sessionId)
-  if (resolution.kind === 'handoff') return affinityFailure('handoff')
   if (resolution.kind === 'target') {
     try {
       const tab = await chrome.tabs.get(resolution.tab.tabId)
@@ -1182,18 +1172,18 @@ async function authorizeToolCall(
 }
 
 /** Capture the newly controlled tab and seed it into this session's next Agent step. */
-async function refreshFollowedPage(sessionId: string, tabId: number): Promise<void> {
-  activeFollowRefreshes.get(sessionId)?.controller.abort()
+async function refreshSelectedPage(sessionId: string, tabId: number): Promise<void> {
+  activeTargetRefreshes.get(sessionId)?.controller.abort()
   const controller = new AbortController()
   const unrestrictedAccess = unrestrictedAccessEnabled()
   let settle!: () => void
-  const activeRefresh: ActiveFollowRefresh = {
+  const activeRefresh: ActiveTargetRefresh = {
     controller,
     unrestrictedAccess,
     settled: new Promise<void>((resolve) => { settle = resolve }),
     settle: () => { settle() },
   }
-  activeFollowRefreshes.set(sessionId, activeRefresh)
+  activeTargetRefreshes.set(sessionId, activeRefresh)
   try {
     const target = await resolveToolTab(sessionId)
     if ('ok' in target || target.id !== tabId || controller.signal.aborted) return
@@ -1218,7 +1208,7 @@ async function refreshFollowedPage(sessionId: string, tabId: number): Promise<vo
     await gatewayRpc(BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, { sessionId, snapshot })
   } finally {
     activeRefresh.settle()
-    if (activeFollowRefreshes.get(sessionId) === activeRefresh) activeFollowRefreshes.delete(sessionId)
+    if (activeTargetRefreshes.get(sessionId) === activeRefresh) activeTargetRefreshes.delete(sessionId)
   }
 }
 
@@ -1226,44 +1216,16 @@ async function refreshSessionSnapshot(sessionId: string): Promise<void> {
   await affinityReady
   const target = await resolveToolTab(sessionId)
   if (!('ok' in target) && target.id !== undefined) {
-    await refreshFollowedPage(sessionId, target.id)
+    await refreshSelectedPage(sessionId, target.id)
   }
 }
 
-async function resolveTabAffinityResponse(response: {
-  revision: number
-  decision: TabAffinityDecision
-  sessionId: unknown
-}): Promise<void> {
-  await affinityReady
-  const active = await syncActiveTab()
-  if (response.decision === 'follow' && (active === undefined || !pageAccess.allows(active))) { broadcastPageAccess(); return }
-  const sid = typeof response.sessionId === 'string' ? response.sessionId : undefined
-  const accepted = tabAffinity.decide(response.decision, response.revision, sid)
-  const controlled = accepted && response.decision === 'follow'
-    ? tabAffinity.snapshot().controlled
-    : null
-  if (controlled !== null) resetTabSnapshot(controlled.tabId)
-  if (accepted) {
-    invalidateSessionTarget(sid)
-    persistTabAffinity()
-    if (controlled !== null && sid !== undefined) {
-      const lease = targetLeases.capture(sid, controlled, () => selectedTargetIdentity(sid))
-      await pageSessionContexts.ready
-      if (lease.current()) pageSessionContexts.bind(sid, { id: controlled.tabId, ...controlled })
-    }
-  }
-  broadcastTabAffinity()
-  if (controlled !== null && typeof response.sessionId === 'string' && response.sessionId.trim() !== '') {
-    await refreshFollowedPage(response.sessionId, controlled.tabId)
-  }
-}
-
-/** Move browser control to the current tab only after a fresh, valid query. */
-async function rebindTabAffinityToActive(signal: AbortSignal, sessionId?: string): Promise<void> {
+/** Select an authorized group member after a fresh native check. Legacy panels may name the active authorized tab. */
+async function rebindTabAffinityToActive(signal: AbortSignal, sessionId?: string, selected?: { tabId: number; current: () => boolean }): Promise<void> {
   await abortable(Promise.all([affinityReady, pageSessionContexts.ready]).then(() => undefined), signal)
-  const tab = await syncActiveTab(undefined, signal)
+  const tab = selected === undefined ? await syncActiveTab(undefined, signal) : await abortable(chrome.tabs.get(selected.tabId), signal)
   throwIfRebindAborted(signal)
+  if (selected !== undefined && !selected.current()) throw new TabAffinityRebindError('stale-binding', 'The selected group page changed. Choose it again.')
   const summary = tab === undefined ? null : summarizeTab(tab)
   if (summary === null) {
     throw new TabAffinityRebindError('no-active-tab', getUiLocale() === 'zh'
@@ -1273,7 +1235,7 @@ async function rebindTabAffinityToActive(signal: AbortSignal, sessionId?: string
 
   if (tab === undefined || !pageAccess.allows(tab)) throw new TabAffinityRebindError('page-access-required', getUiLocale() === 'zh'
     ? '请先在目标页面点击工具栏上的 DSH Stride 图标授权此页' : 'Click the DSH Stride toolbar icon on the intended page first')
-  commitTabAffinityRebind(summary, sessionId)
+  commitTabAffinityRebind(summary, sessionId, 'background')
 }
 
 /** Commit one explicit tab handoff and clear stale element references. */
@@ -1285,7 +1247,7 @@ function commitTabAffinityRebind(
   invalidateSessionTarget(sessionId)
   const previousControlledTabId = tabAffinity.snapshot().controlled?.tabId
   if (sessionId !== undefined) {
-    activeFollowRefreshes.get(sessionId)?.controller.abort()
+    activeTargetRefreshes.get(sessionId)?.controller.abort()
     cancelPendingApprovals(sessionId)
   }
   if (mode === 'active') tabAffinity.rebindActive(summary, sessionId)
@@ -1301,7 +1263,7 @@ function commitTabAffinityRebind(
   broadcastTabAffinity()
 }
 
-async function followModelSelectedTab(tab: chrome.tabs.Tab, sessionId: string | undefined, isCurrentCall: () => boolean): Promise<void> {
+async function selectModelTarget(tab: chrome.tabs.Tab, sessionId: string | undefined, isCurrentCall: () => boolean): Promise<void> {
   const summary = summarizeTab(tab)
   if (summary === null || !pageAccess.allows(tab)) throw new Error('The page needs a native toolbar authorization')
   await pageSessionContexts.ready
@@ -1408,7 +1370,7 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
         allowsTab: admittedPages.allows,
         emptyAuthorizedScope: admittedPages.empty,
         ...(controlledTabId === undefined ? {} : { controlledTabId }),
-        followTab: (tab) => followModelSelectedTab(tab, call.sessionId, () => targetAllowed() && admittedPages.allows(tab)),
+        followTab: (tab) => selectModelTarget(tab, call.sessionId, () => targetAllowed() && admittedPages.allows(tab)),
         commitAction,
         rollbackActionCommit,
       },
@@ -1566,7 +1528,7 @@ function cancelToolCall(id: string): void {
 
 async function revokeUnrestrictedAccess(): Promise<void> {
   const calls = [...unsettledToolCalls].filter((call) => call.unrestrictedAccess)
-  const refreshes = [...activeFollowRefreshes.values()].filter((refresh) => refresh.unrestrictedAccess)
+  const refreshes = [...activeTargetRefreshes.values()].filter((refresh) => refresh.unrestrictedAccess)
   for (const call of calls) {
     call.revocationRequested = true
     if (!call.committed) call.controller.abort()
@@ -1930,16 +1892,18 @@ chrome.runtime.onConnect.addListener((port) => {
             return
           }
           if (start) {
-            const active = tabAffinity.snapshot().active
-            if (active === null) throw new Error('no active page')
-            const before = targetLeases.capture(sid, active, () => tabAffinity.snapshot().active ?? undefined)
-            const native = await chrome.tabs.get(active.tabId)
+            // Native startup still fences old session calls and element refs;
+            // its target comes from the group selection, never human focus.
+            const selected = tabAffinity.getSessionTab(sid)
+            if (selected === undefined) throw new Error('no selected group page')
+            const before = targetLeases.capture(sid, selected, () => selectedTargetIdentity(sid))
+            const native = await chrome.tabs.get(selected.tabId)
             const summary = summarizeTab(native)
             if (!current() || !before.current() || controller.signal.aborted || summary === null
-              || native.status === 'loading' || native.pendingUrl !== undefined || summary.tabId !== active.tabId
-              || summary.windowId !== active.windowId || summary.url !== active.url) throw new Error('page changed')
+              || native.status === 'loading' || native.pendingUrl !== undefined || summary.tabId !== selected.tabId
+              || summary.windowId !== selected.windowId || summary.url !== selected.url) throw new Error('page changed')
             if (!pageAccess.allows(native)) throw new Error('page-access-required')
-            commitTabAffinityRebind(summary, sid)
+            commitTabAffinityRebind(summary, sid, 'background')
             affinityRevision = tabAffinity.snapshot().revision
           }
           const target = captureToolTarget(sid)
@@ -2121,9 +2085,12 @@ chrome.runtime.onConnect.addListener((port) => {
           panelActiveSessions.set(port, sid)
           if (session.isNew === true) {
             const bind = Promise.all([affinityReady, pageSessionContexts.ready]).then(async () => {
-              const tab = await syncActiveTab()
+              const tab = await groupTarget()
               const summary = tab === undefined ? null : summarizeTab(tab)
-              if (summary === null) throw new Error('No active tab is available to bind this session')
+              if (summary === null) {
+                if (tabAffinity.focusSession(sid)) { invalidateSessionTarget(); persistTabAffinity(); broadcastTabAffinity() }
+                return
+              }
               if (tabAffinity.getSessionTab(sid) === undefined) {
                 invalidateSessionTarget(sid)
                 if (!tabAffinity.bindNewSession(sid, summary)) {
@@ -2132,8 +2099,10 @@ chrome.runtime.onConnect.addListener((port) => {
                   return
                 }
               }
-              pageSessionContexts.bind(sid, { id: summary.tabId, ...summary })
-              resetTabSnapshot(summary.tabId)
+              const bound = tabAffinity.getSessionTab(sid)
+              if (bound === undefined) return
+              pageSessionContexts.bind(sid, { id: bound.tabId, ...bound })
+              resetTabSnapshot(bound.tabId)
               persistTabAffinity()
               broadcastTabAffinity()
               await refreshSessionSnapshot(sid)
@@ -2157,28 +2126,8 @@ chrome.runtime.onConnect.addListener((port) => {
         }
         break
       }
-      case 'tab-affinity.response': {
-        const response = message as { revision?: unknown; decision?: unknown; sessionId?: unknown }
-        if (typeof response.revision !== 'number' || !isTabAffinityDecision(response.decision)) break
-        const sid = typeof response.sessionId === 'string' ? response.sessionId : undefined
-        if (sid !== undefined && unbindingSessions.has(sid)) break
-        const decision = resolveTabAffinityResponse({
-          revision: response.revision,
-          decision: response.decision,
-          sessionId: response.sessionId,
-        }).catch(() => {})
-        if (response.decision === 'follow' && sid !== undefined) {
-          sessionSnapshotRefreshes.set(sid, decision)
-          void decision.finally(() => {
-            if (sessionSnapshotRefreshes.get(sid) === decision) sessionSnapshotRefreshes.delete(sid)
-          })
-        } else {
-          void decision
-        }
-        break
-      }
       case 'tab-affinity.rebind': {
-        const request = message as { id?: unknown; sessionId?: unknown }
+        const request = message as { id?: unknown; sessionId?: unknown; tabId?: unknown; revision?: unknown }
         if (typeof request.id !== 'string') break
         const requestId = request.id
         const rebindSessionId = validSessionId(request.sessionId) ?? panelActiveSessions.get(port)
@@ -2195,7 +2144,15 @@ chrome.runtime.onConnect.addListener((port) => {
             : 'Binding the current tab timed out. Try again.'))
         }, TAB_AFFINITY_REBIND_TIMEOUT_MS)
         tabAffinityRebinds.set(requestId, { controller, timer })
-        void rebindTabAffinityToActive(controller.signal, rebindSessionId).then(
+        const selection = request.tabId === undefined ? undefined : {
+          tabId: request.tabId as number,
+          current: () => panelPorts.has(port) && panelActiveSessions.get(port) === rebindSessionId
+            && tabAffinity.focusedSession() === (rebindSessionId ?? null) && tabAffinity.snapshot().revision === request.revision,
+        }
+        if (selection !== undefined && (!Number.isSafeInteger(selection.tabId) || selection.tabId < 0)) {
+          controller.abort(new TabAffinityRebindError('stale-binding', 'Invalid control-group page.'))
+        }
+        void rebindTabAffinityToActive(controller.signal, rebindSessionId, selection).then(
           () => {
             try { port.postMessage({ type: 'tab-affinity.rebind.result', id: requestId, ok: true }) } catch { /* port closed */ }
           },
@@ -2254,7 +2211,7 @@ chrome.runtime.onConnect.addListener((port) => {
             call.revocationRequested = true
             if (!call.committed) call.controller.abort()
           }
-          if (sid !== undefined) { activeFollowRefreshes.get(sid)?.controller.abort(); pageSessionContexts.removeSession(sid) }
+          if (sid !== undefined) { activeTargetRefreshes.get(sid)?.controller.abort(); pageSessionContexts.removeSession(sid) }
           if (sid !== undefined) cancelPendingApprovals(sid)
           if (previous !== null) resetTabSnapshot(previous.tabId)
           broadcastTabAffinity()
@@ -2346,8 +2303,7 @@ chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
   void affinityReady.then(() => {
     const activationRevision = focusedWindow.acceptActivation(windowId)
     if (activationRevision === null) return
-    // Mark the switch before awaiting metadata so an already-running trusted
-    // action cannot slip through the handoff boundary.
+    // Update human-focus metadata without changing the selected group target.
     const state = tabAffinity.snapshot()
     const known = state.controlled?.tabId === tabId ? state.controlled : state.active?.tabId === tabId ? state.active : null
     observeActiveSummary({ tabId, windowId, title: known?.title ?? '', url: known?.url ?? '' })
@@ -2392,7 +2348,7 @@ chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
     const affectedSessions = tabAffinity.sessionIdsForTab(removedTabId)
     if (!tabAffinity.replaceTab(removedTabId, addedTabId)) return
     for (const sid of affectedSessions) {
-      activeFollowRefreshes.get(sid)?.controller.abort()
+      activeTargetRefreshes.get(sid)?.controller.abort()
       cancelPendingApprovals(sid)
     }
     persistTabAffinity()
@@ -2416,7 +2372,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     const affectedSessions = tabAffinity.sessionIdsForTab(tabId)
     if (!tabAffinity.removeTab(tabId)) return
     for (const sid of affectedSessions) {
-      activeFollowRefreshes.get(sid)?.controller.abort()
+      activeTargetRefreshes.get(sid)?.controller.abort()
       cancelPendingApprovals(sid)
     }
     persistTabAffinity()

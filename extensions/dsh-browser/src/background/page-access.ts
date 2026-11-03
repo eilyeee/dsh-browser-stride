@@ -15,6 +15,7 @@ type Page = Pick<chrome.tabs.Tab, 'id' | 'windowId' | 'url'> & Partial<Pick<chro
 const origin = (url?: string): string | undefined => {
   try { const parsed = new URL(url ?? ''); return /^https?:$/.test(parsed.protocol) ? parsed.origin : undefined } catch { return undefined }
 }
+const requiresGroup = (): boolean => import.meta.env.EXT_TARGET !== 'firefox'
 
 export class PageAccess {
   private grants = new Map<number, Grant>()
@@ -64,7 +65,7 @@ export class PageAccess {
         || typeof row.nonce !== 'string' || row.nonce === '' || (row.mode !== undefined && row.mode !== 'debugger')
         || (row.groupId !== undefined && (typeof row.groupId !== 'number' || !Number.isSafeInteger(row.groupId) || row.groupId < 0))) { pruned = true; continue }
       const grant = row as Grant
-      if (grant.mode === 'debugger') { pruned = true; continue }
+      if (grant.mode === 'debugger' || grant.pending === true || (requiresGroup() && grant.groupId === undefined)) { pruned = true; continue }
       try {
         const native = await chrome.tabs.get(grant.tabId)
         if (native.id !== grant.tabId || native.windowId !== grant.windowId || origin(native.url) !== grant.origin
@@ -92,6 +93,7 @@ export class PageAccess {
     const grant = tab.id === undefined ? undefined : this.grants.get(tab.id)
     return !this.restoring && grant !== undefined && grant.pending !== true && grant.windowId === tab.windowId
       && (grant.mode === 'debugger' ? origin(tab.url) !== undefined && debuggerPages.has(grant.tabId) : grant.origin === origin(tab.url))
+      && (!requiresGroup() || grant.groupId !== undefined)
       && (grant.groupId === undefined || grant.groupId === tab.groupId)
   }
   allowsFrame(tabId: number, url: string | undefined): boolean { return this.has(tabId) && this.grants.get(tabId)?.mode !== 'debugger' && this.grants.get(tabId)?.origin === origin(url) && origin(url) !== undefined }
@@ -123,17 +125,26 @@ export class PageAccess {
     await this.ready
     if (tab.id !== undefined && this.grants.get(tab.id)?.mode === 'debugger') return
     const site = origin(tab.url)
-    if (tab.id === undefined || site === undefined) throw new Error('page-access-required')
-    const grant: Grant = { tabId: tab.id, windowId: tab.windowId, origin: site, nonce: crypto.randomUUID() }
+    if (tab.id === undefined || site === undefined || (requiresGroup() && tab.pinned)) throw new Error('page-access-required')
+    const grant: Grant = { tabId: tab.id, windowId: tab.windowId, origin: site, nonce: crypto.randomUUID(), pending: true }
     this.grants.set(tab.id, grant)
     try {
       await this.persist()
-      if (this.grants.get(tab.id) !== grant || !this.allows(await chrome.tabs.get(tab.id))) throw new Error('page-access-required')
-      await this.refresh(tab)
+      const matches = (native: chrome.tabs.Tab) => native.id === grant.tabId && native.windowId === grant.windowId && origin(native.url) === grant.origin && (!requiresGroup() || !native.pinned)
+      if (this.grants.get(tab.id) !== grant || !matches(await chrome.tabs.get(tab.id))) throw new Error('page-access-required')
+      const receiver = await chrome.tabs.sendMessage(tab.id, { type: 'DSH_PING' }, { frameId: 0 }).catch(() => undefined)
+      if (this.grants.get(tab.id) !== grant) throw new Error('page-access-required')
+      if (receiver?.ok !== true) await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] })
       if (this.grants.get(tab.id) !== grant) throw new Error('page-access-required')
       const live = await chrome.tabs.get(tab.id)
-      if (!this.allows(live)) throw new Error('page-access-required')
-      if (!live.pinned) await this.joinGroup(grant)
+      if (!matches(live)) throw new Error('page-access-required')
+      await this.joinGroup(grant)
+      const grouped = await chrome.tabs.get(tab.id)
+      if (this.grants.get(tab.id) !== grant) throw new Error('page-access-required')
+      delete grant.pending
+      if (!this.allows(grouped)) throw new Error('page-access-required')
+      await this.persist()
+      if (this.grants.get(tab.id) !== grant) throw new Error('page-access-required')
       this.changed()
     } catch (error) {
       if (this.grants.get(tab.id) === grant) void this.revoke(tab.id).catch(() => {})
@@ -172,10 +183,14 @@ export class PageAccess {
       await debuggerPages.attachCreated(tabId, allowed, signal, Math.max(0, deadline - Date.now()))
       if (!await debuggerPages.ready(tabId, undefined, signal, Math.max(0, deadline - Date.now()))) throw new Error('The new page did not become ready for automatic control.')
       const live = await chrome.tabs.get(tabId)
-      delete grant.pending
-      if (!allowed() || signal.aborted || !this.allows(live)) throw new Error('The new page changed before it could be controlled.')
+      if (!allowed() || signal.aborted || live.id !== tabId || live.windowId !== grant.windowId || origin(live.url) === undefined
+        || (requiresGroup() && live.pinned)) throw new Error('The new page changed before it could be controlled.')
       grant.origin = origin(live.url)!
-      if (!live.pinned) await this.joinGroup(grant)
+      await this.joinGroup(grant)
+      const grouped = await chrome.tabs.get(tabId)
+      delete grant.pending
+      if (!this.allows(grouped)) throw new Error('The new page left its control group.')
+      await this.persist()
       if (!allowed() || signal.aborted) throw new Error('Automatic page control was cancelled.')
       this.changed()
     } catch (error) {
@@ -244,7 +259,8 @@ export class PageAccess {
     return Promise.all(this.ids().map(id => this.revoke(id))).then(() => {})
   }
   private async joinGroup(grant: Grant): Promise<void> {
-    if (typeof chrome.tabs.group !== 'function' || chrome.tabGroups === undefined) return
+    if (!requiresGroup()) return
+    if (typeof chrome.tabs.group !== 'function' || chrome.tabGroups === undefined) throw new Error('Control groups are unavailable.')
     const work = this.grouping.catch(() => {}).then(async () => {
       if (this.grants.get(grant.tabId) !== grant) return
       let groupId = this.groups.get(grant.windowId)
@@ -253,8 +269,7 @@ export class PageAccess {
         catch { groupId = undefined }
       }
       if (this.grants.get(grant.tabId) !== grant) return
-      try { groupId = await chrome.tabs.group({ tabIds: grant.tabId, ...(groupId === undefined ? { createProperties: { windowId: grant.windowId } } : { groupId }) }) }
-      catch { return } // Pinned tabs and browsers without grouping remain permission-scoped.
+      groupId = await chrome.tabs.group({ tabIds: grant.tabId, ...(groupId === undefined ? { createProperties: { windowId: grant.windowId } } : { groupId }) })
       if (this.grants.get(grant.tabId) !== grant) { await chrome.tabs.ungroup(grant.tabId).catch(() => {}); return }
       grant.groupId = groupId
       this.groups.set(grant.windowId, groupId)

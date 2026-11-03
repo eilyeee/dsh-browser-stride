@@ -9,7 +9,7 @@ import type { BridgeCaps, RespondResult } from '@eilyeee/dsh-browser-stride/src/
 import type { ServerFrame } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 import type { BridgeState } from '../background/bridge.ts'
 import type { Settings } from '../background/index.ts'
-import type { TabAffinityDecision, TabAffinityState } from '../background/tab-affinity.ts'
+import type { AffinityTab, TabAffinityState } from '../background/tab-affinity.ts'
 import type { ApprovalDecision, ApprovalRequest } from '../security/approval.ts'
 import { parsePageSelection, type PageSelection } from '../selection.ts'
 import { getUiLocale } from '../i18n.ts'
@@ -92,7 +92,7 @@ interface SessionResumeHintMessage {
   sessionId: string | null
 }
 
-export interface PageAccessStatus { activeGranted: boolean; controlledGranted: boolean; controlledTabId: number | null; revocableTabId: number | null }
+export interface PageAccessStatus { activeGranted: boolean; controlledGranted: boolean; controlledTabId: number | null; revocableTabId: number | null; pages?: AffinityTab[] }
 
 type BackgroundMessage = ({ type: 'page-access' } & PageAccessStatus) | RpcResultMessage | RespondResultMessage | SettingsResultMessage | (Omit<SettingsResultMessage, 'type'> & { type: 'browser-pairing.unpair.result' | 'page-access.revoke.result' }) | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | (Omit<TabAffinityRebindResultMessage, 'type'> & { type: 'browser-run.retarget.result' | 'tab-affinity.unbind.result' }) | SelectionMessage | SessionResumeHintMessage | { type: 'browser-pairing'; status: BrowserPairingStatus }
 
@@ -134,9 +134,8 @@ export interface PanelApi {
   onSelection(callback: (selection: PageSelection | null) => void): () => void
   onSessionResumeHint(callback: (sessionId: string | null) => void): () => void
   respondToApproval(id: string, decision: ApprovalDecision): Promise<void>
-  resolveTabAffinity(revision: number, decision: TabAffinityDecision, sessionId: string | null): Promise<void>
   retargetRun(payload: { runId: string; sessionId: string; expectedVersion: number; controlRevision: number; affinityRevision: number; start?: boolean; task?: boolean; newPageUrl?: string }): Promise<void>
-  rebindTabAffinity(): Promise<void>
+  rebindTabAffinity(selection?: { tabId: number; revision: number; sessionId: string | null }): Promise<void>
   unbindTabAffinity(revision: number, sessionId: string | null): Promise<void>
   /** Clear all selection state, or only the exact selection supplied. */
   clearSelection(selection?: PageSelection): Promise<void>
@@ -466,9 +465,6 @@ export function connectPanel(): PanelApi {
     respondToApproval(id, decision) {
       return send({ type: 'approval.response', id, decision })
     },
-    resolveTabAffinity(revision, decision, sessionId) {
-      return send({ type: 'tab-affinity.response', revision, decision, sessionId })
-    },
     retargetRun(payload) {
       const id = crypto.randomUUID()
       return new Promise<void>((resolve, reject) => {
@@ -485,13 +481,13 @@ export function connectPanel(): PanelApi {
         })
       })
     },
-    rebindTabAffinity() {
+    rebindTabAffinity(selection) {
       const id = crypto.randomUUID()
       return new Promise<void>((resolve, reject) => {
         const entry = { resolve, reject }
         pendingRebinds.set(id, entry)
         void send(
-          { type: 'tab-affinity.rebind', id },
+          { type: 'tab-affinity.rebind', id, ...selection },
           { kind: 'rebind', id },
         ).catch((cause: unknown) => {
           if (pendingRebinds.get(id) !== entry) return

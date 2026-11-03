@@ -2,23 +2,29 @@
 import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import { describe, expect, it, vi } from 'vitest'
-import { TabAffinityBanner } from '../src/panel/App.tsx'
+import { ControlGroupStatus } from '../src/panel/App.tsx'
 import { PANEL_COPY } from '../src/panel/strings.ts'
 
-describe('page binding controls', () => {
-  it('keeps page information without exposing connection unpairing in the page banner', async () => {
+describe('control group UI', () => {
+  it('offers only authorized group pages and has no human follow controls', async () => {
     Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
-    const container=document.createElement('div');document.body.append(container)
-    const root=createRoot(container)
-    const tab={tabId:1,windowId:1,title:'Synthetic page',url:'https://example.com/'}
+    const container = document.createElement('div'); document.body.append(container)
+    const root = createRoot(container)
+    const page = { tabId: 1, windowId: 1, title: 'Synthetic group page', url: 'https://example.com/' }
+    const outside = { ...page, tabId: 2, title: 'Unapproved human page' }
+    const onSelect = vi.fn(async () => {})
     try {
-      await act(async()=>root.render(createElement(TabAffinityBanner,{state:{revision:1,status:'following',controlled:tab,active:tab,pinned:false},copy:PANEL_COPY.zh,onDecision:vi.fn()})))
-      expect(container.textContent).toContain('Synthetic page')
-      expect(container.querySelector('.unbind')).toBeNull()
-      await act(async()=>root.render(createElement(TabAffinityBanner,{state:{revision:2,status:'lost',controlled:null,active:tab,pinned:false,detached:true},copy:PANEL_COPY.zh,onDecision:vi.fn()})))
-      expect(container.textContent).toContain('页面已解绑')
-      expect(container.textContent).toContain('使用当前页面')
-      expect(container.querySelector('.unbind')).toBeNull()
-    } finally { await act(async()=>root.unmount());container.remove() }
+      await act(async () => root.render(createElement(ControlGroupStatus, { state: { revision: 1, status: 'background', controlled: page, active: outside }, pages: [page], copy: PANEL_COPY.zh, onSelect })))
+      expect(container.textContent).toContain('Synthetic group page')
+      expect(container.textContent).not.toContain('Unapproved human page')
+      expect(container.textContent).not.toContain('跟随')
+      expect(container.querySelector('.follow')).toBeNull()
+      expect(container.querySelector('button')?.getAttribute('aria-pressed')).toBe('true')
+      await act(async () => { container.querySelector('button')!.click() })
+      expect(onSelect).not.toHaveBeenCalled()
+      await act(async () => root.render(createElement(ControlGroupStatus, { state: { revision: 2, status: 'lost', controlled: null, active: outside }, pages: [], copy: PANEL_COPY.zh, onSelect })))
+      expect(container.textContent).toContain('还没有已授权的分组页面')
+      expect(container.querySelector('button')).toBeNull()
+    } finally { await act(async () => root.unmount()); container.remove() }
   })
 })
