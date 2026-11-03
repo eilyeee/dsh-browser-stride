@@ -58,6 +58,13 @@ no release version has been assigned yet.
 
 ### Added
 
+- Chrome queued tasks offer native **Open a new page and start** with a typed
+  HTTP(S) URL and the saved automatic-control opt-in. Connection-owned, single-use
+  Host tickets reserve startup before creation; the worker authorizes, groups and
+  pins the page before the Agent starts. Confirmed pre-start failures clean only
+  their owned page, while lost startup replies preserve it without automatic retry.
+  Managed model tab mutations remain unavailable; optional metadata keeps wire v4
+  compatibility. `STRIDE_TASK_NEW_PAGE=1` extends the isolated real-model task check.
 - An opt-in real-model ordinary-chat acceptance script verifies new-tab creation,
   conversation binding, the control group and independently saved synthetic-site
   state, using temporary Host/browser homes and the configured default model.
@@ -66,8 +73,8 @@ no release version has been assigned yet.
   conversation and join the control group without another toolbar click. Only the
   main HTTP(S) document is supported; existing tabs retain separate authorization.
   Stops, settings revocation and debugger disconnection withdraw authority; grants
-  are not restored across worker/browser restarts. Firefox and managed tasks retain
-  the selected-page flow. Browser capabilities are broader than the application
+  are not restored across worker/browser restarts. Firefox retains the selected-page
+  flow. Browser capabilities are broader than the application
   allowlist; page sharing and action confirmation settings still apply.
 - Manual page access uses a native toolbar click and temporary `activeTab` permission.
   Only local DSH communication retains a declared loopback host permission. Authorized tabs

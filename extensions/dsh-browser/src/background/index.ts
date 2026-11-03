@@ -40,6 +40,8 @@ import {
   BRIDGE_RUN_RETARGET_METHOD,
   BRIDGE_RUN_LIST_METHOD,
   BRIDGE_TASK_START_METHOD,
+  BRIDGE_TASK_PAGE_PREPARE_METHOD,
+  BRIDGE_TASK_PAGE_CANCEL_METHOD,
   BRIDGE_TASK_APPROVAL_METHOD,
   isPageBrowserTool,
   isRunTabMutation,
@@ -57,6 +59,7 @@ import { ToolExecutionFence } from './execution-authority.ts'
 import { PageAccess, type CreatedPageAccess } from './page-access.ts'
 import { debuggerPages, sendPageMessage } from './debugger-pages.ts'
 import { RunTargetRegistry, type RunTargetBinding } from './run-targets.ts'
+import { startTaskPage, cleanupOwnedTaskPage, type PreparedTaskPage } from './task-page-start.ts'
 import { localBridgeUrl } from './bridge-address.ts'
 import { requestBrowserPairing, revokeBrowserPairing, type BrowserPairingStatus } from './pairing-client.ts'
 import { createRpc, BridgeRpcError } from './rpc.ts'
@@ -1815,7 +1818,7 @@ chrome.runtime.onConnect.addListener((port) => {
     const msg = message as { type?: string }
     switch (msg.type) {
       case 'browser-run.retarget': {
-        const request = message as { id?: unknown; runId?: unknown; sessionId?: unknown; expectedVersion?: unknown; controlRevision?: unknown; affinityRevision?: unknown; start?: unknown; task?: unknown }
+        const request = message as { id?: unknown; runId?: unknown; sessionId?: unknown; expectedVersion?: unknown; controlRevision?: unknown; affinityRevision?: unknown; start?: unknown; task?: unknown; newPageUrl?: unknown }
         if (typeof request.id !== 'string') break
         const id = request.id
         const sid = validSessionId(request.sessionId)
@@ -1831,7 +1834,8 @@ chrome.runtime.onConnect.addListener((port) => {
           || typeof revision !== 'number' || !Number.isSafeInteger(revision + 2) || revision < 0 || !Number.isSafeInteger(revision)
           || runRetargets.size !== 0 || unbindingSessions.has(sid)) { reply(false); break }
         const controller = new AbortController()
-        const timer = setTimeout(() => controller.abort(), 15_000)
+        const newPage = request.newPageUrl !== undefined
+        const timer = setTimeout(() => controller.abort(), newPage ? 35_000 : 15_000)
         runRetargets.set(id, { controller, timer })
         const boundRpc = rpc
         let affinityRevision = request.affinityRevision
@@ -1839,6 +1843,71 @@ chrome.runtime.onConnect.addListener((port) => {
           && tabAffinity.snapshot().revision === affinityRevision
         void (async () => {
           if (!current() || boundRpc === null || bridge?.connected !== true) throw new Error('stale selection')
+          if (newPage) {
+            const windowId = panelWindows.get(port)
+            if (!start || import.meta.env.EXT_TARGET === 'firefox' || !automaticAccessActive || typeof request.newPageUrl !== 'string' || windowId === undefined) {
+              throw new BridgeRpcError('start-rejected', 'Enable automatic control of new task pages first')
+            }
+            const automaticRevision = automaticAccessRevision
+            const sessionCurrent = targetLeases.captureSession(sid)
+            let boundTarget: ToolTargetLease | undefined
+            const nativeCurrent = () => !controller.signal.aborted && panelPorts.has(port) && panelActiveSessions.get(port) === sid
+              && tabAffinity.focusedSession() === sid && rpc === boundRpc && bridge?.connected === true
+              && automaticAccessActive && automaticAccessRevision === automaticRevision && !unbindingSessions.has(sid)
+              && (boundTarget === undefined ? sessionCurrent() : boundTarget.sameBinding())
+            await startTaskPage({ runId, sessionId: sid, expectedVersion: version, controlRevision: revision, url: request.newPageUrl }, {
+              current: nativeCurrent,
+              request: (method, payload, options) => boundRpc.request(method, payload, options),
+              enqueue: (signal, work) => writeQueue.run(signal, work),
+              create: async (url): Promise<PreparedTaskPage> => {
+                let access: CreatedPageAccess | undefined
+                let tabId: number | undefined
+                let preparedId: string | undefined
+                let boundSessionCurrent: (() => boolean) | undefined
+                const cleanup = async () => {
+                  // A newer native binding/grant owns the page after takeover.
+                  if (tabId === undefined || access === undefined) return
+                  const created = tabId
+                  await cleanupOwnedTaskPage(access, () => boundTarget?.sameBinding() === true, () => {
+                    const selected = selectedTargetIdentity(sid)
+                    return boundSessionCurrent?.() === true && selected?.tabId === created && selected.windowId === windowId
+                  }, () => chrome.tabs.remove(created))
+                }
+                try {
+                  const answer = await dispatchOpenTab({ id: `native_${id}`, name: 'browser_open_tab', args: { url }, sessionId: sid },
+                    windowId, 'off', undefined, async () => 'approved', controller.signal,
+                    tab => {
+                      if (!bindOpenedTab(tab, sid, () => nativeCurrent() && access?.current() === true)) return false
+                      const target = captureToolTarget(sid)
+                      if ('ok' in target) return false
+                      boundTarget = target
+                      boundSessionCurrent = targetLeases.captureSession(sid)
+                      return true
+                    }, () => nativeCurrent() && access?.current() === true,
+                    () => { if (!nativeCurrent() || access?.current() !== true) throw new Error('Task page control changed') }, false,
+                    async created => {
+                      tabId = created
+                      await pageAccess.grantCreated(created, nativeCurrent, controller.signal, lease => { access = lease })
+                    }, created => access ?? { current: () => false, release: async () => {}, canClose: () => pageAccess.unclaimed(created) })
+                  if (!answer.ok || boundTarget === undefined || !nativeCurrent()) throw new Error('Task page could not be bound')
+                  const live = await prepareToolTarget(boundTarget, sid, controller.signal)
+                  if ('ok' in live || !nativeCurrent() || access?.current() !== true || !boundTarget.current()) throw new Error('Task page changed')
+                  const prepared = runTargets.prepare({ kind: 'run', runId, controlRevision: revision }, sid, boundTarget)
+                  if (prepared === undefined) throw new Error('Task page pin unavailable')
+                  preparedId = prepared.id
+                  return { targetUrl: boundTarget.target.url, targetBinding: prepared.id,
+                    current: () => nativeCurrent() && access?.current() === true && prepared.current(), cleanup,
+                    discard: () => runTargets.discardPrepared(prepared.id) }
+                } catch (error) {
+                  if (preparedId !== undefined) runTargets.discardPrepared(preparedId)
+                  try { await cleanup() } catch { throw new BridgeRpcError('start-cleanup-unconfirmed', 'New task page cleanup was not confirmed') }
+                  throw error
+                }
+              },
+            }, controller.signal)
+            reply(true)
+            return
+          }
           if (start) {
             const active = tabAffinity.snapshot().active
             if (active === null) throw new Error('no active page')
@@ -1897,7 +1966,7 @@ chrome.runtime.onConnect.addListener((port) => {
       }
       case 'rpc': {
         const rpcMsg = message as { id: string; method: string; payload?: unknown }
-        if ([BRIDGE_RUN_RETARGET_METHOD, BRIDGE_TASK_START_METHOD, BRIDGE_TASK_APPROVAL_METHOD].includes(rpcMsg.method)) {
+        if ([BRIDGE_RUN_RETARGET_METHOD, BRIDGE_TASK_START_METHOD, BRIDGE_TASK_APPROVAL_METHOD, BRIDGE_TASK_PAGE_PREPARE_METHOD, BRIDGE_TASK_PAGE_CANCEL_METHOD].includes(rpcMsg.method)) {
           try { port.postMessage({ type: 'rpc.result', id: rpcMsg.id, ok: false,
             error: { code: 'forbidden', message: 'Use the selected-page task control.' } }) } catch { /* panel closed */ }
           break

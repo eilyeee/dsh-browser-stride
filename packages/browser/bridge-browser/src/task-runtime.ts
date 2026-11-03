@@ -56,13 +56,17 @@ export class BrowserTaskRuntime {
   }
 
   /** Only the authenticated extension's native start/handoff path calls this. */
-  selectTarget(runId: RunId, url: string): void {
+  validateTarget(runId: RunId, url: string): void {
     const parsed = new URL(url)
     if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) throw new Error('target-refused')
     const verifier = this.verifiers.get(runId)
     if (verifier !== undefined && !verifier.acceptsTarget(url)) throw new Error('target-refused')
     const agent = this.ctx.agents.get(String(this.runs.get(runId)!.sessionId) as Agent['id'])
     if (agent === undefined || (agent.status !== 'idle' && !this.jobs.has(runId))) throw new Error('session-busy')
+  }
+
+  selectTarget(runId: RunId, url: string): void {
+    this.validateTarget(runId, url)
     this.targets.set(runId, url)
   }
 

@@ -21,7 +21,7 @@ export function apply(ctx, config) {
       ctx.browserTasks.registerVerifier(run.runId, {
         acceptsTarget: url => url === expected.url,
         verify: async ({ signal }) => {
-          const response = await fetch(new URL('/state', expected.url), { signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]) })
+          const response = await fetch(expected.verificationUrl ?? new URL('/state', expected.url), { signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]) })
           const value = await response.json()
           return value.enabled === true && value.saved === true
             ? { fieldValues: { testSetting: 'enabled', persisted: 'true' } } : undefined

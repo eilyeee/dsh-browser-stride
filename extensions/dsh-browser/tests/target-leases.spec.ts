@@ -5,6 +5,19 @@ import { TargetLeaseRegistry, type ToolTargetIdentity } from '../src/background/
 const target = (): ToolTargetIdentity => ({ tabId: 7, windowId: 3, url: 'https://example.test/form' })
 
 describe('receive-time browser target leases', () => {
+  it('fences a page creation before any target exists, including away-and-back and owner changes', () => {
+    const registry = new TargetLeaseRegistry()
+    const before = registry.captureSession('session-a')
+    registry.invalidateSession('session-b')
+    expect(before()).toBe(true)
+    registry.invalidateSession('session-a')
+    expect(before()).toBe(false)
+    const bound = registry.captureSession('session-a')
+    registry.forgetTab(7)
+    expect(bound()).toBe(true) // Revoking our page grant must not impersonate a session rebind.
+    registry.revokeAll()
+    expect(bound()).toBe(false)
+  })
   it('pins tab, window and URL without trusting mutable metadata or titles', () => {
     const registry = new TargetLeaseRegistry()
     const original = target()

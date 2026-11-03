@@ -219,6 +219,8 @@ const EN: PanelCopy = {
     retarget: 'Continue on selected page',
     start: 'Bind and start',
     waitingHelp: 'Select the intended browser page, then bind and start this task. No model runs while waiting.',
+    newPageUrl: 'New page URL', startNewPage: 'Open a new page and start',
+    automaticControlRequired: 'Enable “Automatically control DSH-created pages” in settings, then save and connect.',
     outcomes: { pending: '', verified: 'Result independently verified', 'needs-review': 'Needs verification; automatic actions have stopped',
       'not-completed': 'The goal was not verified as complete', 'budget-exhausted': 'Execution limit reached; automatic actions have stopped' },
     retargetHelp: 'Check the bound page above before continuing. The executor must pick up the updated task.',
@@ -227,6 +229,8 @@ const EN: PanelCopy = {
     reconcileHelp: 'Some results are unresolved. Check the page before continuing.',
     truncated: (shown, total) => `Showing ${shown} of ${total} tasks, with unfinished tasks first.`,
     error: code => code === 'stale-version' ? 'Task status changed. Review the refreshed status before trying again.'
+      : code === 'start-uncertain' ? 'Startup is unconfirmed. The page was kept; check task status before doing anything else.'
+      : code === 'start-cleanup-unconfirmed' ? 'Task did not start. Check whether the new page is still open.'
       : code === 'load-failed' ? 'Could not read task status. Refresh to try again.'
       : 'The control result is unconfirmed. Review the refreshed status before submitting another request.',
   },
@@ -481,6 +485,8 @@ const ZH: PanelCopy = {
     retarget: '在已绑定页面继续',
     start: '绑定并开始',
     waitingHelp: '选择目标浏览器页面，再绑定并开始任务。等待期间不会启动模型。',
+    newPageUrl: '新页面网址', startNewPage: '新建页面并开始',
+    automaticControlRequired: '请在设置中开启“自动控制 DSH 新建页面”，再点击保存并连接。',
     outcomes: { pending: '', verified: '结果已独立核验', 'needs-review': '待核实，自动操作已停止',
       'not-completed': '未核验为完成', 'budget-exhausted': '已达到执行上限，自动操作已停止' },
     retargetHelp: '继续前请确认上方绑定的页面，任务随后等待执行器接手。',
@@ -489,6 +495,8 @@ const ZH: PanelCopy = {
     reconcileHelp: '部分操作结果尚未明确，继续前需要先核对页面。',
     truncated: (shown, total) => `显示 ${total} 项任务中的 ${shown} 项，未结束任务优先。`,
     error: code => code === 'stale-version' ? '任务状态已变化，请核对刷新后的状态再操作。'
+      : code === 'start-uncertain' ? '尚未确认是否启动，已保留页面。请先核对任务状态。'
+      : code === 'start-cleanup-unconfirmed' ? '任务未启动，请检查新建页面是否仍然打开。'
       : code === 'load-failed' ? '无法读取任务状态，请点击刷新重试。'
       : '控制结果尚未确认，请先核对刷新后的状态再提交其他请求。',
   },

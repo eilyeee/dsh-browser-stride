@@ -3,6 +3,7 @@ import { browserRunPanelRpc, browserRunPanelFailure, type RunPanelStore } from '
 import { BROWSER_RUN_LIST_LIMIT, BRIDGE_RUN_LIST_METHOD, BRIDGE_RUN_CONTROL_METHOD, type BrowserRunList } from '../src/protocol.ts'
 import { asActionId, asSessionId, type RequestDigest } from '../src/contracts/ids.ts'
 import { createRunStorage } from './helpers/run-storage.ts'
+import { newBrowserTask } from '../src/task-contract.ts'
 
 const fixtures: Awaited<ReturnType<typeof createRunStorage>>[] = []
 afterEach(async () => { for (const fixture of fixtures.splice(0)) await fixture.close() })
@@ -17,6 +18,19 @@ async function setup() {
 }
 
 describe('panel browser-run metadata and controls', () => {
+  it('advertises new-page startup optionally and blocks all startup while a native reservation exists', async () => {
+    const fixture = await createRunStorage()
+    fixtures.push(fixture)
+    await fixture.store.create({ sessionId, requiredCriteriaIds: ['saved'], task: newBrowserTask('Synthetic task') })
+    const read = (available?: () => boolean) => browserRunPanelRpc(fixture.store, BRIDGE_RUN_LIST_METHOD, { sessionId }, signal(), available)
+    expect(await read()).toMatchObject({ items: [{ task: { canStart: true } }] })
+    expect((await read() as BrowserRunList).items[0]?.task).not.toHaveProperty('canStartNewPage')
+    expect(await read(() => true)).toMatchObject({ items: [{ task: { canStart: true, canStartNewPage: true } }] })
+    expect(await read(() => false)).toMatchObject({ items: [{ task: { canStart: false, canStartNewPage: false } }] })
+    await fixture.store.dispatches.prepare({ requestId: 'pending-startup-write', connectionId: 'synthetic', sessionId,
+      name: 'browser_click', args: {}, expiresAt: Date.now() + 60000 })
+    expect(await read(() => true)).toMatchObject({ items: [{ task: { canStart: false, canStartNewPage: false } }] })
+  })
   it('offers paused target handoff only after writes settle successfully', async () => {
     const { store, run } = await setup()
     await store.control(run.runId, run.version, 'pause')

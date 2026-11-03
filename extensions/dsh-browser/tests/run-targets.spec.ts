@@ -13,6 +13,17 @@ function fixture(capacity = 5000) {
   return { targets, runs, capture, select: (tab: Partial<ToolTargetIdentity>) => { selected = { ...selected, ...tab } } }
 }
 describe('run target pins', () => {
+  it('refuses duplicate preparations and discards only an unused pin', () => {
+    const { runs, capture } = fixture()
+    const prepared = runs.prepare(scope, 'session-a', capture())!
+    expect(runs.prepare(scope, 'session-a', capture())).toBeUndefined()
+    runs.discardPrepared(prepared.id)
+    expect(prepared.current()).toBe(false)
+    const next = runs.prepare(scope, 'session-a', capture())!
+    const pin = runs.join(scope, 'session-a', capture(), next.id)!
+    runs.discardPrepared(next.id)
+    expect(pin.current()).toBe(true)
+  })
   it('requires the exact prepared target before a handoff can enter browser dispatch', () => {
     const { runs, capture, targets, select } = fixture()
     const prepared = runs.prepare(scope, 'session-a', capture())!

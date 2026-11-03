@@ -43,6 +43,16 @@ function execution(agent: Agent, name = 'browser_snapshot', parent?: ToolExecuti
 }
 
 describe('Host-owned browser task executor', () => {
+  it('checks a future native target without binding it or waking the Agent', async () => {
+    const h = await setup()
+    h.runtime.validateTarget(h.run.runId, 'https://synthetic.test/settings')
+    expect(h.followup).not.toHaveBeenCalled()
+    expect(h.current().state).toBe('queued')
+    // Publishing running without selectTarget still cannot make validation into a binding.
+    await h.store.startTask(h.run.runId, h.current().version, () => {})
+    await Promise.resolve()
+    expect(h.followup).not.toHaveBeenCalled()
+  })
   it.each([false, true])('cancels owned model activity when a revoked scope is nested=%s', async nested => {
     const h = await setup()
     const hold = gate()

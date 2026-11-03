@@ -26,17 +26,20 @@ function reconciliationRequired(store: RunPanelStore, sessionId: string): boolea
       && (row.state === 'unresolved' || (row.state === 'returned' && row.receipt?.ok === false)))
 }
 
-function summary(run: BrowserRunRecord, requiresReconciliation: boolean, pendingWrites: boolean): BrowserRunSummary {
+function summary(run: BrowserRunRecord, requiresReconciliation: boolean, pendingWrites: boolean, newPage?: (run: BrowserRunRecord) => boolean): BrowserRunSummary {
+  const canStart = run.state === 'queued' && !run.recoveryRequired && !requiresReconciliation && !pendingWrites
+    && (newPage === undefined || newPage(run))
   return { runId: run.runId, sessionId: run.sessionId, state: run.state, version: run.version,
     controlRevision: run.controlRevision, updatedAt: run.updatedAt, recoveryRequired: run.recoveryRequired, requiresReconciliation,
     canRetarget: run.state === 'paused' && !run.recoveryRequired && !requiresReconciliation && !pendingWrites,
     ...(run.task === undefined ? {} : { task: { ...run.task,
-      canStart: run.state === 'queued' && !run.recoveryRequired && !requiresReconciliation && !pendingWrites } }),
+      canStart, ...(newPage === undefined ? {} : { canStartNewPage: canStart }) } }),
     controls: [...(run.state === 'running' || run.state === 'queued' ? ['pause' as const] : []),
       ...(!isTerminal(run.state) && run.state !== 'stopping' ? ['stop' as const] : [])] }
 }
 
-export async function browserRunPanelRpc(store: RunPanelStore | undefined, method: string, payload: unknown, signal: AbortSignal): Promise<BrowserRunList | { item: BrowserRunSummary }> {
+export async function browserRunPanelRpc(store: RunPanelStore | undefined, method: string, payload: unknown, signal: AbortSignal,
+  newPage?: (run: BrowserRunRecord) => boolean): Promise<BrowserRunList | { item: BrowserRunSummary }> {
   if (store === undefined) throw new RunPanelError('unavailable')
   if (method === BRIDGE_RUN_LIST_METHOD) {
     const parsed = sessionPayload.safeParse(payload)
@@ -46,7 +49,7 @@ export async function browserRunPanelRpc(store: RunPanelStore | undefined, metho
       || b.updatedAt - a.updatedAt || a.runId.localeCompare(b.runId))
     const uncertain = reconciliationRequired(store, sessionId)
     const pending = store.dispatches.list(sessionId).some(row => row.effect === 'write' && (row.state === 'prepared' || row.state === 'sent_unconfirmed'))
-    return { items: records.slice(0, BROWSER_RUN_LIST_LIMIT).map(run => summary(run, uncertain, pending)), total: records.length }
+    return { items: records.slice(0, BROWSER_RUN_LIST_LIMIT).map(run => summary(run, uncertain, pending, newPage)), total: records.length }
   }
   if (method === BRIDGE_RUN_CONTROL_METHOD) {
     const parsed = controlPayload.safeParse(payload)
@@ -56,7 +59,7 @@ export async function browserRunPanelRpc(store: RunPanelStore | undefined, metho
     if (run === undefined || run.sessionId !== sessionId) throw new RunPanelError('not-found')
     const changed = await store.control(run.runId, expectedVersion, control, signal)
     const pending = store.dispatches.list(sessionId).some(row => row.effect === 'write' && (row.state === 'prepared' || row.state === 'sent_unconfirmed'))
-    return { item: summary(changed, reconciliationRequired(store, sessionId), pending) }
+    return { item: summary(changed, reconciliationRequired(store, sessionId), pending, newPage) }
   }
   throw new RunPanelError('bad-request')
 }

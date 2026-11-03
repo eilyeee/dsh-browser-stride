@@ -13,6 +13,14 @@ export class TargetLeaseRegistry {
   private readonly sessions = new Map<string | undefined, object>()
   private readonly tabs = new Map<number, { lifetime: object; document: object }>()
 
+  /** Fence a native creation before it has a tab; never adopts a later rebind. */
+  captureSession(sessionId: string): () => boolean {
+    let session = this.sessions.get(sessionId)
+    if (session === undefined) { session = {}; this.sessions.set(sessionId, session) }
+    const owner = this.owner
+    return () => this.owner === owner && this.sessions.get(sessionId) === session
+  }
+
   capture(sessionId: string | undefined, target: ToolTargetIdentity, resolve: () => ToolTargetIdentity | undefined): ToolTargetLease {
     let session = this.sessions.get(sessionId)
     if (session === undefined) { session = {}; this.sessions.set(sessionId, session) }

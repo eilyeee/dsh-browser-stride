@@ -12,6 +12,7 @@ import type { BrowserHostApi, HostEventFrame } from '../src/host-api.ts'
 import { createRunStorage } from './helpers/run-storage.ts'
 import { newBrowserTask } from '../src/task-contract.ts'
 import { asSessionId } from '../src/contracts/ids.ts'
+import { BRIDGE_TASK_PAGE_PREPARE_METHOD, BRIDGE_TASK_PAGE_CANCEL_METHOD } from '../src/protocol.ts'
 
 const TOKEN = 'deadbeefdeadbeefdeadbeefdeadbeef'
 
@@ -133,6 +134,81 @@ async function connectedLedger(scoped = false, autoConfirm = true, overrides: Pa
 }
 
 describe('recorded tool dispatch', () => {
+  it('reserves a native new page without starting, then consumes its exact startup once', async () => {
+    const selectTarget = vi.fn(), validateTarget = vi.fn()
+    const h = await connectedLedger(true, true, { tasks: { selectTarget, validateTarget, approval: vi.fn() } })
+    const run = await h.storage.store.create({ sessionId: asSessionId('native-page-task'), requiredCriteriaIds: ['task-goal'], task: newBrowserTask('Synthetic task') })
+    let next = 0
+    const request = async (method: string, payload: unknown) => {
+      const id = `native_${++next}`
+      send(h.ws, { t: 'rpc', id, method, payload })
+      await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === id))
+      return h.frames.find((frame): frame is Extract<BridgeFrame, { t: 'rpc.result' }> => frame.t === 'rpc.result' && frame.id === id)!
+    }
+    const scope = { runId: run.runId, sessionId: run.sessionId, expectedVersion: run.version, controlRevision: 0 }
+    const url = 'https://synthetic.test/settings'
+    const prepared = await request(BRIDGE_TASK_PAGE_PREPARE_METHOD, { ...scope, url })
+    expect(prepared.ok).toBe(true)
+    if (!prepared.ok) throw new Error('reservation failed')
+    const { startTicket, launchUrl } = prepared.result as { startTicket: string; launchUrl: string }
+    const ticket = { startTicket, launchUrl }
+    expect(validateTarget).toHaveBeenCalledWith(run.runId, url)
+    expect(selectTarget).not.toHaveBeenCalled()
+    expect(h.storage.store.get(run.runId)?.state).toBe('queued')
+    expect((await request(BRIDGE_TASK_PAGE_PREPARE_METHOD, { ...scope, url })).ok).toBe(false)
+    const target = { ...scope, targetBinding: 'page_native_new', targetUrl: url }
+    expect((await request(BRIDGE_TASK_START_METHOD, target)).ok).toBe(false)
+    expect(await request(BRIDGE_TASK_START_METHOD, { ...target, ...ticket, launchUrl: 'https://foreign.test/' })).toMatchObject({ ok: false, error: { code: 'start-rejected' } })
+    expect(await request(BRIDGE_TASK_START_METHOD, { ...target, ...ticket })).toMatchObject({ ok: true, result: { state: 'running', targetBinding: target.targetBinding } })
+    expect(selectTarget).toHaveBeenCalledOnce()
+    // A duplicate commit can never tell the extension to close a possibly active page.
+    expect(await request(BRIDGE_TASK_START_METHOD, { ...target, ...ticket })).toMatchObject({ ok: false, error: { code: 'start-uncertain' } })
+    expect(await request(BRIDGE_TASK_PAGE_CANCEL_METHOD, { runId: run.runId, sessionId: run.sessionId, startTicket: ticket.startTicket })).toMatchObject({ ok: true, result: { cancelled: false } })
+  })
+
+  it('keeps consumed startup uncertainty locked against both new-page and selected-page retries', async () => {
+    const h = await connectedLedger(true, true, { tasks: { selectTarget: vi.fn(), validateTarget: vi.fn(), approval: vi.fn() } })
+    const run = await h.storage.store.create({ sessionId: asSessionId('uncertain-page-task'), requiredCriteriaIds: ['task-goal'], task: newBrowserTask('Synthetic task') })
+    const scope = { runId: run.runId, sessionId: run.sessionId, expectedVersion: run.version, controlRevision: 0 }
+    const url = 'https://synthetic.test/settings'
+    send(h.ws, { t: 'rpc', id: 'reserve-uncertain', method: BRIDGE_TASK_PAGE_PREPARE_METHOD, payload: { ...scope, url } })
+    await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === 'reserve-uncertain'))
+    const response = h.frames.find((frame): frame is Extract<BridgeFrame, { t: 'rpc.result'; ok: true }> => frame.t === 'rpc.result' && frame.id === 'reserve-uncertain' && frame.ok)!
+    const { startTicket, launchUrl } = response.result as { startTicket: string; launchUrl: string }
+    const admission = { startTicket, launchUrl }
+    vi.spyOn(h.storage.store, 'startTask').mockRejectedValue(new Error('synthetic storage uncertainty'))
+    const payload = { ...scope, ...admission, targetBinding: 'page_uncertain', targetUrl: url }
+    send(h.ws, { t: 'rpc', id: 'commit-uncertain', method: BRIDGE_TASK_START_METHOD, payload })
+    await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === 'commit-uncertain'))
+    expect(h.frames).toContainEqual(expect.objectContaining({ id: 'commit-uncertain', ok: false, error: expect.objectContaining({ code: 'start-uncertain' }) }))
+    send(h.ws, { t: 'rpc', id: 'retry-uncertain', method: BRIDGE_TASK_START_METHOD, payload })
+    send(h.ws, { t: 'rpc', id: 're-reserve-uncertain', method: BRIDGE_TASK_PAGE_PREPARE_METHOD, payload: { ...scope, url } })
+    await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === 'retry-uncertain') && h.frames.some(frame => frame.t === 'rpc.result' && frame.id === 're-reserve-uncertain'))
+    expect(h.frames).toContainEqual(expect.objectContaining({ id: 'retry-uncertain', ok: false, error: expect.objectContaining({ code: 'start-uncertain' }) }))
+    expect(h.frames).toContainEqual(expect.objectContaining({ id: 're-reserve-uncertain', ok: false }))
+    expect(h.storage.store.startTask).toHaveBeenCalledOnce()
+  })
+
+  it('does not let a replacement connection consume or cancel an old native reservation', async () => {
+    const h = await connectedLedger(true, true, { tasks: { selectTarget: vi.fn(), validateTarget: vi.fn(), approval: vi.fn() } })
+    const run = await h.storage.store.create({ sessionId: asSessionId('replacement-task'), requiredCriteriaIds: ['task-goal'], task: newBrowserTask('Synthetic task') })
+    const scope = { runId: run.runId, sessionId: run.sessionId, expectedVersion: run.version, controlRevision: 0 }, url = 'https://synthetic.test/'
+    send(h.ws, { t: 'rpc', id: 'old-reserve', method: BRIDGE_TASK_PAGE_PREPARE_METHOD, payload: { ...scope, url } })
+    await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === 'old-reserve'))
+    const { startTicket, launchUrl } = h.frames.find((frame): frame is Extract<BridgeFrame, { t: 'rpc.result'; ok: true }> => frame.t === 'rpc.result' && frame.id === 'old-reserve' && frame.ok)!.result as { startTicket: string; launchUrl: string }
+    const result = { startTicket, launchUrl }
+    const replacement = await connect(h.url)
+    send(replacement.ws, { t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: TOKEN, caps: CAPS })
+    await waitFor(() => replacement.frames.some(frame => frame.t === 'hello.ok'))
+    send(replacement.ws, { t: 'rpc', id: 'foreign-commit', method: BRIDGE_TASK_START_METHOD,
+      payload: { ...scope, ...result, targetBinding: 'page_foreign', targetUrl: url } })
+    send(replacement.ws, { t: 'rpc', id: 'foreign-cancel', method: BRIDGE_TASK_PAGE_CANCEL_METHOD,
+      payload: { runId: run.runId, sessionId: run.sessionId, startTicket: result.startTicket } })
+    await waitFor(() => replacement.frames.some(frame => frame.t === 'rpc.result' && frame.id === 'foreign-cancel'))
+    expect(replacement.frames).toContainEqual(expect.objectContaining({ id: 'foreign-commit', ok: false, error: expect.objectContaining({ code: 'start-rejected' }) }))
+    expect(replacement.frames).toContainEqual(expect.objectContaining({ id: 'foreign-cancel', ok: true, result: { cancelled: false } }))
+    expect(h.storage.store.get(run.runId)?.state).toBe('queued')
+  })
   it('accepts budget waits only for the original live pending task call', async () => {
     const approval = vi.fn()
     const h = await connectedLedger(true, true, { tasks: { selectTarget: vi.fn(), approval } })

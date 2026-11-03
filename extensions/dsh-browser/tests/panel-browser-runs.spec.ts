@@ -22,6 +22,27 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => { root.unmount() }); vi.useRealTimers(); vi.restoreAllMocks() })
 
 describe('browser task panel boundaries', () => {
+  it('gates new-page startup by Host capability, saved opt-in, URL and genuine click', async () => {
+    const queued = { ...item('session-a', 'queued'), task: { goal: 'Synthetic goal', activeMs: 0, modelRequests: 0, toolCalls: 0, outcome: 'pending' as const, canStart: true, canStartNewPage: true } }
+    const rpc = vi.fn(async () => list(queued)), retargetRun = vi.fn(async () => {})
+    const render = (props: object) => root.render(createElement(BrowserRuns, { api: { rpc: rpc as PanelApi['rpc'], retargetRun }, sessionId: 'session-a', connected: true, copy: PANEL_COPY.en.runs, ...props }))
+    await act(async () => { render({ supportsNewPages: false }) })
+    expect(document.querySelector('.run-start-new-page')).toBeNull()
+    await act(async () => { render({ supportsNewPages: true }) })
+    expect(document.body.textContent).toContain('then save and connect')
+    expect(document.querySelector<HTMLButtonElement>('.run-start-new-page')?.disabled).toBe(true)
+    await act(async () => { render({ supportsNewPages: true, newPageRevision: 1 }) })
+    const input = document.querySelector<HTMLInputElement>('.browser-run-new-page input')!
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, 'https://synthetic.test/')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    const button = document.querySelector<HTMLButtonElement>('.run-start-new-page')!
+    expect(button.disabled).toBe(false)
+    await act(async () => { button.click() })
+    expect(retargetRun).not.toHaveBeenCalled()
+    expect(() => parseBrowserRuns(list({ ...queued, task: { ...queued.task, canStart: false } }), 'session-a')).toThrow()
+  })
   it('requires a selected native view and a real click for target handoff', async () => {
     const paused = { ...item('session-a', 'paused'), canRetarget: true }
     const rpc = vi.fn(async () => list(paused))

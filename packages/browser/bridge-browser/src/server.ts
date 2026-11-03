@@ -24,7 +24,8 @@ import { WebSocket, WebSocketServer } from 'ws'
 import { isRecord, type BrowserHostApi } from './host-api.ts'
 import { canonicalize, makeActionId, asRunId } from './contracts/ids.ts'
 import { z } from 'zod'
-import { BRIDGE_TASK_START_METHOD, BRIDGE_TASK_APPROVAL_METHOD } from './protocol.ts'
+import { BRIDGE_TASK_START_METHOD, BRIDGE_TASK_APPROVAL_METHOD, BRIDGE_TASK_PAGE_PREPARE_METHOD, BRIDGE_TASK_PAGE_CANCEL_METHOD, BRIDGE_RUN_LIST_METHOD, taskPageUrl } from './protocol.ts'
+import { TaskPageAdmissions, TaskPageAdmissionError } from './task-page-admissions.ts'
 import type { BrowserTaskRuntime } from './task-runtime.ts'
 import { toolCommandMaterial } from './tool-identity.ts'
 import type { ToolActionIdentity, ToolDispatchConfirmation } from './protocol.ts'
@@ -124,7 +125,7 @@ export interface BridgeServerDeps {
   dispatches?: Pick<BrowserDispatchLedger, 'prepare' | 'markSent' | 'settle' | 'get'>
   /** Trusted Host async execution scopes; never caller/model-supplied ids. */
   runs?: Pick<BrowserRunStore, 'executionFor' | 'assertDispatchAuthority' | 'retargetPaused' | 'startTask'> & RunPanelStore
-  tasks?: Pick<BrowserTaskRuntime, 'selectTarget' | 'approval'>
+  tasks?: Pick<BrowserTaskRuntime, 'selectTarget' | 'approval'> & Partial<Pick<BrowserTaskRuntime, 'validateTarget'>>
   /**
    * Test seam: force the remote address seen by the privilege gate. The
    * sandbox cannot bind arbitrary loopback literals, so the non-loopback
@@ -198,7 +199,10 @@ export class BridgeServer {
   private closed = false
   private disposal: Promise<void> | undefined
 
-  constructor(private readonly deps: BridgeServerDeps) {}
+  private readonly taskPages: TaskPageAdmissions
+  constructor(private readonly deps: BridgeServerDeps) {
+    this.taskPages = new TaskPageAdmissions(id => deps.runs?.get(id))
+  }
 
   /**
    * Handle one HTTP upgrade for the bridge path.
@@ -601,6 +605,34 @@ export class BridgeServer {
     // An ordered call may have waited while another connection replaced its
     // owner. It must never borrow the new connection's identity or signal.
     if (this.current !== conn || conn.abort.signal.aborted) return
+    if (frame.method === BRIDGE_TASK_PAGE_PREPARE_METHOD || frame.method === BRIDGE_TASK_PAGE_CANCEL_METHOD) {
+      try {
+        const id = z.string().min(1).max(200).refine(value => value.trim() === value)
+        if (frame.method === BRIDGE_TASK_PAGE_CANCEL_METHOD) {
+          const payload = z.strictObject({ runId: id, sessionId: id, startTicket: id }).parse(frame.payload)
+          const cancelled = this.taskPages.cancel(asRunId(payload.runId), payload.sessionId, payload.startTicket, conn)
+          sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true, result: { cancelled } })
+          return
+        }
+        const counter = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER)
+        const payload = z.strictObject({ runId: id, sessionId: id, expectedVersion: counter, controlRevision: counter,
+          url: z.string().max(8192) }).parse(frame.payload)
+        const url = taskPageUrl(payload.url)
+        const runs = this.deps.runs
+        if (runs === undefined || this.deps.tasks?.validateTarget === undefined || url === undefined) throw new Error('unavailable')
+        const list = await browserRunPanelRpc(runs, BRIDGE_RUN_LIST_METHOD, { sessionId: payload.sessionId }, conn.abort.signal)
+        if (!('items' in list) || !list.items.some(run => run.runId === payload.runId && run.task?.canStart)) throw new Error('unavailable')
+        const run = runs.get(asRunId(payload.runId))
+        if (this.current !== conn || conn.abort.signal.aborted || run === undefined || run.sessionId !== payload.sessionId) throw new Error('unavailable')
+        this.deps.tasks.validateTarget(run.runId, url)
+        const admission = this.taskPages.reserve(run, payload, conn)
+        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true, result: admission })
+      } catch {
+        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false,
+          error: { code: 'start-rejected', message: 'A new task page could not be reserved. Refresh task status before trying again.' } })
+      }
+      return
+    }
     if (frame.method === BRIDGE_TASK_APPROVAL_METHOD) {
       const value = frame.payload as { requestId?: unknown; waiting?: unknown } | null
       const pending = typeof value?.requestId === 'string' ? this.pendingTools.get(value.requestId) : undefined
@@ -613,15 +645,19 @@ export class BridgeServer {
       return
     }
     if (frame.method === BRIDGE_RUN_RETARGET_METHOD || frame.method === BRIDGE_TASK_START_METHOD) {
+      let consumed = false
+      const newPage = isRecord(frame.payload) && frame.payload.startTicket !== undefined
       try {
         const id = z.string().min(1).max(200).refine(value => value.trim() === value)
         const counter = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER)
         const payload = z.strictObject({ runId: id, sessionId: id, expectedVersion: counter,
-          controlRevision: counter, targetBinding: id, targetUrl: z.string().max(8192).optional() }).parse(frame.payload)
+          controlRevision: counter, targetBinding: id, targetUrl: z.string().max(8192).optional(),
+          startTicket: id.optional(), launchUrl: z.string().max(8192).optional() }).parse(frame.payload)
         const runs = this.deps.runs
         if (runs === undefined) throw new Error('unavailable')
         const run = runs.get(asRunId(payload.runId))
         if (run === undefined || run.sessionId !== payload.sessionId) throw new Error('foreign run')
+        if (newPage && run.state !== 'queued') throw new TaskPageAdmissionError(true)
         const attachTarget = (revision: number) => {
           if (this.current !== conn || conn.abort.signal.aborted) throw new Error('connection changed')
           const previous = this.runTargets.get(run.runId)
@@ -634,6 +670,15 @@ export class BridgeServer {
           this.runTargets.set(run.runId, { sessionId: run.sessionId, controlRevision: revision, connectionId: conn.connectionId, id: payload.targetBinding })
         }
         if (payload.controlRevision !== run.controlRevision) throw new Error('stale revision')
+        if (payload.startTicket !== undefined) {
+          if (frame.method !== BRIDGE_TASK_START_METHOD || run.task === undefined) throw new Error('unavailable')
+          this.taskPages.consume(run, { startTicket: payload.startTicket, launchUrl: payload.launchUrl,
+            expectedVersion: payload.expectedVersion, controlRevision: payload.controlRevision }, conn)
+          consumed = true
+        } else if (frame.method === BRIDGE_TASK_START_METHOD) {
+          if (payload.launchUrl !== undefined) throw new Error('unavailable')
+          this.taskPages.assertUnreserved(run)
+        }
         const changed = frame.method === BRIDGE_TASK_START_METHOD
           ? await runs.startTask(run.runId, payload.expectedVersion, attachTarget, conn.abort.signal)
           : await runs.retargetPaused(run.runId, payload.expectedVersion, payload.controlRevision, attachTarget, conn.abort.signal)
@@ -641,7 +686,9 @@ export class BridgeServer {
           sessionId: changed.sessionId, version: changed.version, controlRevision: changed.controlRevision,
           state: changed.state, targetBinding: payload.targetBinding } })
       } catch (error) {
-        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false, error: browserRunPanelFailure(error) })
+        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false, error: newPage
+          ? { code: consumed || (error instanceof TaskPageAdmissionError && error.mayHaveStarted) ? 'start-uncertain' : 'start-rejected', message: 'Task startup was not confirmed. Refresh task status before another action.' }
+          : browserRunPanelFailure(error) })
       }
       return
     }
@@ -672,7 +719,8 @@ export class BridgeServer {
     }
     if (frame.method.startsWith('bridge.browserRuns.')) {
       try {
-        const value = await browserRunPanelRpc(this.deps.runs, frame.method, frame.payload, conn.abort.signal)
+        const value = await browserRunPanelRpc(this.deps.runs, frame.method, frame.payload, conn.abort.signal,
+          this.deps.tasks?.validateTarget === undefined ? undefined : run => this.taskPages.available(run))
         sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true,
           result: { type: 'server-response', rpcId: frame.id, result: { ok: true, value } } })
       } catch (error) {

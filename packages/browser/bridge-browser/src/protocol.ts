@@ -43,13 +43,15 @@ export const BRIDGE_RUN_LIST_METHOD = 'bridge.browserRuns.list'
 export const BRIDGE_RUN_CONTROL_METHOD = 'bridge.browserRuns.control'
 export const BRIDGE_RUN_RETARGET_METHOD = 'bridge.browserRuns.retarget'
 export const BRIDGE_TASK_START_METHOD = 'bridge.browserTasks.start'
+export const BRIDGE_TASK_PAGE_PREPARE_METHOD = 'bridge.browserTasks.preparePage'
+export const BRIDGE_TASK_PAGE_CANCEL_METHOD = 'bridge.browserTasks.cancelPage'
 export const BRIDGE_TASK_APPROVAL_METHOD = 'bridge.browserTasks.approval'
 export const BROWSER_RUN_LIST_LIMIT = 20
 export const BROWSER_RUN_STATES = ['queued', 'running', 'blocked', 'paused', 'stopping', 'stopped', 'completed', 'failed'] as const
 export type PanelRunControl = 'pause' | 'stop'
 export interface BrowserRunSummary {
   task?: { goal: string; activeMs: number; modelRequests: number; toolCalls: number;
-    outcome: 'pending' | 'verified' | 'needs-review' | 'not-completed' | 'budget-exhausted'; canStart: boolean }
+    outcome: 'pending' | 'verified' | 'needs-review' | 'not-completed' | 'budget-exhausted'; canStart: boolean; canStartNewPage?: boolean }
   /** Optional capability: absent on older compatible Hosts. */
   canRetarget?: boolean
   runId: string
@@ -63,6 +65,16 @@ export interface BrowserRunSummary {
   controls: PanelRunControl[]
 }
 export interface BrowserRunList { items: BrowserRunSummary[]; total: number }
+
+/** A visible native start URL; page/model material never authorizes a launch. */
+export function taskPageUrl(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length > 8192 || /[\u0000-\u001f\u007f]/.test(value)) return
+  try {
+    const url = new URL(value.trim())
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return
+    return url.href
+  } catch { return }
+}
 
 /** Seconds a fresh socket may take to present `hello` before it is closed. */
 export const HELLO_TIMEOUT_MS = 5_000

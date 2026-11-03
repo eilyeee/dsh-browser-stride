@@ -14,13 +14,16 @@ export class RunTargetRegistry {
   /** A user-selected future revision; never usable as an unscoped first pin. */
   prepare(scope: Extract<ToolExecutionScope, { kind: 'run' }>, sessionId: string, target: ToolTargetLease): Pick<RunTargetBinding, 'id' | 'current'> | undefined {
     const key = JSON.stringify([scope.runId, scope.controlRevision])
-    if (!target.current() || this.entries.has(key) || this.entries.size + this.prepared.size >= this.capacity) return
+    if (!target.current() || this.entries.has(key) || [...this.prepared.values()].some(value => value.key === key)
+      || this.entries.size + this.prepared.size >= this.capacity) return
     const binding: Binding = { sessionId, id: this.makeId(), target, awaiting: true }
     this.prepared.set(binding.id, { key, binding })
     const owner = this.owner
     return Object.freeze({ id: binding.id, current: () => this.owner === owner && binding.target.current()
       && (this.prepared.get(binding.id)?.binding === binding || this.entries.get(key) === binding) })
   }
+
+  discardPrepared(id: string): void { this.prepared.delete(id) }
 
   join(scope: Extract<ToolExecutionScope, { kind: 'run' }>, sessionId: string, target: ToolTargetLease, expected?: string): RunTargetBinding | undefined {
     if (!target.current()) return

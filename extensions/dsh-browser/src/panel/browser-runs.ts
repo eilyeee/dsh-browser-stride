@@ -10,6 +10,9 @@ export interface BrowserRunCopy {
   retargetHelp: string
   start: string
   waitingHelp: string
+  newPageUrl: string
+  startNewPage: string
+  automaticControlRequired: string
   outcomes: Record<NonNullable<BrowserRunSummary['task']>['outcome'], string>
   refresh: string
   loading: string
@@ -47,9 +50,11 @@ export function parseBrowserRuns(value: unknown, sessionId: string): BrowserRunL
       if (!record(value) || typeof value.goal !== 'string' || value.goal.trim() === '' || value.goal.length > 4096
         || !counter(value.activeMs) || !counter(value.modelRequests) || !counter(value.toolCalls)
         || !['pending', 'verified', 'needs-review', 'not-completed', 'budget-exhausted'].includes(value.outcome as string)
-        || typeof value.canStart !== 'boolean' || (value.canStart && (state !== 'queued' || item.recoveryRequired || item.requiresReconciliation))) throw new Error('invalid browser task')
+        || typeof value.canStart !== 'boolean' || (value.canStart && (state !== 'queued' || item.recoveryRequired || item.requiresReconciliation))
+        || (value.canStartNewPage !== undefined && (typeof value.canStartNewPage !== 'boolean' || (value.canStartNewPage && !value.canStart)))) throw new Error('invalid browser task')
       task = { goal: value.goal, activeMs: value.activeMs, modelRequests: value.modelRequests, toolCalls: value.toolCalls,
-        outcome: value.outcome as NonNullable<BrowserRunSummary['task']>['outcome'], canStart: value.canStart }
+        outcome: value.outcome as NonNullable<BrowserRunSummary['task']>['outcome'], canStart: value.canStart,
+        ...(value.canStartNewPage === undefined ? {} : { canStartNewPage: value.canStartNewPage }) }
     }
     seen.add(item.runId)
     return { runId: item.runId, sessionId, state, version: item.version, controlRevision: item.controlRevision,

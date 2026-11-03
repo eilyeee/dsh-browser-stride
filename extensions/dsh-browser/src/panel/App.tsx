@@ -632,6 +632,7 @@ export function App(): React.JSX.Element {
   const [state, setState] = useState<BridgeState>('stopped')
   const [caps, setCaps] = useState<BridgeCaps | null>(null)
   const [settings, setSettings] = useState<PanelSettings | null>(null)
+  const [automaticControlSaved, setAutomaticControlSaved] = useState(false)
   const [pairingStatus, setPairingStatus] = useState<BrowserPairingStatus>({ phase: 'idle' })
   const pairingBusy = ['requesting', 'pending', 'saving'].includes(pairingStatus.phase)
   const unpairingConnection = pairingStatus.phase === 'unpairing'
@@ -803,6 +804,7 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     void chrome.storage.local.get('dshSettings').then((stored) => {
       const raw = stored.dshSettings as Partial<PanelSettings> | undefined
+      setAutomaticControlSaved(raw?.autoControlNewTabs === true)
       setSettings({
         bridgeUrl: raw?.bridgeUrl ?? '',
         token: '',
@@ -1647,6 +1649,7 @@ export function App(): React.JSX.Element {
       if (!relaySaved) return
       const { token, ...otherSettings } = settings
       await api.updateSettings({ ...otherSettings, ...(token.trim() === '' ? {} : { token: token.trim() }) })
+      setAutomaticControlSaved(otherSettings.autoControlNewTabs)
       setSettings(current => current !== null && current.token === token ? { ...current, token: '' } : current)
       setShowSettings(false)
       await refreshSessionModels(sessionRef.current)
@@ -2303,6 +2306,8 @@ export function App(): React.JSX.Element {
         </section>
       )}
       <BrowserRuns api={api} sessionId={sessionRef.current} connected={state === 'connected' && !sessionChanging} copy={copy.runs}
+        supportsNewPages={import.meta.env.EXT_TARGET !== 'firefox'}
+        {...(automaticControlSaved && tabAffinity !== null ? { newPageRevision: tabAffinity.revision } : {})}
         {...(pageAccess.activeGranted && tabAffinity?.active !== undefined && tabAffinity.active !== null ? { startRevision: tabAffinity.revision } : {})}
         {...(pageAccess.controlledGranted && tabAffinity !== null && (tabAffinity.status === 'following' || tabAffinity.status === 'background') && tabAffinity.controlled !== null ? { targetRevision: tabAffinity.revision } : {})} />
       <div className="messages-pane">

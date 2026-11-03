@@ -135,7 +135,7 @@ export interface PanelApi {
   onSessionResumeHint(callback: (sessionId: string | null) => void): () => void
   respondToApproval(id: string, decision: ApprovalDecision): Promise<void>
   resolveTabAffinity(revision: number, decision: TabAffinityDecision, sessionId: string | null): Promise<void>
-  retargetRun(payload: { runId: string; sessionId: string; expectedVersion: number; controlRevision: number; affinityRevision: number; start?: boolean; task?: boolean }): Promise<void>
+  retargetRun(payload: { runId: string; sessionId: string; expectedVersion: number; controlRevision: number; affinityRevision: number; start?: boolean; task?: boolean; newPageUrl?: string }): Promise<void>
   rebindTabAffinity(): Promise<void>
   unbindTabAffinity(revision: number, sessionId: string | null): Promise<void>
   /** Clear all selection state, or only the exact selection supplied. */
@@ -475,7 +475,7 @@ export function connectPanel(): PanelApi {
         const timer = setTimeout(() => {
           pendingRebinds.delete(id)
           reject(new PanelRpcError('timeout', 'Task target change was not confirmed; refresh its status.'))
-        }, 17_000)
+        }, payload.newPageUrl === undefined ? 17_000 : 37_000)
         const entry = { resolve: () => { clearTimeout(timer); resolve() }, reject: (error: Error) => { clearTimeout(timer); reject(error) } }
         pendingRebinds.set(id, entry)
         void send({ type: 'browser-run.retarget', id, ...payload }, { kind: 'rebind', id }).catch((cause: unknown) => {
