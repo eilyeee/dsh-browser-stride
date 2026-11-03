@@ -125,6 +125,7 @@ export interface BridgeServerDeps {
   dispatches?: Pick<BrowserDispatchLedger, 'prepare' | 'markSent' | 'settle' | 'get'>
   /** Trusted Host async execution scopes; never caller/model-supplied ids. */
   runs?: Pick<BrowserRunStore, 'executionFor' | 'assertDispatchAuthority' | 'retargetPaused' | 'startTask'> & RunPanelStore
+    & Partial<Pick<BrowserRunStore, 'pauseDisconnectedTask'>>
   tasks?: Pick<BrowserTaskRuntime, 'selectTarget' | 'approval'> & Partial<Pick<BrowserTaskRuntime, 'validateTarget'>>
   /**
    * Test seam: force the remote address seen by the privilege gate. The
@@ -845,14 +846,24 @@ export class BridgeServer {
     const conn = this.current
     if (conn === null) return
     this.current = null
+    // Keep the transport interruption classified as connection loss before
+    // execution cancellation. These waiters settle asynchronously after disk.
+    for (const pending of this.pendingTools.values()) if (pending.owner === conn) {
+      pending.finish({ state: 'unresolved', reason: 'connection-closed' }, undefined,
+        new BridgeToolError('bridge-closed', 'the extension connection was replaced; action delivery may be unknown'))
+    }
+    // Fence in this same turn, before a caller can resume or another model
+    // request can start. Durable pause may queue behind counters/startup.
+    if (this.deps.runs?.pauseDisconnectedTask !== undefined) {
+      for (const [id, target] of this.runTargets) if (target.connectionId === conn.connectionId) {
+        try { void this.track(this.deps.runs.pauseDisconnectedTask(asRunId(id), target.controlRevision)).catch(() => {}) }
+        catch { /* Store closure/storage failure already revokes execution. */ }
+      }
+    }
     clearInterval(conn.ping)
     conn.abort.abort()
     if (conn.ws.readyState === WebSocket.OPEN || conn.ws.readyState === WebSocket.CONNECTING) {
       conn.ws.close(4000, 'replaced')
-    }
-    for (const pending of this.pendingTools.values()) {
-      pending.finish({ state: 'unresolved', reason: 'connection-closed' }, undefined,
-        new BridgeToolError('bridge-closed', 'the extension connection was replaced; action delivery may be unknown'))
     }
   }
 }

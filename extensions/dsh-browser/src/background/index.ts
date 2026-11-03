@@ -59,7 +59,7 @@ import { ToolExecutionFence } from './execution-authority.ts'
 import { PageAccess, type CreatedPageAccess } from './page-access.ts'
 import { debuggerPages, sendPageMessage } from './debugger-pages.ts'
 import { RunTargetRegistry, type RunTargetBinding } from './run-targets.ts'
-import { startTaskPage, cleanupOwnedTaskPage, type PreparedTaskPage } from './task-page-start.ts'
+import { startTaskPage, taskPageGrant, cleanupOwnedTaskPage, type PreparedTaskPage } from './task-page-start.ts'
 import { localBridgeUrl } from './bridge-address.ts'
 import { requestBrowserPairing, revokeBrowserPairing, type BrowserPairingStatus } from './pairing-client.ts'
 import { createRpc, BridgeRpcError } from './rpc.ts'
@@ -1887,7 +1887,9 @@ chrome.runtime.onConnect.addListener((port) => {
                     () => { if (!nativeCurrent() || access?.current() !== true) throw new Error('Task page control changed') }, false,
                     async created => {
                       tabId = created
-                      await pageAccess.grantCreated(created, nativeCurrent, controller.signal, lease => { access = lease })
+                      const grant = taskPageGrant(() => automaticAccessActive && automaticAccessRevision === automaticRevision, nativeCurrent)
+                      await pageAccess.grantCreated(created, grant.current, controller.signal, lease => { access = lease })
+                      grant.accept()
                     }, created => access ?? { current: () => false, release: async () => {}, canClose: () => pageAccess.unclaimed(created) })
                   if (!answer.ok || boundTarget === undefined || !nativeCurrent()) throw new Error('Task page could not be bound')
                   const live = await prepareToolTarget(boundTarget, sid, controller.signal)
@@ -2022,7 +2024,7 @@ chrome.runtime.onConnect.addListener((port) => {
       }
       case 'settings': {
         cancelBrowserPairing()
-        const settingsMsg = message as { id?: unknown; settings: Partial<Settings> }
+        const settingsMsg = message as { id?: unknown; settings: Partial<Settings>; connect?: unknown }
         const requestId = typeof settingsMsg.id === 'string' ? settingsMsg.id : undefined
         void settingsReady.then(async () => {
           try {
@@ -2031,7 +2033,7 @@ chrome.runtime.onConnect.addListener((port) => {
             const connectionChanged = settings.bridgeUrl !== previousConnection.bridgeUrl
               || settings.token !== previousConnection.token
             if (panelPorts.size > 0) {
-              if (connectionChanged) await startBridge()
+              if (connectionChanged || (settingsMsg.connect === true && (bridge === null || bridge.state === 'stopped'))) await startBridge()
               broadcastStatus()
             } else if (connectionChanged) {
               // The settings write outlived its originating panel. Do not keep a

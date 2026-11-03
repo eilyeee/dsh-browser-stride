@@ -43,3 +43,39 @@ test('the task fixture verifies persisted state over loopback while pinning the 
   assert.equal(response.status, 200)
   assert.deepEqual(await verifier.verify({ signal }), { fieldValues: { testSetting: 'enabled', persisted: 'true' } })
 })
+
+test('the disconnect fixture holds just one completed snapshot until its original tool signal aborts', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'stride-task-disconnect-test-'))
+  const trigger = join(root, 'trigger.json'), result = join(root, 'result.json')
+  const events = new Map(), cleanup = []
+  const controller = new AbortController()
+  const agent = { id: 'synthetic-session' }
+  const ctx = { on(name, fn) { events.set(name, fn) }, effect(fn) { cleanup.push(fn()) },
+    browserRuns: { onChange() { return () => {} } } }
+  t.after(async () => {
+    controller.abort()
+    for (const stop of cleanup.reverse()) await stop()
+    await rm(root, { recursive: true, force: true })
+  })
+  await writeFile(trigger, JSON.stringify({ sessionId: agent.id, disconnectOnce: true }))
+  apply(ctx, { trigger, result })
+  const waitFile = async path => {
+    const deadline = Date.now() + 3000
+    while (true) {
+      try { await readFile(path); return } catch {}
+      assert.ok(Date.now() < deadline, 'fixture timeout')
+      await delay(5)
+    }
+  }
+  await waitFile(`${result}.ready`)
+  let settled = false, invocations = 0
+  const answer = { isError: false, content: [] }
+  const call = () => events.get('tools/execute')({ agent, name: 'browser_snapshot', signal: controller.signal }, async () => { invocations++; return answer })
+  const pending = call().then(value => { settled = true; return value })
+  await waitFile(`${result}.disconnect-ready`)
+  assert.equal(settled, false)
+  controller.abort()
+  assert.equal(await pending, answer)
+  assert.equal(await call(), answer)
+  assert.equal(invocations, 2, 'the fixture never replays the completed read')
+})

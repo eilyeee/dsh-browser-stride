@@ -1648,7 +1648,7 @@ export function App(): React.JSX.Element {
       const relaySaved = await saveRelayProfiles()
       if (!relaySaved) return
       const { token, ...otherSettings } = settings
-      await api.updateSettings({ ...otherSettings, ...(token.trim() === '' ? {} : { token: token.trim() }) })
+      await api.updateSettings({ ...otherSettings, ...(token.trim() === '' ? {} : { token: token.trim() }) }, { connect: true })
       setAutomaticControlSaved(otherSettings.autoControlNewTabs)
       setSettings(current => current !== null && current.token === token ? { ...current, token: '' } : current)
       setShowSettings(false)

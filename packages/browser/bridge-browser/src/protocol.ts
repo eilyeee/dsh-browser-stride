@@ -54,6 +54,8 @@ export interface BrowserRunSummary {
     outcome: 'pending' | 'verified' | 'needs-review' | 'not-completed' | 'budget-exhausted'; canStart: boolean; canStartNewPage?: boolean }
   /** Optional capability: absent on older compatible Hosts. */
   canRetarget?: boolean
+  /** Optional Host-recorded reason; never supplied by a page or model. */
+  pauseReason?: 'browser-disconnected'
   runId: string
   sessionId: string
   state: typeof BROWSER_RUN_STATES[number]

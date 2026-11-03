@@ -543,6 +543,15 @@ describe('background bridge lifecycle', () => {
 
     expect(FakeWebSocket.instances).toHaveLength(1)
     expect(fetchMock).toHaveBeenCalledTimes(2)
+    // Policy persistence alone still cannot take the connection back.
+    panel.onMessage.emit({ type: 'settings', id: 'policy-only', settings: { approvalNotifications: false } })
+    await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith({ type: 'settings.result', id: 'policy-only', ok: true }))
+    expect(FakeWebSocket.instances).toHaveLength(1)
+    // Save and connect explicitly retries even when URL/credential did not change.
+    panel.onMessage.emit({ type: 'settings', id: 'manual-connect', settings: { approvalNotifications: false }, connect: true })
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2))
+    panel.onDisconnect.emit()
+    FakeWebSocket.instances[1]!.close()
   })
 
   it('invalidates stale connection settings when their save outlives the panel', async () => {

@@ -9,6 +9,20 @@ no release version has been assigned yet.
 
 ### Fixed
 
+- Losing or replacing a browser connection immediately fences explicit tasks
+  owned by its native target and cancels their active Agent scope before the
+  durable pause is queued. The panel records a connection-loss pause reason;
+  reconnecting never resumes the task. Explicit selected-page continuation uses
+  a fresh revision, while pending, unresolved and failed writes still block it.
+  Old connection events cannot pause a successor revision. Host restart recovery
+  and automatic write reconciliation remain unavailable.
+- **Save and connect** can reconnect a stopped bridge without changing its
+  address or credential. Policy-only saves and keepalive still cannot reclaim
+  a connection that another client replaced.
+- Accepted native task-page grants no longer depend on their original startup
+  connection, panel or session binding. Preparation remains fenced; later page
+  calls require fresh task/connection authority, and native stop or opt-in
+  revocation still withdraws page access.
 - Browser model guidance aligns direct new-page opening with the tool contract,
   explains returning observations from `run_code`, and distinguishes requested
   page confirmation from independent persistence proof. It discourages repeated

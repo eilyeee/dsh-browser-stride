@@ -17,6 +17,7 @@ export interface BrowserRunCopy {
   refresh: string
   loading: string
   pausedHelp: string
+  disconnectedHelp: string
   stoppingHelp: string
   reconcileHelp: string
   truncated: (shown: number, total: number) => string
@@ -37,6 +38,7 @@ export function parseBrowserRuns(value: unknown, sessionId: string): BrowserRunL
       || !BROWSER_RUN_STATES.includes(item.state as BrowserRunSummary['state'])
       || !counter(item.version) || !counter(item.controlRevision) || !counter(item.updatedAt)
       || typeof item.recoveryRequired !== 'boolean' || typeof item.requiresReconciliation !== 'boolean'
+      || (item.pauseReason !== undefined && (item.pauseReason !== 'browser-disconnected' || item.state !== 'paused' || item.task === undefined))
       || (item.canRetarget !== undefined && (typeof item.canRetarget !== 'boolean'
         || (item.canRetarget && (item.state !== 'paused' || item.recoveryRequired || item.requiresReconciliation))))
       || !Array.isArray(item.controls) || new Set(item.controls).size !== item.controls.length) throw new Error('invalid browser run summary')
@@ -59,6 +61,7 @@ export function parseBrowserRuns(value: unknown, sessionId: string): BrowserRunL
     seen.add(item.runId)
     return { runId: item.runId, sessionId, state, version: item.version, controlRevision: item.controlRevision,
       updatedAt: item.updatedAt, recoveryRequired: item.recoveryRequired, requiresReconciliation: item.requiresReconciliation,
+      ...(item.pauseReason === undefined ? {} : { pauseReason: item.pauseReason as 'browser-disconnected' }),
       controls: [...item.controls], ...(item.canRetarget === undefined ? {} : { canRetarget: item.canRetarget }), ...(task === undefined ? {} : { task }) }
   })
   return { items, total: value.total }

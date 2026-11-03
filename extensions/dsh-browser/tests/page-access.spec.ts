@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PageAccess, PAGE_ACCESS_KEY, CONTROL_GROUP_TITLE, type CreatedPageAccess } from '../src/background/page-access.ts'
 import { debuggerPages } from '../src/background/debugger-pages.ts'
+import { taskPageGrant } from '../src/background/task-page-start.ts'
 
 function fixture() {
   const data: Record<string, unknown> = {}
@@ -42,6 +43,35 @@ function fixture() {
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 describe('native page access and visible control group', () => {
+  it('keeps accepted task-page consent independent of its old startup connection while honoring native revocation', async () => {
+    const h = fixture(), page = h.page(42)
+    let startupCurrent = true, automaticAllowed = true
+    let debuggerAllowed!: () => boolean
+    const scope = taskPageGrant(() => automaticAllowed, () => startupCurrent)
+    vi.spyOn(debuggerPages, 'attachCreated').mockImplementation(async (_id, current) => { debuggerAllowed = current })
+    vi.spyOn(debuggerPages, 'ready').mockResolvedValue(true)
+    vi.spyOn(debuggerPages, 'has').mockReturnValue(true)
+    vi.spyOn(debuggerPages, 'detach').mockResolvedValue()
+    await h.access.grantCreated(42, scope.current, new AbortController().signal)
+    scope.accept()
+    startupCurrent = false // Old request/port/connection expires; fresh task calls still need their own fences.
+    expect(debuggerAllowed()).toBe(true)
+    expect(h.access.allows(page)).toBe(true)
+    automaticAllowed = false
+    expect(debuggerAllowed()).toBe(false)
+    automaticAllowed = true
+    await h.access.revoke(42)
+    expect(debuggerAllowed()).toBe(false)
+    expect(h.access.has(42)).toBe(false)
+  })
+  it('cannot adopt a native task-page grant after its preparation or opt-in was revoked', () => {
+    let current = true
+    const scope = taskPageGrant(() => true, () => current)
+    current = false
+    expect(scope.current()).toBe(false)
+    expect(() => scope.accept()).toThrow()
+    expect(() => taskPageGrant(() => false, () => true).accept()).toThrow()
+  })
   it('keeps pending automatic grants private through load events and excludes them from earlier requests', async () => {
     const h = fixture(), created = h.page(42)
     let finish!: () => void

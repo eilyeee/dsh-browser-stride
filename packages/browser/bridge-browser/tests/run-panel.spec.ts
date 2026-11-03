@@ -18,6 +18,20 @@ async function setup() {
 }
 
 describe('panel browser-run metadata and controls', () => {
+  it('projects the Host pause reason and blocks continuation after a disconnected write', async () => {
+    const fixture = await createRunStorage()
+    fixtures.push(fixture)
+    const queued = await fixture.store.create({ sessionId, requiredCriteriaIds: ['saved'], task: newBrowserTask('Synthetic task') })
+    const run = await fixture.store.startTask(queued.runId, queued.version, () => {})
+    await fixture.store.pauseDisconnectedTask(run.runId, 0)
+    const read = () => browserRunPanelRpc(fixture.store, BRIDGE_RUN_LIST_METHOD, { sessionId }, signal())
+    expect(await read()).toMatchObject({ items: [{ state: 'paused', pauseReason: 'browser-disconnected', canRetarget: true }] })
+    await fixture.store.dispatches.prepare({ requestId: 'uncertain-pause-write', connectionId: 'synthetic', sessionId,
+      name: 'browser_click', args: {}, expiresAt: Date.now() + 60000 })
+    await fixture.store.dispatches.markSent('uncertain-pause-write')
+    await fixture.store.dispatches.settle('uncertain-pause-write', { state: 'unresolved', reason: 'connection-closed' })
+    expect(await read()).toMatchObject({ items: [{ pauseReason: 'browser-disconnected', canRetarget: false, requiresReconciliation: true }] })
+  })
   it('advertises new-page startup optionally and blocks all startup while a native reservation exists', async () => {
     const fixture = await createRunStorage()
     fixtures.push(fixture)

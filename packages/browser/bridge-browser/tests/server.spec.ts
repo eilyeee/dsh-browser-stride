@@ -134,6 +134,67 @@ async function connectedLedger(scoped = false, autoConfirm = true, overrides: Pa
 }
 
 describe('recorded tool dispatch', () => {
+  it.each(['close', 'replace'] as const)('pauses only the task owned by a lost native connection on %s and permits explicit fresh handoff', async loss => {
+    const h = await connectedLedger(true, true, { tasks: { selectTarget: vi.fn(), approval: vi.fn() } })
+    const queued = await h.storage.store.create({ sessionId: asSessionId('disconnect-task'), requiredCriteriaIds: ['task-goal'], task: newBrowserTask('Synthetic task') })
+    const scope = { runId: queued.runId, sessionId: queued.sessionId, expectedVersion: queued.version, controlRevision: 0 }
+    send(h.ws, { t: 'rpc', id: 'native-start-before-loss', method: BRIDGE_TASK_START_METHOD,
+      payload: { ...scope, targetBinding: 'page_original', targetUrl: 'https://synthetic.test/' } })
+    await waitFor(() => h.storage.store.get(queued.runId)?.state === 'running')
+    const unrelated = await h.storage.store.create({ sessionId: asSessionId('unrelated-task'), requiredCriteriaIds: ['task-goal'], task: newBrowserTask('Unrelated task') })
+    let replacement: Awaited<ReturnType<typeof connect>> | undefined
+    await h.storage.store.withExecution(queued.runId, 0, async () => {
+      const execution = h.storage.store.executionFor()!
+      if (loss === 'close') { h.ws.close(); await h.done }
+      else {
+        replacement = await connect(h.url)
+        send(replacement.ws, { t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: TOKEN, caps: CAPS })
+        await waitFor(() => replacement!.frames.some(frame => frame.t === 'hello.ok'))
+      }
+      await waitFor(() => h.storage.store.get(queued.runId)?.state === 'paused')
+      expect(execution.signal.aborted).toBe(true)
+      expect(() => h.storage.store.assertDispatchAuthority(execution)).toThrow()
+    })
+    expect(h.storage.store.get(unrelated.runId)).toEqual(unrelated)
+    const paused = h.storage.store.get(queued.runId)!
+    expect(paused).toMatchObject({ pauseReason: 'browser-disconnected', controlRevision: 1 })
+    if (replacement === undefined) {
+      replacement = await connect(h.url)
+      send(replacement.ws, { t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: TOKEN, caps: CAPS })
+      await waitFor(() => replacement!.frames.some(frame => frame.t === 'hello.ok'))
+    }
+    expect(h.storage.store.get(queued.runId)?.state).toBe('paused') // Reconnect is not continuation.
+    send(replacement.ws, { t: 'rpc', id: 'explicit-after-loss', method: BRIDGE_RUN_RETARGET_METHOD, payload: { ...scope,
+      expectedVersion: paused.version, controlRevision: paused.controlRevision, targetBinding: 'page_fresh', targetUrl: 'https://synthetic.test/' } })
+    await waitFor(() => replacement!.frames.some(frame => frame.t === 'rpc.result' && frame.id === 'explicit-after-loss'))
+    expect(replacement.frames).toContainEqual(expect.objectContaining({ id: 'explicit-after-loss', ok: true, result: expect.objectContaining({ state: 'running', controlRevision: 3 }) }))
+    expect(h.storage.store.get(queued.runId)).not.toHaveProperty('pauseReason')
+    // Closing the old socket again cannot pause the successor's revision.
+    h.ws.terminate()
+    await h.done
+    expect(h.storage.store.get(queued.runId)?.state).toBe('running')
+  })
+
+  it('keeps an unanswered write unresolved and refuses continuation after connection loss', async () => {
+    const h = await connectedLedger(true, true, { tasks: { selectTarget: vi.fn(), approval: vi.fn() } })
+    const queued = await h.storage.store.create({ sessionId: asSessionId('disconnect-write-task'), requiredCriteriaIds: ['task-goal'], task: newBrowserTask('Synthetic task') })
+    send(h.ws, { t: 'rpc', id: 'start-write-loss', method: BRIDGE_TASK_START_METHOD, payload: { runId: queued.runId, sessionId: queued.sessionId,
+      expectedVersion: queued.version, controlRevision: 0, targetBinding: 'page_write_loss', targetUrl: 'https://synthetic.test/' } })
+    await waitFor(() => h.storage.store.get(queued.runId)?.state === 'running')
+    await h.storage.store.withExecution(queued.runId, 0, async () => {
+      const pending = h.bridge.requestTool('browser_click', { ref: 'synthetic' }, new AbortController().signal).catch(error => error)
+      await waitFor(() => h.frames.some(frame => frame.t === 'tool.call'))
+      const call = h.frames.find((frame): frame is Extract<BridgeFrame, { t: 'tool.call' }> => frame.t === 'tool.call')!
+      await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === `confirm-${call.id}`))
+      h.ws.close(); await h.done
+      expect(await pending).toBeInstanceOf(BridgeToolError)
+      expect(h.ledger.get(call.id)).toMatchObject({ state: 'unresolved', interruption: { reason: 'connection-closed' } })
+    })
+    await waitFor(() => h.storage.store.get(queued.runId)?.state === 'paused')
+    const paused = h.storage.store.get(queued.runId)!
+    await expect(h.storage.store.retargetPaused(queued.runId, paused.version, paused.controlRevision, () => {})).rejects.toMatchObject({ code: 'reconciliation-required' })
+    expect(h.frames.filter(frame => frame.t === 'tool.call')).toHaveLength(1)
+  })
   it('reserves a native new page without starting, then consumes its exact startup once', async () => {
     const selectTarget = vi.fn(), validateTarget = vi.fn()
     const h = await connectedLedger(true, true, { tasks: { selectTarget, validateTarget, approval: vi.fn() } })
@@ -257,8 +318,13 @@ describe('recorded tool dispatch', () => {
       expect(h.ledger.get(call.id)).toMatchObject({ state: 'unresolved', interruption: { reason } })
       expect(approval).toHaveBeenCalledTimes(2)
       expect(approval).toHaveBeenLastCalledWith(run.runId, call.id, false)
-      // An uncertain read leaves the run scope live, so time must start counting again.
-      expect(h.storage.store.executionFor(String(run.sessionId))?.runId).toBe(run.runId)
+      if (reason === 'connection-closed') {
+        expect(() => h.storage.store.executionFor(String(run.sessionId))).toThrow()
+        await waitFor(() => h.storage.store.get(run.runId)?.state === 'paused')
+      } else {
+        // A read error alone keeps the scope live; its approval wait still ends.
+        expect(h.storage.store.executionFor(String(run.sessionId))?.runId).toBe(run.runId)
+      }
     })
   })
 

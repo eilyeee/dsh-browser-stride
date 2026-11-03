@@ -58,9 +58,11 @@ const runSchema = z.strictObject({
   createdAt: counter, updatedAt: counter,
   requiredCriteriaIds: criteria,
   recoveryRequired: z.boolean(),
+  pauseReason: z.literal('browser-disconnected').optional(),
   facts: z.array(factSchema).max(256),
   task: taskSchema.optional(),
 }).superRefine((run, ctx) => {
+  if (run.pauseReason !== undefined && (run.state !== 'paused' || run.task === undefined)) ctx.addIssue({ code: 'custom', message: 'invalid pause reason' })
   if (run.updatedAt < run.createdAt) ctx.addIssue({ code: 'custom', message: 'invalid timestamps' })
   if (new Set(run.facts.map(fact => fact.actionId)).size !== run.facts.length) ctx.addIssue({ code: 'custom', message: 'duplicate action id' })
   if (run.facts.some(fact => fact.controlRevision > run.controlRevision)) ctx.addIssue({ code: 'custom', message: 'future action revision' })
@@ -120,6 +122,8 @@ export class BrowserRunStore {
   private writeFaulted = false
   private disposal: Promise<void> | undefined
   private readonly executions = new Set<ExecutionContext>()
+  /** Synchronous fence while a lost native target's durable pause is queued. */
+  private readonly disconnectedTargets = new Map<RunId, number>()
   private constructor(private readonly domain: RunDomain, readonly dispatches: BrowserDispatchLedger) {}
 
   static async open(facility: Pick<DomainFacility, 'open'>, profile: string): Promise<BrowserRunStore> {
@@ -194,6 +198,24 @@ export class BrowserRunStore {
     })
   }
 
+  /** Host transport only. Old connection revisions cannot interrupt their successors. */
+  pauseDisconnectedTask(runId: RunId, controlRevision: number): Promise<BrowserRunRecord | undefined> {
+    const run = this.get(runId)
+    if (run?.task === undefined || run.controlRevision !== controlRevision || !['queued', 'running'].includes(run.state)) return Promise.resolve(undefined)
+    this.disconnectedTargets.set(runId, controlRevision)
+    for (const context of this.executions) {
+      if (context.execution.runId === runId && context.execution.controlRevision === controlRevision) {
+        context.controller.abort(new BrowserRunStoreError('execution-context-expired'))
+      }
+    }
+    return this.exclusive(async () => {
+      const latest = this.require(runId)
+      if (latest.task === undefined || latest.controlRevision !== controlRevision || !['queued', 'running'].includes(latest.state)) return undefined
+      return this.save({ ...latest, state: 'paused', pauseReason: 'browser-disconnected',
+        controlRevision: asControlRevision(nextControlRevision(latest.controlRevision, 'pause')) })
+    })
+  }
+
   /** Await all work inside this trusted scope; detached children lose authority. */
   async withExecution<T>(runId: RunId, controlRevision: number, work: () => T | Promise<T>): Promise<T> {
     const run = this.executionRun(runId, controlRevision, 'all')
@@ -247,6 +269,7 @@ export class BrowserRunStore {
   }
 
   private executionRun(runId: RunId, controlRevision: number, pending: 'all' | 'managed' | 'none' = 'none'): BrowserRunRecord {
+    if (this.disconnectedTargets.get(runId) === controlRevision) throw new BrowserRunStoreError('execution-context-expired')
     this.assertOpen()
     if (this.writeFaulted) throw new BrowserRunStoreError('storage-unavailable')
     const run = this.require(runId)
@@ -408,13 +431,16 @@ export class BrowserRunStore {
     if (unsettled) throw new BrowserRunStoreError('reconciliation-required')
   }
   private async save(run: BrowserRunRecord): Promise<BrowserRunRecord> {
-    const next = runSchema.parse({ ...run, version: run.version + 1, updatedAt: Math.max(Date.now(), run.updatedAt) })
+    const { pauseReason, ...rest } = run
+    const next = runSchema.parse({ ...rest, ...(run.state === 'paused' && pauseReason !== undefined ? { pauseReason } : {}),
+      version: run.version + 1, updatedAt: Math.max(Date.now(), run.updatedAt) })
     await this.persist(next)
     return snapshot(next)
   }
   private async persist(run: BrowserRunRecord): Promise<void> {
     try {
       await this.domain.table('runs').put(run.runId, run)
+      if (this.disconnectedTargets.get(run.runId) !== run.controlRevision) this.disconnectedTargets.delete(run.runId)
       this.invalidateExecutions()
       for (const listener of this.listeners) { try { listener(snapshot(run)) } catch { /* observers cannot undo committed state */ } }
     }

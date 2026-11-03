@@ -103,7 +103,7 @@ export function BrowserRuns({ api, sessionId, connected, copy, targetRevision, s
         </div>}
         {run.task !== undefined && run.task.outcome !== 'pending' && <p role="status">{copy.outcomes[run.task.outcome]}</p>}
         {(run.recoveryRequired || run.requiresReconciliation) && <p>{copy.reconcileHelp}</p>}
-        {run.state === 'paused' && <p>{copy.pausedHelp}</p>}
+        {run.state === 'paused' && <p>{run.pauseReason === 'browser-disconnected' ? copy.disconnectedHelp : copy.pausedHelp}</p>}
         {run.canRetarget && <p>{copy.retargetHelp}</p>}
         {run.state === 'stopping' && <p>{copy.stoppingHelp}</p>}
         {(run.controls.length > 0 || run.canRetarget || run.task?.canStart) && <div className="browser-run-actions">

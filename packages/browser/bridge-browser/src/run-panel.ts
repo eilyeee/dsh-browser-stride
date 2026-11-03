@@ -31,6 +31,7 @@ function summary(run: BrowserRunRecord, requiresReconciliation: boolean, pending
     && (newPage === undefined || newPage(run))
   return { runId: run.runId, sessionId: run.sessionId, state: run.state, version: run.version,
     controlRevision: run.controlRevision, updatedAt: run.updatedAt, recoveryRequired: run.recoveryRequired, requiresReconciliation,
+    ...(run.pauseReason === undefined ? {} : { pauseReason: run.pauseReason }),
     canRetarget: run.state === 'paused' && !run.recoveryRequired && !requiresReconciliation && !pendingWrites,
     ...(run.task === undefined ? {} : { task: { ...run.task,
       canStart, ...(newPage === undefined ? {} : { canStartNewPage: canStart }) } }),

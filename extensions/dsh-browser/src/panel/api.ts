@@ -143,7 +143,7 @@ export interface PanelApi {
   /** Scope this panel's selections to its own browser window. */
   registerWindow(windowId: number): Promise<void>
   setActiveSession(sessionId: string, isNew?: boolean): Promise<void>
-  updateSettings(settings: Partial<PanelSettings>): Promise<void>
+  updateSettings(settings: Partial<PanelSettings>, options?: { connect: boolean }): Promise<void>
   requestStatus(): Promise<void>
 }
 
@@ -524,13 +524,13 @@ export function connectPanel(): PanelApi {
     setActiveSession(sessionId, isNew) {
       return send({ type: 'session.active', sessionId, isNew })
     },
-    updateSettings(next) {
+    updateSettings(next, options) {
       const id = crypto.randomUUID()
       return new Promise<void>((resolve, reject) => {
         const entry = { resolve, reject }
         pendingSettings.set(id, entry)
         void send(
-          { type: 'settings', id, settings: next },
+          { type: 'settings', id, settings: next, ...(options?.connect === true ? { connect: true } : {}) },
           { kind: 'settings', id },
         ).catch((cause: unknown) => {
           if (pendingSettings.get(id) !== entry) return

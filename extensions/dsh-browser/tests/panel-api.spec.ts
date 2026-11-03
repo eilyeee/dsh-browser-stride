@@ -420,7 +420,7 @@ describe('panel protocol', () => {
     await expect(sent).resolves.toBeUndefined()
   })
 
-  it('waits for and surfaces the background settings result', async () => {
+  it.each([false, true])('waits for the background settings result with explicit connect=%s', async connect => {
     let receive: ((message: unknown) => void) | undefined
     const postMessage = vi.fn()
     const port = {
@@ -432,11 +432,12 @@ describe('panel protocol', () => {
     vi.spyOn(crypto, 'randomUUID').mockReturnValue('12345678-1234-4234-8234-123456789abd')
     const api = connectPanel()
 
-    const pending = api.updateSettings({ unrestrictedBrowserAccess: false })
+    const pending = api.updateSettings({ unrestrictedBrowserAccess: false }, connect ? { connect: true } : undefined)
     expect(postMessage).toHaveBeenCalledWith({
       type: 'settings',
       id: '12345678-1234-4234-8234-123456789abd',
       settings: { unrestrictedBrowserAccess: false },
+      ...(connect ? { connect: true } : {}),
     })
     receive?.({
       type: 'settings.result',

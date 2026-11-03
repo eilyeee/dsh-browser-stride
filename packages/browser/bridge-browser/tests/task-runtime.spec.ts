@@ -43,6 +43,30 @@ function execution(agent: Agent, name = 'browser_snapshot', parent?: ToolExecuti
 }
 
 describe('Host-owned browser task executor', () => {
+  it('cancels the owned Agent before its disconnected pause is persisted and waits for explicit continuation', async () => {
+    const h = await setup()
+    const hold = gate()
+    close.push(async () => { hold.release() })
+    let entered = false
+    h.work(async () => { await h.runtime.consume(h.agent, 'modelRequests'); entered = true; await hold.promise })
+    await h.start()
+    await vi.waitFor(() => expect(entered).toBe(true))
+    const paused = h.store.pauseDisconnectedTask(h.run.runId, 0)
+    expect(h.cancel).toHaveBeenCalled()
+    await expect(h.runtime.consume(h.agent, 'modelRequests')).rejects.toThrow()
+    await paused
+    hold.release()
+    await vi.waitFor(() => expect(h.current().task?.activeMs).toBeGreaterThan(0))
+    expect(h.current()).toMatchObject({ state: 'paused', pauseReason: 'browser-disconnected', task: { modelRequests: 1 } })
+    expect(h.followup).toHaveBeenCalledOnce()
+    h.work(async () => { await h.runtime.consume(h.agent, 'modelRequests') })
+    const current = h.current()
+    await h.store.retargetPaused(h.run.runId, current.version, current.controlRevision, () => h.runtime.selectTarget(h.run.runId, 'https://synthetic.test/settings'))
+    await h.settled()
+    expect(h.followup).toHaveBeenCalledTimes(2)
+    expect(h.current().task?.modelRequests).toBe(2)
+    expect(h.current()).not.toHaveProperty('pauseReason')
+  })
   it('checks a future native target without binding it or waking the Agent', async () => {
     const h = await setup()
     h.runtime.validateTarget(h.run.runId, 'https://synthetic.test/settings')

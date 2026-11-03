@@ -22,6 +22,18 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => { root.unmount() }); vi.useRealTimers(); vi.restoreAllMocks() })
 
 describe('browser task panel boundaries', () => {
+  it('explains a connection-loss pause without inventing continuation after an uncertain write', async () => {
+    const paused = { ...item('session-a', 'paused'), pauseReason: 'browser-disconnected' as const, canRetarget: false, requiresReconciliation: true,
+      controls: ['stop' as const], task: { goal: 'Synthetic task', activeMs: 1, modelRequests: 1, toolCalls: 1, outcome: 'pending' as const, canStart: false } }
+    const rpc = vi.fn(async () => list(paused))
+    await act(async () => { root.render(createElement(BrowserRuns, { api: { rpc: rpc as PanelApi['rpc'] }, sessionId: 'session-a', connected: true, copy: PANEL_COPY.zh.runs })) })
+    expect(document.body.textContent).toContain('浏览器连接已中断，任务已暂停')
+    expect(document.body.textContent).toContain('部分操作结果尚未明确')
+    expect(document.querySelector('.run-retarget')).toBeNull()
+    expect(parseBrowserRuns(list(paused), 'session-a').items[0]?.pauseReason).toBe('browser-disconnected')
+    expect(() => parseBrowserRuns(list({ ...paused, state: 'running' }), 'session-a')).toThrow()
+    expect(() => parseBrowserRuns(list({ ...paused, pauseReason: 'page-supplied' } as unknown as BrowserRunSummary), 'session-a')).toThrow()
+  })
   it('gates new-page startup by Host capability, saved opt-in, URL and genuine click', async () => {
     const queued = { ...item('session-a', 'queued'), task: { goal: 'Synthetic goal', activeMs: 0, modelRequests: 0, toolCalls: 0, outcome: 'pending' as const, canStart: true, canStartNewPage: true } }
     const rpc = vi.fn(async () => list(queued)), retargetRun = vi.fn(async () => {})

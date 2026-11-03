@@ -2,6 +2,16 @@ import { BRIDGE_TASK_PAGE_PREPARE_METHOD, BRIDGE_TASK_PAGE_CANCEL_METHOD, BRIDGE
 import { BridgeRpcError } from './rpc.ts'
 import type { CreatedPageAccess } from './page-access.ts'
 
+/** Admission owns preparation; an accepted page grant follows native consent thereafter. */
+export function taskPageGrant(automaticAllowed: () => boolean, startupCurrent: () => boolean) {
+  let accepted = false
+  const current = () => automaticAllowed() && (accepted || startupCurrent())
+  return { current, accept: () => {
+    if (!current()) throw new Error('Task page authorization changed during preparation')
+    accepted = true
+  } }
+}
+
 /** Grant withdrawal invalidates a tab lifetime, so check session ownership again afterwards. */
 export async function cleanupOwnedTaskPage(access: CreatedPageAccess, before: () => boolean, after: () => boolean,
   remove: () => Promise<void>): Promise<void> {

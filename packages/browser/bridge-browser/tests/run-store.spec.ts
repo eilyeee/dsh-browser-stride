@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { BrowserRunStore, type BrowserRunRecord } from '../src/run-store.ts'
 import { asActionId, asControlRevision, asSessionId, type RequestDigest } from '../src/contracts/ids.ts'
 import type { ActionFact } from '../src/contracts/outcome.ts'
+import { newBrowserTask } from '../src/task-contract.ts'
 
 const contexts: Context[] = []
 const stores: BrowserRunStore[] = []
@@ -50,6 +51,53 @@ async function running(store: BrowserRunStore) {
 }
 
 describe('durable Host browser run records', () => {
+  it('fences a disconnected task synchronously, then pauses the current record without losing queued counters', async () => {
+    const { store } = await setup()
+    const queued = await store.create({ ...input(), task: newBrowserTask('Synthetic task') })
+    const run = await store.startTask(queued.runId, queued.version, () => {})
+    await store.withExecution(run.runId, run.controlRevision, async () => {
+      const execution = store.executionFor()!
+      const count = store.updateTask(run.runId, task => ({ ...task, modelRequests: task.modelRequests + 1 }))
+      const paused = store.pauseDisconnectedTask(run.runId, run.controlRevision)
+      expect(execution.signal.aborted).toBe(true)
+      expect(() => store.assertDispatchAuthority(execution)).toThrow()
+      await expect(store.withExecution(run.runId, run.controlRevision, async () => {})).rejects.toThrow()
+      await count
+      expect(await paused).toMatchObject({ state: 'paused', controlRevision: 1, pauseReason: 'browser-disconnected', task: { modelRequests: 1 } })
+    })
+    const paused = store.get(run.runId)!
+    const resumed = await store.retargetPaused(run.runId, paused.version, paused.controlRevision, () => {})
+    expect(resumed).not.toHaveProperty('pauseReason')
+    await store.withExecution(resumed.runId, resumed.controlRevision, async () => {
+      const execution = store.executionFor()!
+      expect(await store.pauseDisconnectedTask(run.runId, run.controlRevision)).toBeUndefined()
+      expect(execution.signal.aborted).toBe(false)
+    })
+  })
+  it('handles connection loss during native startup without granting a running scope', async () => {
+    const { store } = await setup()
+    const queued = await store.create({ ...input(), task: newBrowserTask('Synthetic task') })
+    let paused: ReturnType<typeof store.pauseDisconnectedTask> | undefined
+    await store.startTask(queued.runId, queued.version, revision => { paused = store.pauseDisconnectedTask(queued.runId, revision) })
+    await expect(store.withExecution(queued.runId, 0, async () => {})).rejects.toThrow()
+    expect(await paused).toMatchObject({ state: 'paused', pauseReason: 'browser-disconnected' })
+  })
+  it('does not turn disconnect into continuation authority or modify unrelated records', async () => {
+    const { store, open } = await setup()
+    const legacy = await running(store)
+    expect(await store.pauseDisconnectedTask(legacy.runId, legacy.controlRevision)).toBeUndefined()
+    const queued = await store.create({ ...input(), sessionId: asSessionId('task-session'), task: newBrowserTask('Synthetic task') })
+    const run = await store.startTask(queued.runId, queued.version, () => {})
+    await store.dispatches.prepare({ requestId: 'disconnected-write', connectionId: 'synthetic', sessionId: run.sessionId,
+      runId: run.runId, controlRevision: run.controlRevision, name: 'browser_click', args: {}, expiresAt: Date.now() + 60000 })
+    await store.dispatches.markSent('disconnected-write')
+    await store.dispatches.settle('disconnected-write', { state: 'unresolved', reason: 'connection-closed' })
+    const paused = (await store.pauseDisconnectedTask(run.runId, run.controlRevision))!
+    await expect(store.retargetPaused(run.runId, paused.version, paused.controlRevision, () => {})).rejects.toMatchObject({ code: 'reconciliation-required' })
+    await store.close()
+    const reopened = await open()
+    expect(reopened.get(run.runId)).toMatchObject({ state: 'paused', pauseReason: 'browser-disconnected', recoveryRequired: true })
+  })
   it('isolates case and punctuation in profile namespaces without allowing a second owner', async () => {
     const { ctx } = await setup()
     await expect(BrowserRunStore.open(ctx.storageDomain, 'test')).rejects.toMatchObject({ code: 'already-open' })

@@ -5,7 +5,7 @@ import { once } from 'node:events'
 import { mkdtemp, mkdir, readFile, copyFile, chmod, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import { createServer } from 'node:net'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -14,7 +14,9 @@ import { startExtensionBrowser } from '../benchmark/lib/extension-browser.mjs'
 import { startTaskSite } from './fixtures/task-site.mjs'
 
 assert.equal(process.env.STRIDE_REAL_MODEL, '1', 'Set STRIDE_REAL_MODEL=1 to authorize real-model requests for this smoke.')
-const newPageStart = process.env.STRIDE_TASK_NEW_PAGE === '1'
+const disconnectOnce = process.env.STRIDE_TASK_DISCONNECT === '1'
+const newPageStart = process.env.STRIDE_TASK_NEW_PAGE === '1' || disconnectOnce
+const artifactName = disconnectOnce ? 'disconnect-real-model-result.json' : newPageStart ? 'new-page-real-model-result.json' : 'real-model-result.json'
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const require = createRequire(join(repoRoot, 'package.json'))
 const cli = join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'lib/bin.js')
@@ -23,13 +25,30 @@ const home = join(root, 'home')
 const trigger = join(root, 'start.json'), result = join(root, 'result.json')
 const env = { ...process.env, DSH_HOME: home, DSH_TELEMETRY_DISABLED: '1' }
 for (const key of ['DSH_EXT_TOKEN', 'DSH_BRIDGE_ADMIN_TOKEN', 'DSH_BROWSER_SESSION_WORKSPACE']) delete env[key]
-let site, host, browser
+let site, host, browser, interruption
 async function wait(check, label, timeout = 30000) {
   const deadline = Date.now() + timeout
   while (Date.now() < deadline) { if (await check()) return; await delay(100) }
   throw new Error(`timed out: ${label}`)
 }
 async function snapshot() { try { return JSON.parse(await readFile(result, 'utf8')) } catch { return undefined } }
+async function interruptBrowser(url) {
+  const WebSocket = createRequire(join(repoRoot, 'packages/browser/bridge-browser/package.json'))('ws')
+  const { BRIDGE_PROTOCOL_VERSION } = await import(pathToFileURL(join(repoRoot, 'packages/browser/bridge-browser/lib/protocol.js')).href)
+  const code = await host.issuePairingCode()
+  const peer = new WebSocket(url)
+  try {
+    await new Promise((resolvePeer, rejectPeer) => {
+      const timer = setTimeout(() => rejectPeer(new Error('Synthetic connection replacement timed out')), 5000)
+      peer.once('error', () => { clearTimeout(timer); rejectPeer(new Error('Synthetic connection replacement failed')) })
+      peer.once('open', () => peer.send(JSON.stringify({ t: 'hello', token: code, installationId: 'synthetic-disconnect-probe',
+        protocolVersion: BRIDGE_PROTOCOL_VERSION, caps: { textOnly: true, snapshotMaxChars: 32000, maxInteractiveItems: 60 } })))
+      peer.on('message', bytes => {
+        if (JSON.parse(bytes.toString()).t === 'hello.ok') { clearTimeout(timer); resolvePeer() }
+      })
+    })
+  } finally { peer.terminate() }
+}
 try {
   await mkdir(home, { recursive: true })
   const child = spawn(process.execPath, [cli, 'plugin', '--profile', 'web', 'add', '-w', `@eilyeee/dsh-browser-stride@link:${join(repoRoot, 'packages/browser/bridge-browser')}`], { cwd: repoRoot, env, stdio: 'ignore' })
@@ -65,7 +84,7 @@ try {
   const session = await host.client.rpc('session.create', { cwd: taskWorkspace })
   const verificationUrl = new URL('/state', site.url)
   verificationUrl.hostname = '127.0.0.1' // Chromium's test-domain resolver does not configure Node DNS.
-  await writeFile(trigger, JSON.stringify({ sessionId: session.sessionId, url: site.url, verificationUrl: verificationUrl.href }), { mode: 0o600 })
+  await writeFile(trigger, JSON.stringify({ sessionId: session.sessionId, url: site.url, verificationUrl: verificationUrl.href, disconnectOnce }), { mode: 0o600 })
   await wait(async () => { try { await readFile(`${result}.ready`); return true } catch { return false } }, 'probe registration')
   const rpcId = crypto.randomUUID()
   const response = await fetch(`${host.baseUrl}/api/commands/execute`, { method: 'POST',
@@ -97,6 +116,40 @@ try {
   await start.click()
   await wait(async () => (await snapshot())?.state !== 'queued', 'native startup commit')
   console.log('Trusted native start submitted; waiting for the default model')
+  if (disconnectOnce) {
+    await wait(async () => { try { await readFile(`${result}.disconnect-ready`); return true } catch { return false } }, 'completed read before disconnection', 120000)
+    assert.deepEqual(site.state(), { enabled: false, saved: false }, 'interruption occurs before a business write')
+    await interruptBrowser(`ws://127.0.0.1:${port}/ext/bridge`)
+    await wait(async () => { const value = await snapshot(); return value?.state === 'paused' && value.agentIdle }, 'disconnected task and Agent pause')
+    const paused = await snapshot()
+    assert.equal(paused.pauseReason, 'browser-disconnected')
+    assert.equal(paused.controlRevision, 1)
+    // Replacement deliberately yields the bridge slot; native Save and connect
+    // must reclaim it without editing the existing address or credential.
+    await browser.panel.getByRole('button', { name: '打开设置', exact: true }).click()
+    await browser.panel.getByRole('button', { name: '保存并连接', exact: true }).click()
+    await browser.panel.locator('.connection .dot.connected').waitFor({ state: 'visible', timeout: 15000 })
+    await browser.panel.getByRole('button', { name: '历史会话', exact: true }).click()
+    await browser.panel.locator('.session-list li').filter({ hasText: 'task-workspace' }).locator('button').first().click()
+    await browser.panel.waitForFunction(id => document.querySelector('.app')?.getAttribute('data-session-id') === id, session.sessionId)
+    const continuation = card.getByRole('button', { name: '在已绑定页面继续', exact: true })
+    await continuation.waitFor()
+    await continuation.evaluate(button => button.click())
+    await delay(300)
+    const stillPaused = await snapshot()
+    assert.equal(stillPaused.state, 'paused', 'neither reconnect nor a synthetic click resumes a task')
+    assert.equal(stillPaused.task.modelRequests, paused.task.modelRequests)
+    assert.equal(stillPaused.task.toolCalls, paused.task.toolCalls)
+    assert.deepEqual(site.state(), { enabled: false, saved: false })
+    const controlledPage = browser.context.pages().find(page => page.url() === site.url)
+    assert.ok(controlledPage)
+    await controlledPage.bringToFront()
+    await continuation.click()
+    await wait(async () => (await snapshot())?.controlRevision === 3, 'explicit continued revision')
+    interruption = { pausedRevision: paused.controlRevision, originalModelRequests: paused.task.modelRequests,
+      originalBrowserCalls: paused.task.toolCalls, reconnectDidNotResume: true, syntheticContinueRefused: true, writeBeforeInterruption: false }
+    console.log('Connection loss paused the Agent; trusted continuation selected a fresh revision')
+  }
   await wait(async () => (await snapshot())?.terminal === true, 'real model task completion', 360000)
   const outcome = await snapshot()
   assert.equal(outcome.state, 'completed', JSON.stringify(outcome))
@@ -107,6 +160,7 @@ try {
   assert.equal(outcome.verified, true)
   assert.equal(outcome.runBound, true)
   assert.equal(outcome.dispatches, outcome.returned)
+  if (disconnectOnce) assert.deepEqual(outcome.dispatchRevisions, [0, 3])
   assert.deepEqual(site.state(), { enabled: true, saved: true })
   let nativePage
   if (newPageStart) {
@@ -127,16 +181,16 @@ try {
   }
   const artifacts = join(repoRoot, '.stride-private/validation/task-runtime')
   await mkdir(artifacts, { recursive: true })
-  await writeFile(join(artifacts, newPageStart ? 'new-page-real-model-result.json' : 'real-model-result.json'), JSON.stringify({ ...outcome,
-    passed: true, newPageStart, nativePage, independentState: site.state() }, null, 2), { mode: 0o600 })
+  await writeFile(join(artifacts, artifactName), JSON.stringify({ ...outcome,
+    passed: true, newPageStart, nativePage, interruption, independentState: site.state() }, null, 2), { mode: 0o600 })
   console.log(JSON.stringify({ passed: true, modelRequests: outcome.task.modelRequests, browserCalls: outcome.task.toolCalls,
     ptcCalls: outcome.ptcCalls, nestedBrowserCalls: outcome.nestedBrowserCalls, directBrowserCalls: outcome.directBrowserCalls,
-    activeMs: outcome.task.activeMs, verifiedFacts: outcome.facts, realBrowser: true, independentSiteState: true, syntheticStartRefused: true, newPageStart }))
+    activeMs: outcome.task.activeMs, verifiedFacts: outcome.facts, realBrowser: true, independentSiteState: true, syntheticStartRefused: true, newPageStart, disconnectOnce }))
 } catch (error) {
   const artifacts = join(repoRoot, '.stride-private/validation/task-runtime')
   await mkdir(artifacts, { recursive: true })
-  await writeFile(join(artifacts, newPageStart ? 'new-page-real-model-result.json' : 'real-model-result.json'), JSON.stringify({ ...(await snapshot()),
-    passed: false, newPageStart, errorName: error.name, independentState: site?.state() }, null, 2), { mode: 0o600 }).catch(() => {})
+  await writeFile(join(artifacts, artifactName), JSON.stringify({ ...(await snapshot()),
+    passed: false, newPageStart, disconnectOnce, interruption, errorName: error.name, independentState: site?.state() }, null, 2), { mode: 0o600 }).catch(() => {})
   throw error
 } finally {
   await browser?.close().catch(() => {})

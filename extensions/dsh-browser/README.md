@@ -29,6 +29,8 @@ The side panel shows metadata for Host-created browser runs in the current conve
 
 Use **Unpair DSH** in extension settings to disconnect this browser. It removes the local credential and disables automatic reconnection across panel, worker and browser restarts. When the Host is reachable, it also revokes this installation’s credential and cancels its outstanding pairing requests. If the Host cannot confirm revocation, the UI reports local removal only. Pages and conversations stay open; reconnecting requires explicit pairing.
 
+Losing the browser connection pauses explicit tasks pinned to that connection and cancels their active Agent scopes. Reconnecting alone does not continue them. Select the original conversation from history, confirm the page's control access and binding, then click **Continue on selected page**. Uncertain, failed or pending writes still block continuation, and Host restart recovery remains unavailable. If another client replaced this connection, use **Save and connect** to reconnect with the same address and credential. Policy-only saves and keepalive do not reclaim it.
+
 ## Authorizing one page
 
 For an existing page, open it and click the **DSH Stride toolbar icon**, then select the task and choose **Bind and start** in the side panel. Opening the sidebar through the browser menu, clicking a sidebar button or sending model instructions cannot authorize an existing page. Same-site sibling tabs require their own toolbar click. Newly created Chrome pages have the separate opt-in flow below.
