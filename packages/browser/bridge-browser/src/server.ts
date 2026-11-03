@@ -433,7 +433,9 @@ export class BridgeServer {
     this.closed = true
     // Capture the live pump BEFORE replaceConnection nulls the connection.
     const pumps = this.current === null ? [] : [this.current.pump]
-    this.replaceConnection()
+    // Host shutdown is transient transport loss, not a competing browser owner.
+    // Reconnecting never restores a task's revoked execution or page pin.
+    this.replaceConnection(1001, 'host stopping')
     for (const socket of this.wss.clients) socket.terminate()
     this.current = null
     await new Promise<void>((resolve, reject) => {
@@ -895,7 +897,7 @@ export class BridgeServer {
   }
 
   /** Close the current connection (if any) and settle its in-flight calls. */
-  private replaceConnection(): void {
+  private replaceConnection(closeCode = 4000, closeReason = 'replaced'): void {
     const conn = this.current
     if (conn === null) return
     this.current = null
@@ -903,7 +905,7 @@ export class BridgeServer {
     // execution cancellation. These waiters settle asynchronously after disk.
     for (const pending of this.pendingTools.values()) if (pending.owner === conn) {
       pending.finish({ state: 'unresolved', reason: 'connection-closed' }, undefined,
-        new BridgeToolError('bridge-closed', 'the extension connection was replaced; action delivery may be unknown'))
+        new BridgeToolError('bridge-closed', 'the extension connection closed; action delivery may be unknown'))
     }
     // Fence in this same turn, before a caller can resume or another model
     // request can start. Durable pause may queue behind counters/startup.
@@ -916,7 +918,7 @@ export class BridgeServer {
     clearInterval(conn.ping)
     conn.abort.abort()
     if (conn.ws.readyState === WebSocket.OPEN || conn.ws.readyState === WebSocket.CONNECTING) {
-      conn.ws.close(4000, 'replaced')
+      conn.ws.close(closeCode, closeReason)
     }
   }
 }

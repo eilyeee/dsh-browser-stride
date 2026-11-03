@@ -9,6 +9,11 @@ no release version has been assigned yet.
 
 ### Fixed
 
+- Normal Host shutdown uses a retryable close instead of reporting a permanent
+  client replacement. With an open panel, the extension can reconnect using its
+  saved credential after the Host returns. Actual replacement, invalid credentials
+  and compatibility failures still stop automatic reconnection. Transport
+  reconnection does not restore task execution or replay browser actions.
 - Losing a managed task's page control or native binding now pauses its exact
   control revision and cancels its Agent while keeping the confirmed browser
   connection. Background-owned revocation also fences a pin lost before startup

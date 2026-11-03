@@ -1498,6 +1498,30 @@ describe('BridgeServer', () => {
     await h.bridge.close()
   })
 
+  it('does not report normal Host shutdown as permanent connection replacement', async () => {
+    const h = await startBridge()
+    harnesses.push(h)
+    const client = await connect(h.url)
+    send(client.ws, { t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: TOKEN, caps: CAPS })
+    await waitFor(() => h.bridge.hasConnection())
+    const closed = new Promise<number>(resolve => client.ws.once('close', code => resolve(code)))
+    await h.bridge.close()
+    expect([1001, 1006]).toContain(await closed)
+  })
+
+  it('refuses a late upgrade after its Host bridge has closed', async () => {
+    const h = await startBridge()
+    harnesses.push(h)
+    await h.bridge.close()
+    const status = await new Promise<number>((resolve, reject) => {
+      const ws = new WebSocket(h.url)
+      ws.once('unexpected-response', (_request, response) => { resolve(response.statusCode!); ws.terminate() })
+      ws.once('open', () => { ws.terminate(); reject(new Error('Closed bridge accepted an upgrade')) })
+      ws.once('error', () => {})
+    })
+    expect(status).toBe(503)
+  })
+
   it('sends protocol pings on the configured cadence and the client answers pong', async () => {
     const h = await startBridge({ pingIntervalMs: 50 })
     harnesses.push(h)

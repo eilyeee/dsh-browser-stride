@@ -230,6 +230,33 @@ describe('BridgeClient connection probe', () => {
     expect(FakeWebSocket.instances).toHaveLength(1)
   })
 
+  it.each([1001, 1006])('reconnects after Host shutdown code %s while its UI lease remains live', async code => {
+    vi.useFakeTimers()
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    const states: BridgeState[] = []
+    const client = new BridgeClient({ onStateChange: state => { states.push(state) }, onFrame: () => {}, onHelloOk: () => {} })
+    client.start('ws://127.0.0.1:3080/ext/bridge', '')
+    await vi.advanceTimersByTimeAsync(0)
+    const first = FakeWebSocket.instances[0]!
+    first.open(); await vi.advanceTimersByTimeAsync(0)
+    first.receive({ t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      caps: { textOnly: true, snapshotMaxChars: 32000, maxInteractiveItems: 60 } })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(client.connected).toBe(true)
+    states.length = 0
+    first.close(code, 'host stopping')
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(FakeWebSocket.instances).toHaveLength(2)
+    const second = FakeWebSocket.instances[1]!
+    second.open(); await vi.advanceTimersByTimeAsync(0)
+    second.receive({ t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      caps: { textOnly: true, snapshotMaxChars: 32000, maxInteractiveItems: 60 } })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(client.connected).toBe(true)
+    expect(states).not.toContain('stopped')
+    client.stop()
+  })
+
   it('stops reconnecting after its user-owned lease disappears', async () => {
     vi.useFakeTimers()
     vi.stubGlobal('WebSocket', FakeWebSocket)
