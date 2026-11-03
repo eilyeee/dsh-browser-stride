@@ -4,6 +4,7 @@ import { asRunId, asSessionId } from './contracts/ids.ts'
 import { summarizeActionFacts } from './contracts/outcome.ts'
 import { isTerminal } from './contracts/run.ts'
 import { BrowserRunStoreError, type BrowserRunStore, type BrowserRunRecord } from './run-store.ts'
+import { taskBudgetExhausted } from './task-budget.ts'
 import { BROWSER_RUN_LIST_LIMIT, BRIDGE_RUN_LIST_METHOD, BRIDGE_RUN_CONTROL_METHOD, type BrowserRunList, type BrowserRunSummary } from './protocol.ts'
 
 export type RunPanelStore = Pick<BrowserRunStore, 'list' | 'get' | 'control' | 'dispatches'>
@@ -27,12 +28,13 @@ function reconciliationRequired(store: RunPanelStore, sessionId: string): boolea
 }
 
 function summary(run: BrowserRunRecord, requiresReconciliation: boolean, pendingWrites: boolean, newPage?: (run: BrowserRunRecord) => boolean): BrowserRunSummary {
-  const canStart = run.state === 'queued' && !run.recoveryRequired && !requiresReconciliation && !pendingWrites
+  const hasBudget = run.task === undefined || !taskBudgetExhausted(run.task)
+  const canStart = run.state === 'queued' && hasBudget && !run.recoveryRequired && !requiresReconciliation && !pendingWrites
     && (newPage === undefined || newPage(run))
   return { runId: run.runId, sessionId: run.sessionId, state: run.state, version: run.version,
     controlRevision: run.controlRevision, updatedAt: run.updatedAt, recoveryRequired: run.recoveryRequired, requiresReconciliation,
     ...(run.pauseReason === undefined ? {} : { pauseReason: run.pauseReason }),
-    canRetarget: run.state === 'paused' && !run.recoveryRequired && !requiresReconciliation && !pendingWrites,
+    canRetarget: run.state === 'paused' && hasBudget && !run.recoveryRequired && !requiresReconciliation && !pendingWrites,
     ...(run.task === undefined ? {} : { task: { ...run.task,
       canStart, ...(newPage === undefined ? {} : { canStartNewPage: canStart }) } }),
     controls: [...(run.state === 'running' || run.state === 'queued' ? ['pause' as const] : []),

@@ -4,6 +4,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolExecution, ToolExecutionToken } from '@deepseek-ai/dsh-tools'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BrowserTaskRuntime } from '../src/task-runtime.ts'
+import { TASK_LIMITS } from '../src/task-budget.ts'
 import { createRunStorage } from './helpers/run-storage.ts'
 
 const close: (() => Promise<void>)[] = []
@@ -442,6 +443,16 @@ describe('Host-owned browser task executor', () => {
     expect(h.current().task?.toolCalls).toBe(3)
     pool.emitDestroy()
   })
+  it.each(['modelRequests', 'toolCalls'] as const)('lets the last admitted %s finish trusted verification', async kind => {
+    const h = await setup()
+    h.runtime.registerVerifier(h.run.runId, { acceptsTarget: () => true,
+      verify: async () => ({ observedText: ['synthetic final admission verified'] }) })
+    h.work(async () => { for (let i = 0; i < TASK_LIMITS[kind]; i++) await h.runtime.consume(h.agent, kind) })
+    await h.start(); await h.settled()
+    expect(h.current()).toMatchObject({ state: 'completed', task: { outcome: 'verified', [kind]: TASK_LIMITS[kind] } })
+    expect(h.followup).toHaveBeenCalledOnce()
+  })
+
   it.each(['modelRequests', 'toolCalls'] as const)('enforces cumulative %s without restarting the same revision', async kind => {
     const h = await setup()
     h.work(async () => { for (let i = 0; i < 21; i++) await h.runtime.consume(h.agent, kind) })

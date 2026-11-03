@@ -14,6 +14,7 @@ import { validateActionFact, summarizeActionFacts, type ActionFact } from './con
 import { assertTransition, decideCompletion, dispatchGate, isTerminal, nextControlRevision, requestPause, requestResume, requestStop } from './contracts/run.ts'
 import { BrowserDispatchLedger } from './dispatch-ledger.ts'
 import { taskSchema, type BrowserTask } from './task-contract.ts'
+import { taskBudgetExhausted } from './task-budget.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context { browserRuns: BrowserRunStore }
@@ -106,7 +107,7 @@ type RunDomain = Domain<ReturnType<typeof specFor>>
 /** Stable failures contain no page content, arguments or credentials. */
 export class BrowserRunStoreError extends Error {
   constructor(readonly code: 'not-found' | 'stale-version' | 'session-busy' | 'reconciliation-required' | 'action-conflict' | 'invalid-state' | 'storage-unavailable' | 'closed'
-    | 'execution-context-required' | 'execution-context-expired' | 'execution-session-mismatch' | 'not-dispatching' | 'stale-control-revision' | 'cancelled') {
+    | 'execution-context-required' | 'execution-context-expired' | 'execution-session-mismatch' | 'not-dispatching' | 'stale-control-revision' | 'cancelled' | 'budget-exhausted') {
     super(`browser run store: ${code}`)
     this.name = 'BrowserRunStoreError'
   }
@@ -193,6 +194,7 @@ export class BrowserRunStore {
       if (run.state !== 'queued' || run.task === undefined || run.recoveryRequired) throw new BrowserRunStoreError('invalid-state')
       this.assertReconciled(run)
       this.assertSessionAvailable(run)
+      this.assertTaskBudget(run)
       attachTarget(run.controlRevision)
       return this.save({ ...run, state: 'running' })
     })
@@ -316,7 +318,7 @@ export class BrowserRunStore {
       const run = this.current(runId, expectedVersion)
       assertTransition(run.state, state)
       if ((state === 'running' && run.state !== 'queued') || (state === 'stopped' && run.state !== 'stopping')) throw new BrowserRunStoreError('invalid-state')
-      if (state === 'running') { this.assertReconciled(run); this.assertSessionAvailable(run) }
+      if (state === 'running') { this.assertReconciled(run); this.assertSessionAvailable(run); this.assertTaskBudget(run) }
       if (state === 'completed') {
         this.assertReconciled(run)
         if (decideCompletion({ requiredCriteriaIds: run.requiredCriteriaIds, ...summarizeActionFacts(run.facts) }).status !== 'complete') throw new BrowserRunStoreError('invalid-state')
@@ -332,7 +334,7 @@ export class BrowserRunStore {
       const run = this.current(runId, expectedVersion)
       const state = control === 'pause' ? requestPause(run.state) : control === 'resume' ? requestResume(run.state) : requestStop(run.state)
       if (state === run.state) return snapshot(run)
-      if (state === 'running') { this.assertReconciled(run); this.assertSessionAvailable(run) }
+      if (state === 'running') { this.assertReconciled(run); this.assertSessionAvailable(run); this.assertTaskBudget(run) }
       return this.save({ ...run, state, controlRevision: asControlRevision(nextControlRevision(run.controlRevision, control)),
         ...(state === 'running' && run.task !== undefined ? { task: { ...run.task, outcome: 'pending' } } : {}) })
     })
@@ -347,6 +349,7 @@ export class BrowserRunStore {
       if (run.controlRevision !== expectedRevision) throw new BrowserRunStoreError('stale-control-revision')
       this.assertReconciled(run)
       this.assertSessionAvailable(run)
+      this.assertTaskBudget(run)
       // One explicit operation performs target_changed and resume together.
       const revision = nextControlRevision(nextControlRevision(run.controlRevision, 'target_changed'), 'resume')
       if (!Number.isSafeInteger(revision)) throw new BrowserRunStoreError('invalid-state')
@@ -416,6 +419,9 @@ export class BrowserRunStore {
       .filter(other => other.runId !== run.runId && other.sessionId === run.sessionId)
     if (others.some(other => other.recoveryRequired || summarizeActionFacts(other.facts).pendingReconciliation.length > 0)) throw new BrowserRunStoreError('reconciliation-required')
     if (others.some(other => other.state === 'running' || other.state === 'stopping')) throw new BrowserRunStoreError('session-busy')
+  }
+  private assertTaskBudget(run: BrowserRunRecord): void {
+    if (run.task !== undefined && taskBudgetExhausted(run.task)) throw new BrowserRunStoreError('budget-exhausted')
   }
   private assertReconciled(run: BrowserRunRecord, pending: 'all' | 'managed' | 'none' = 'all'): void {
     this.assertTransportReconciled(run.sessionId, pending)

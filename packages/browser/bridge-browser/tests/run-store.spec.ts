@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { BrowserRunStore, type BrowserRunRecord } from '../src/run-store.ts'
 import { asActionId, asControlRevision, asSessionId, type RequestDigest } from '../src/contracts/ids.ts'
 import type { ActionFact } from '../src/contracts/outcome.ts'
-import { newBrowserTask } from '../src/task-contract.ts'
+import { newBrowserTask, TASK_LIMITS } from '../src/task-contract.ts'
 
 const contexts: Context[] = []
 const stores: BrowserRunStore[] = []
@@ -51,6 +51,26 @@ async function running(store: BrowserRunStore) {
 }
 
 describe('durable Host browser run records', () => {
+  it.each((['activeMs', 'modelRequests', 'toolCalls'] as const).flatMap(counter =>
+    (['start', 'transition', 'resume', 'retarget'] as const).map(entry => ({ counter, entry }))))(
+    'refuses $entry before native target attachment when $counter is exhausted', async ({ counter, entry }) => {
+      const { store } = await setup()
+      let run = await store.create({ ...input(), task: newBrowserTask('Synthetic limited task') })
+      if (entry === 'resume' || entry === 'retarget') run = await store.startTask(run.runId, run.version, () => {})
+      run = await store.updateTask(run.runId, task => ({ ...task, [counter]: TASK_LIMITS[counter] }))
+      if (entry === 'resume' || entry === 'retarget') run = await store.control(run.runId, run.version, 'pause')
+      let attached = 0
+      const activation = entry === 'start' ? store.startTask(run.runId, run.version, () => { attached++ })
+        : entry === 'transition' ? store.transition(run.runId, run.version, 'running')
+        : entry === 'resume' ? store.control(run.runId, run.version, 'resume')
+        : store.retargetPaused(run.runId, run.version, run.controlRevision, () => { attached++ })
+      await expect(activation).rejects.toMatchObject({ code: 'budget-exhausted' })
+      expect(attached).toBe(0)
+      expect(store.get(run.runId)).toEqual(run)
+      expect((await store.control(run.runId, run.version, 'stop')).state).toBe(entry === 'start' || entry === 'transition' ? 'stopped' : 'stopping')
+    },
+  )
+
   it.each(['resume', 'retarget'] as const)('clears the previous task verdict on %s while preserving the goal and cumulative counters', async action => {
     const { store } = await setup()
     const queued = await store.create({ ...input(), task: newBrowserTask('Synthetic fixed goal') })

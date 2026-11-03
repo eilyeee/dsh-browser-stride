@@ -9,6 +9,12 @@ no release version has been assigned yet.
 
 ### Fixed
 
+- Tasks whose cumulative time, model-request or browser-call limit is already
+  exhausted cannot start or resume, including native page handoff. The Host
+  refuses activation before attaching a target, and the panel keeps stop
+  available with guidance to create a new task. Older compatible Host summaries
+  cannot restore exhausted controls. The last admitted activity can still
+  complete trusted verification; continuation never resets its counters.
 - DSH user cancellation is scoped to its original task control revision and
   cannot stop a later explicit continuation. Cancellation during independent
   verification or final outcome persistence is acknowledged after that work

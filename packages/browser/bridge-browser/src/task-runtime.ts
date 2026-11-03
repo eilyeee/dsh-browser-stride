@@ -7,7 +7,8 @@ import { asActionId, asRunId, asSessionId, type RequestDigest, type RunId } from
 import type { ActionEvidence } from './contracts/outcome.ts'
 import { isTerminal } from './contracts/run.ts'
 import { BrowserRunStore, type BrowserRunRecord, type BrowserRunExecution } from './run-store.ts'
-import { TASK_LIMITS, newBrowserTask, type BrowserTask } from './task-contract.ts'
+import { newBrowserTask, type BrowserTask } from './task-contract.ts'
+import { TASK_LIMITS, taskBudgetExhausted } from './task-budget.ts'
 import { BROWSER_TOOL_NAMES } from './tools.ts'
 
 declare module '@deepseek-ai/cordis' { interface Context { browserTasks: BrowserTaskRuntime } }
@@ -261,7 +262,7 @@ export class BrowserTaskRuntime {
       await this.runs.withExecution(job.runId, job.revision, async () => {
         this.assertJob(job)
         const run = this.runs.get(job.runId)!
-        if (run.task!.modelRequests >= TASK_LIMITS.modelRequests || run.task!.toolCalls >= TASK_LIMITS.toolCalls) {
+        if (taskBudgetExhausted(run.task!)) {
           job.exhausted = true
           return
         }

@@ -7,6 +7,7 @@ import { BrowserRuns } from '../src/panel/BrowserRuns.tsx'
 import { parseBrowserRuns } from '../src/panel/browser-runs.ts'
 import { PANEL_COPY } from '../src/panel/strings.ts'
 import { BRIDGE_RUN_LIST_METHOD, BRIDGE_RUN_CONTROL_METHOD, type BrowserRunSummary } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
+import { TASK_LIMITS } from '@eilyeee/dsh-browser-stride/src/task-budget.ts'
 
 function item(sessionId = 'session-a', state: BrowserRunSummary['state'] = 'running'): BrowserRunSummary {
   return { runId: 'run_synthetic', sessionId, state, version: 1, controlRevision: 0, updatedAt: 1,
@@ -22,6 +23,37 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => { root.unmount() }); vi.useRealTimers(); vi.restoreAllMocks() })
 
 describe('browser task panel boundaries', () => {
+  it.each((['activeMs', 'modelRequests', 'toolCalls'] as const).flatMap(counter =>
+    (['en', 'zh'] as const).map(locale => ({ counter, locale }))))(
+    'keeps stop available without advertising exhausted $counter continuation in $locale', async ({ counter, locale }) => {
+      const paused = { ...item('session-a', 'paused'), pauseReason: 'browser-disconnected' as const, canRetarget: true,
+        controls: ['stop' as const], task: { goal: 'Synthetic limited task', activeMs: 0, modelRequests: 0, toolCalls: 0,
+          [counter]: TASK_LIMITS[counter], outcome: 'pending' as const, canStart: false } }
+      const rpc = vi.fn(async () => list(paused)), copy = PANEL_COPY[locale].runs
+      await act(async () => { root.render(createElement(BrowserRuns, { api: { rpc: rpc as PanelApi['rpc'], retargetRun: vi.fn() },
+        sessionId: 'session-a', connected: true, targetRevision: 4, copy })) })
+      expect(document.querySelector('.run-retarget')).toBeNull()
+      expect(document.querySelector('.browser-run-actions')?.textContent).toContain(copy.stop)
+      expect(document.body.textContent).toContain(copy.outcomes['budget-exhausted'])
+      expect(document.body.textContent).not.toContain(copy.disconnectedHelp)
+    },
+  )
+
+  it.each(['en', 'zh'] as const)('hides exhausted selected-page and new-page startup from an older Host in %s', async locale => {
+    const queued = { ...item('session-a', 'queued'), controls: ['pause' as const, 'stop' as const],
+      task: { goal: 'Synthetic limited task', activeMs: 0, modelRequests: 0, toolCalls: TASK_LIMITS.toolCalls,
+        outcome: 'pending' as const, canStart: true, canStartNewPage: true } }
+    const rpc = vi.fn(async () => list(queued)), copy = PANEL_COPY[locale].runs
+    await act(async () => { root.render(createElement(BrowserRuns, { api: { rpc: rpc as PanelApi['rpc'], retargetRun: vi.fn() },
+      sessionId: 'session-a', connected: true, supportsNewPages: true, startRevision: 4, newPageRevision: 4, copy })) })
+    expect(document.querySelector('.run-start')).toBeNull()
+    expect(document.querySelector('.run-start-new-page')).toBeNull()
+    expect(document.querySelector('.browser-run-new-page')).toBeNull()
+    expect(document.body.textContent).toContain(copy.outcomes['budget-exhausted'])
+    expect(document.body.textContent).not.toContain(copy.waitingHelp)
+    expect(document.querySelector('.browser-run-actions')?.textContent).toContain(copy.stop)
+  })
+
   it('explains a connection-loss pause without inventing continuation after an uncertain write', async () => {
     const paused = { ...item('session-a', 'paused'), pauseReason: 'browser-disconnected' as const, canRetarget: false, requiresReconciliation: true,
       controls: ['stop' as const], task: { goal: 'Synthetic task', activeMs: 1, modelRequests: 1, toolCalls: 1, outcome: 'pending' as const, canStart: false } }

@@ -1,4 +1,5 @@
 import { BROWSER_RUN_LIST_LIMIT, BROWSER_RUN_STATES, type BrowserRunList, type BrowserRunSummary, type PanelRunControl } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
+import { taskBudgetExhausted } from '@eilyeee/dsh-browser-stride/src/task-budget.ts'
 
 export interface BrowserRunCopy {
   title: string
@@ -54,15 +55,17 @@ export function parseBrowserRuns(value: unknown, sessionId: string): BrowserRunL
         || !['pending', 'verified', 'needs-review', 'not-completed', 'budget-exhausted'].includes(value.outcome as string)
         || typeof value.canStart !== 'boolean' || (value.canStart && (state !== 'queued' || item.recoveryRequired || item.requiresReconciliation))
         || (value.canStartNewPage !== undefined && (typeof value.canStartNewPage !== 'boolean' || (value.canStartNewPage && !value.canStart)))) throw new Error('invalid browser task')
+      const hasBudget = !taskBudgetExhausted({ activeMs: value.activeMs, modelRequests: value.modelRequests, toolCalls: value.toolCalls })
+      // Older compatible Hosts may still advertise exhausted task controls.
       task = { goal: value.goal, activeMs: value.activeMs, modelRequests: value.modelRequests, toolCalls: value.toolCalls,
-        outcome: value.outcome as NonNullable<BrowserRunSummary['task']>['outcome'], canStart: value.canStart,
-        ...(value.canStartNewPage === undefined ? {} : { canStartNewPage: value.canStartNewPage }) }
+        outcome: value.outcome as NonNullable<BrowserRunSummary['task']>['outcome'], canStart: value.canStart && hasBudget,
+        ...(value.canStartNewPage === undefined ? {} : { canStartNewPage: value.canStartNewPage && hasBudget }) }
     }
     seen.add(item.runId)
     return { runId: item.runId, sessionId, state, version: item.version, controlRevision: item.controlRevision,
       updatedAt: item.updatedAt, recoveryRequired: item.recoveryRequired, requiresReconciliation: item.requiresReconciliation,
       ...(item.pauseReason === undefined ? {} : { pauseReason: item.pauseReason as 'browser-disconnected' }),
-      controls: [...item.controls], ...(item.canRetarget === undefined ? {} : { canRetarget: item.canRetarget }), ...(task === undefined ? {} : { task }) }
+      controls: [...item.controls], ...(item.canRetarget === undefined ? {} : { canRetarget: item.canRetarget && (task === undefined || !taskBudgetExhausted(task)) }), ...(task === undefined ? {} : { task }) }
   })
   return { items, total: value.total }
 }

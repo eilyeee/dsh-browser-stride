@@ -3,7 +3,7 @@ import { browserRunPanelRpc, browserRunPanelFailure, type RunPanelStore } from '
 import { BROWSER_RUN_LIST_LIMIT, BRIDGE_RUN_LIST_METHOD, BRIDGE_RUN_CONTROL_METHOD, type BrowserRunList } from '../src/protocol.ts'
 import { asActionId, asSessionId, type RequestDigest } from '../src/contracts/ids.ts'
 import { createRunStorage } from './helpers/run-storage.ts'
-import { newBrowserTask } from '../src/task-contract.ts'
+import { newBrowserTask, TASK_LIMITS } from '../src/task-contract.ts'
 
 const fixtures: Awaited<ReturnType<typeof createRunStorage>>[] = []
 afterEach(async () => { for (const fixture of fixtures.splice(0)) await fixture.close() })
@@ -18,6 +18,17 @@ async function setup() {
 }
 
 describe('panel browser-run metadata and controls', () => {
+  it.each(['activeMs', 'modelRequests', 'toolCalls'] as const)('does not offer startup or continuation after the cumulative %s limit', async counter => {
+    const fixture = await createRunStorage()
+    fixtures.push(fixture)
+    const queued = await fixture.store.create({ sessionId, requiredCriteriaIds: ['saved'], task: newBrowserTask('Synthetic limited task') })
+    const counted = await fixture.store.updateTask(queued.runId, task => ({ ...task, [counter]: TASK_LIMITS[counter] }))
+    const read = () => browserRunPanelRpc(fixture.store, BRIDGE_RUN_LIST_METHOD, { sessionId }, signal(), () => true)
+    expect(await read()).toMatchObject({ items: [{ state: 'queued', task: { canStart: false, canStartNewPage: false } }] })
+    await fixture.store.control(counted.runId, counted.version, 'pause')
+    expect(await read()).toMatchObject({ items: [{ state: 'paused', canRetarget: false, controls: ['stop'] }] })
+  })
+
   it('projects the Host pause reason and blocks continuation after a disconnected write', async () => {
     const fixture = await createRunStorage()
     fixtures.push(fixture)
