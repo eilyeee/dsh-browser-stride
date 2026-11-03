@@ -9,6 +9,12 @@ no release version has been assigned yet.
 
 ### Fixed
 
+- A new viewport capture removes superseded references for that page, so moving
+  through conversations cannot exhaust the visual cache with unusable refs.
+  Stopping control also drains a just-settled debugger attachment instead of
+  leaving it connected. The visual smoke checks worker-restart cleanup, rejected
+  old coordinates and a fresh capture after explicit binding. Sharing settings
+  now name screenshots alongside page text.
 - Normal Host shutdown uses a retryable close instead of reporting a permanent
   client replacement. With an open panel, the extension can reconnect using its
   saved credential after the Host returns. Actual replacement, invalid credentials

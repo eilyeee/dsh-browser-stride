@@ -224,7 +224,14 @@ export class DebuggerPages {
     if (lease === undefined) return
     lease.valid = false
     if (lease.closing !== undefined) { await lease.closing; return }
-    if (lease.preparing !== undefined) { await lease.preparing.catch(() => {}); return }
+    if (lease.preparing !== undefined) {
+      await lease.preparing.catch(() => {})
+      // Revocation can arrive after prepare's last guard, while its settled
+      // promise is still installed. Finish cleanup instead of leaving a native
+      // connection behind; never touch a successor that acquired the tab.
+      if (this.captures.get(tabId) === lease) await this.detachVisual(tabId)
+      return
+    }
     const closing = Promise.resolve().then(async () => {
       if (lease.attached) await this.detachRecordedVisual(tabId)
       if (this.captures.get(tabId) === lease) this.captures.delete(tabId)

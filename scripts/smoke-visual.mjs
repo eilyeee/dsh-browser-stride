@@ -103,10 +103,20 @@ try {
   assert.equal((await command(sessionId, 'browser_click_at', { screenshotRef: scrolled.screenshotRef, x: .38, y: .37 })).ok, false)
   const zoomed = await command(sessionId, 'browser_screenshot'); assert.equal(zoomed.ok, true, zoomed.text)
   assert.equal(await bluePixel(zoomed.image), true, 'Browser zoom must preserve full-image point fractions')
+  phase = 'worker-recovery'
+  Object.assign(browser, await browser.restartWorker())
+  await browser.panel.locator('.connection .dot.connected').waitFor({ state: 'visible', timeout: 30000 })
+  await wait(() => browser.worker.evaluate(async () => (await chrome.storage.session.get('dshVisualCaptures')).dshVisualCaptures?.length === 0), 'recorded visual connection cleanup')
+  assert.equal(await browser.worker.evaluate(id => chrome.debugger.sendCommand({ tabId: id }, 'Page.getFrameTree').then(() => true, () => false), targetId), false)
+  assert.equal((await command(sessionId, 'browser_click_at', { screenshotRef: zoomed.screenshotRef, x: .38, y: .37 })).ok, false)
+  assert.equal(site.state().clicks, 1, 'Worker recovery must not replay a canvas selection')
+  await browser.bindSession(sessionId)
+  const recovered = await command(sessionId, 'browser_screenshot'); assert.equal(recovered.ok, true, recovered.text)
+  assert.equal(await bluePixel(recovered.image), true, 'A fresh screenshot must work after explicit binding in the new worker')
   phase = 'native-revocation'
   await browser.panel.getByRole('button', { name: '停止控制此页', exact: true }).click()
   await wait(() => browser.worker.evaluate(async id => !(await chrome.storage.session.get('dshPageAccess')).dshPageAccess?.grants?.some(row => row.tabId === id), targetId), 'native group revocation')
-  assert.equal((await command(sessionId, 'browser_click_at', { screenshotRef: zoomed.screenshotRef, x: .38, y: .37 })).ok, false)
+  assert.equal((await command(sessionId, 'browser_click_at', { screenshotRef: recovered.screenshotRef, x: .38, y: .37 })).ok, false)
   assert.equal(await browser.worker.evaluate(id => chrome.debugger.sendCommand({ tabId: id }, 'Page.getFrameTree').then(() => true, () => false), targetId), false)
   assert.equal(await human.evaluate(() => window.syntheticClicks), 0)
   let modelEvidence
@@ -136,6 +146,7 @@ try {
     storedImageBlock: true, controlledPagePixelsVerified: true, imageBytesExcludedFromText: true,
     canvasLayerSelected: true, exactDomPropertiesRead: true, crossSessionRefDenied: true, repeatedPointDenied: true,
     staleScrollAndZoomDenied: true, scrolledAndZoomedPixelsVerified: true, nativeStopDetachedVisualControl: true,
+    workerRestartDetachedVisualControl: true, workerRestartRefDenied: true, workerRestartFreshCapture: true,
     humanTabUntouched: true, ...(modelEvidence === undefined ? {} : { modelEvidence }) }
   await writeFile(join(artifacts, realModel ? 'real-model.json' : 'result.json'), JSON.stringify(summary, null, 2), { mode: 0o600 })
   console.log(JSON.stringify(summary))

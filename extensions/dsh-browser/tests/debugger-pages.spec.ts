@@ -91,6 +91,20 @@ describe('new-tab debugger transport', () => {
     await expect(h.pages.prepareViewportCapture(42, () => true, () => true)).rejects.toThrow('unknown detach')
     expect(h.attach).toHaveBeenCalledTimes(1)
   })
+  it('finishes native cleanup when revocation races with an already-settled attachment', async () => {
+    const h = fixture(); let current = true, stopping: Promise<void> | undefined
+    h.attach.mockImplementationOnce(async () => {
+      queueMicrotask(() => queueMicrotask(() => {
+        current = false
+        stopping = h.pages.detachVisual(42)
+      }))
+    })
+    await h.pages.prepareViewportCapture(42, () => current, () => current)
+    expect(stopping).toBeDefined()
+    await stopping
+    expect(h.detach).toHaveBeenCalledTimes(1)
+    expect(h.cache.dshVisualCaptures).toEqual([])
+  })
   it('waits for the new HTTP(S) tab and retries only an explicit not-ready attachment', async () => {
     const h = fixture()
     h.get.mockResolvedValueOnce({ id: 42, windowId: 1, url: 'chrome://newtab/', pendingUrl: 'https://example.test/', status: 'loading' })

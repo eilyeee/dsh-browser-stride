@@ -60,4 +60,48 @@ describe('visual scope ownership', () => {
     vi.mocked(debuggerPages.prepareViewportCapture).mockRejectedValueOnce(new PageDispatchRevoked())
     await expect(capturePageScreenshot(42, () => true, authority)).rejects.toBeInstanceOf(PageDispatchRevoked)
   })
+  it('keeps only the latest screenshot owner on one page across many conversations', async () => {
+    const h = fixture(), first = { scope: crypto.randomUUID(), current: () => true }
+    expect((await capturePageScreenshot(73, () => true, first)).ok).toBe(true)
+    const oldRef = h.view.screenshotRef
+    let latest = first
+    for (let index = 0; index < 130; index++) {
+      h.view.screenshotRef = `shot_${crypto.randomUUID()}`
+      latest = { scope: crypto.randomUUID(), current: () => true }
+      expect((await capturePageScreenshot(73, () => true, latest)).ok).toBe(true)
+    }
+    expect(consumeVisualObservation(73, oldRef, first)).toBe(false)
+    expect(consumeVisualObservation(73, h.view.screenshotRef, latest)).toBe(true)
+  })
+  it('withdraws the earlier screenshot reference when a newer capture fails', async () => {
+    const h = fixture(), authority = { scope: crypto.randomUUID(), current: () => true }
+    expect((await capturePageScreenshot(74, () => true, authority)).ok).toBe(true)
+    const ref = h.view.screenshotRef
+    h.view.screenshotRef = `shot_${crypto.randomUUID()}`
+    h.capture.mockRejectedValueOnce(new Error('native capture failed'))
+    expect((await capturePageScreenshot(74, () => true, authority)).ok).toBe(false)
+    expect(consumeVisualObservation(74, ref, authority)).toBe(false)
+  })
+  it('withholds an old capture reply that arrives after a newer conversation captured the page', async () => {
+    const h = fixture(), oldView = { ...h.view }
+    const first = { scope: crypto.randomUUID(), current: () => true }
+    const next = { scope: crypto.randomUUID(), current: () => true }
+    type PageAnswer = Awaited<ReturnType<typeof h.sendMessage>>
+    let finish!: (value: PageAnswer) => void
+    h.sendMessage.mockImplementation(async (_tabId?: unknown, message?: unknown) => {
+      const command = message as { action: string; args?: { screenshotRef?: string } }
+      if (command.action === 'browser_visual_check' && command.args?.screenshotRef === oldView.screenshotRef) {
+        return await new Promise<PageAnswer>(resolve => { finish = resolve })
+      }
+      return { ok: true, result: { text: 'synthetic', visual: { ...h.view } } }
+    })
+    const old = capturePageScreenshot(75, () => true, first)
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
+    h.view.screenshotRef = `shot_${crypto.randomUUID()}`
+    expect((await capturePageScreenshot(75, () => true, next)).ok).toBe(true)
+    finish({ ok: true, result: { text: 'delayed', visual: oldView } })
+    expect((await old).ok).toBe(false)
+    expect(consumeVisualObservation(75, oldView.screenshotRef, first)).toBe(false)
+    expect(consumeVisualObservation(75, h.view.screenshotRef, next)).toBe(true)
+  })
 })
