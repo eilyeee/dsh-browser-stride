@@ -281,6 +281,61 @@ describe('Host-owned browser task executor', () => {
     expect(h.current().state).toBe('stopped')
   })
 
+  it('does not apply an old DSH cancellation to an explicitly continued revision', async () => {
+    const h = await setup(), entered = gate(), oldActivity = gate(), continued = gate(), newActivity = gate()
+    close.push(async () => { oldActivity.release(); newActivity.release() })
+    let round = 0
+    h.work(async () => {
+      await h.runtime.consume(h.agent, 'modelRequests')
+      if (++round === 1) { entered.release(); await oldActivity.promise }
+      else { continued.release(); await newActivity.promise }
+    })
+    await h.start(); await entered.promise
+    h.runtime.userCancelled(String(h.agent.id))
+    const paused = await h.store.control(h.run.runId, h.current().version, 'pause')
+    await h.store.retargetPaused(h.run.runId, paused.version, paused.controlRevision,
+      () => h.runtime.selectTarget(h.run.runId, 'https://synthetic.test/settings'))
+    oldActivity.release()
+    await vi.waitFor(() => expect(h.followup).toHaveBeenCalledTimes(2))
+    await continued.promise
+    expect(h.current()).toMatchObject({ state: 'running', controlRevision: 3, task: { outcome: 'pending', modelRequests: 2 } })
+    newActivity.release(); await h.settled()
+  })
+
+  it('acknowledges a DSH cancellation received during independent verification', async () => {
+    const h = await setup(), entered = gate(), verification = gate()
+    close.push(async () => { verification.release() })
+    let observedAbort = false
+    h.runtime.registerVerifier(h.run.runId, { acceptsTarget: () => true, verify: async ({ signal }) => {
+      entered.release(); await verification.promise
+      observedAbort = signal.aborted
+      return { observedText: ['cancelled synthetic proof'] }
+    } })
+    await h.start(); await entered.promise
+    h.runtime.userCancelled(String(h.agent.id))
+    verification.release(); await h.settled()
+    expect(h.current()).toMatchObject({ state: 'stopped', facts: [] })
+    expect(observedAbort).toBe(true)
+  })
+
+  it('honors a DSH cancellation during final outcome persistence without deleting committed evidence', async () => {
+    const h = await setup(), original = h.store.updateTask.bind(h.store)
+    let cancelled = false
+    vi.spyOn(h.store, 'updateTask').mockImplementation(async (id, update) => {
+      const result = await original(id, update)
+      if (!cancelled && result.task?.outcome === 'verified') {
+        cancelled = true
+        h.runtime.userCancelled(String(h.agent.id))
+      }
+      return result
+    })
+    h.runtime.registerVerifier(h.run.runId, { acceptsTarget: () => true,
+      verify: async () => ({ observedText: ['committed synthetic proof'] }) })
+    await h.start(); await h.settled()
+    expect(cancelled).toBe(true)
+    expect(h.current()).toMatchObject({ state: 'stopped', facts: [{ controlRevision: 0, outcome: 'verified' }] })
+  })
+
   it('rejects in-place goal edits and counter resets', async () => {
     const h = await setup()
     await h.store.updateTask(h.run.runId, task => ({ ...task, modelRequests: 1 }))

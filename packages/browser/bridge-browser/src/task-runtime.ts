@@ -191,6 +191,14 @@ export class BrowserTaskRuntime {
     })
   }
 
+  /** Only drained work can acknowledge a stop; cancellation cannot cross revisions. */
+  private async settleStop(job: Job, run: BrowserRunRecord): Promise<BrowserRunRecord> {
+    if (job.userStopped && run.state === 'running' && run.controlRevision === job.revision) {
+      run = await this.runs.control(run.runId, run.version, 'stop')
+    }
+    return run.state === 'stopping' ? this.runs.transition(run.runId, run.version, 'stopped') : run
+  }
+
   private changed(run: BrowserRunRecord): void {
     if (this.closed || run.task === undefined) return
     if (isTerminal(run.state) && !this.jobs.has(run.runId)) {
@@ -274,9 +282,7 @@ export class BrowserTaskRuntime {
     finally { this.tick(job) }
 
     await this.runs.updateTask(job.runId, task => ({ ...task, activeMs: Math.ceil(job.activeMs) }))
-    let run = this.runs.get(job.runId)!
-    if (job.userStopped && (run.state === 'running' || run.state === 'paused')) run = await this.runs.control(run.runId, run.version, 'stop')
-    if (run.state === 'stopping') { await this.runs.transition(run.runId, run.version, 'stopped'); return }
+    let run = await this.settleStop(job, this.runs.get(job.runId)!)
     if (run.state !== 'running' || run.controlRevision !== job.revision || this.closed) return
     const uncertain = this.runs.dispatches.list(run.sessionId).some(row => row.effect === 'write'
       && (row.state === 'prepared' || row.state === 'sent_unconfirmed' || row.state === 'unresolved' || (row.state === 'returned' && row.receipt?.ok === false)))
@@ -297,6 +303,7 @@ export class BrowserTaskRuntime {
     }
     this.tick(job)
     run = await this.markOutcome(run.runId, job.revision, outcome, job.activeMs)
+    run = await this.settleStop(job, run)
     if (run.state !== 'running' || run.controlRevision !== job.revision) return
     await this.runs.transition(run.runId, run.version, outcome === 'verified' ? 'completed' : outcome === 'not-completed' ? 'failed' : 'blocked')
   }

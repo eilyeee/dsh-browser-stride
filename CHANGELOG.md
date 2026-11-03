@@ -9,6 +9,10 @@ no release version has been assigned yet.
 
 ### Fixed
 
+- DSH user cancellation is scoped to its original task control revision and
+  cannot stop a later explicit continuation. Cancellation during independent
+  verification or final outcome persistence is acknowledged after that work
+  exits; already committed evidence is retained without completing the task.
 - Continued tasks start with a pending outcome while retaining their fixed goal,
   cumulative counters and committed evidence. A verifier draining from an older
   control revision cannot replace a paused, stopped or newly running outcome.
