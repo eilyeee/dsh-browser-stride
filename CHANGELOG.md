@@ -9,6 +9,10 @@ no release version has been assigned yet.
 
 ### Fixed
 
+- Browser model guidance aligns direct new-page opening with the tool contract,
+  explains returning observations from `run_code`, and distinguishes requested
+  page confirmation from independent persistence proof. It discourages repeated
+  writes and shell/network substitution. Benchmark suite 5 records this prompt change.
 - Ordinary-chat model acceptance checks the blue DSH control group, its window
   and the sole new-page grant, and records finalized tool outcomes. Its scope and
   request limits have regression checks; CI also builds the Firefox extension.

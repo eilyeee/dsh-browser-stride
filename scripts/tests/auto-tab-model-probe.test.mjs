@@ -65,8 +65,18 @@ test('evidence records the final tool outcome without arguments or page content'
   h.events.get('tools/result')(exec, Object.freeze({ isError: true, content: [{ type: 'text', text: 'synthetic-page-content' }] }))
   const evidence = await h.read(value => value.browserResults.length === 1)
   assert.deepEqual(evidence.browserCalls, ['browser_click'])
-  assert.deepEqual(evidence.browserResults, [{ name: 'browser_click', ok: false }])
+  assert.deepEqual(evidence.browserResults, [{ name: 'browser_click', ok: false, chars: 'synthetic-page-content'.length, savedMessage: false }])
   assert.doesNotMatch(JSON.stringify(evidence), /synthetic-argument|synthetic-page-content/)
+})
+
+test('diagnostics distinguish a browser observation from the outer program output', async t => {
+  const h = await fixture(t)
+  h.events.get('tools/result')({ agent: h.agent, name: 'browser_snapshot' }, { isError: false, content: [{ type: 'text', text: '设置已保存' }] })
+  h.events.get('tools/result')({ agent: h.agent, name: 'run_code' }, { isError: false, content: [{ type: 'text', text: '(run_code completed with no output)' }] })
+  const evidence = await h.read(value => value.ptcResults.length === 1)
+  assert.equal(evidence.browserResults[0].savedMessage, true)
+  assert.equal(evidence.ptcResults[0].savedMessage, false)
+  assert.doesNotMatch(JSON.stringify(evidence), /设置已保存|run_code completed/)
 })
 
 test('the model request limit refuses the next provider request', async t => {

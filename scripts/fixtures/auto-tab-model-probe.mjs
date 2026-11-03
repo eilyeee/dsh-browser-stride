@@ -8,7 +8,7 @@ export const BROWSER_CALL_LIMIT = 20
 
 export function apply(ctx, config) {
   let expected, writes = Promise.resolve()
-  const evidence = { modelRequests: 0, ptcCalls: 0, browserCalls: [], browserResults: [], blockedTools: [], terminal: false }
+  const evidence = { modelRequests: 0, ptcCalls: 0, browserCalls: [], browserResults: [], ptcResults: [], blockedTools: [], terminal: false }
   const belongs = agent => expected !== undefined && String(agent?.id) === expected.sessionId
   const save = () => (writes = writes.then(() => writeFile(config.result, JSON.stringify(evidence), { mode: 0o600 })).catch(() => {}))
   ctx.effect(() => ctx.tools.guard(exec => {
@@ -42,10 +42,14 @@ export function apply(ctx, config) {
     return next()
   })
   ctx.on('tools/result', (exec, result) => {
-    if (belongs(exec.agent) && exec.name.startsWith('browser_')) {
-      evidence.browserResults.push({ name: exec.name, ok: !result.isError })
-      void save()
-    }
+    if (!belongs(exec.agent)) return
+    const rows = exec.name === 'run_code' ? evidence.ptcResults : exec.name.startsWith('browser_') ? evidence.browserResults : undefined
+    if (rows === undefined) return
+    const text = result.content?.filter(block => block.type === 'text').map(block => block.text).join('\n') ?? ''
+    // Fixture-only signals show whether observation output reached the model,
+    // without retaining arguments, source code, page text or error messages.
+    rows.push({ name: exec.name, ok: !result.isError, chars: text.length, savedMessage: text.includes('设置已保存') })
+    void save()
   })
   ctx.on('session/event', (session, event) => {
     if (!belongs({ id: session.id })) return
