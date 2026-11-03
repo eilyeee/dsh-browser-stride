@@ -8,11 +8,16 @@ const observations = new Map<string, { tabId: number; ref: string; current: () =
 const pendingCaptures = new Map<number, object>()
 const keyFor = (tabId: number, scope: string) => JSON.stringify([tabId, scope])
 
-export function consumeVisualObservation(tabId: number, ref: unknown, authority?: VisualAuthority): boolean {
+/** Preflight only: permission checks and single-use consumption still run at delivery. */
+export function hasVisualObservation(tabId: number, ref: unknown, authority?: VisualAuthority): boolean {
   if (authority === undefined) return false
   const key = keyFor(tabId, authority.scope), saved = observations.get(key)
-  if (saved === undefined || saved.ref !== ref || !saved.current() || !authority.current()) return false
-  observations.delete(key)
+  return saved !== undefined && saved.ref === ref && saved.current() && authority.current()
+}
+
+export function consumeVisualObservation(tabId: number, ref: unknown, authority?: VisualAuthority): boolean {
+  if (authority === undefined || !hasVisualObservation(tabId, ref, authority)) return false
+  observations.delete(keyFor(tabId, authority.scope))
   return true
 }
 

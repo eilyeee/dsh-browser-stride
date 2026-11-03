@@ -26,7 +26,7 @@ import { getUiLocale } from '../i18n.ts'
 import { debuggerPages, sendPageMessage, PageDispatchRevoked, type PageDispatch } from './debugger-pages.ts'
 import type { CreatedPageAccess } from './page-access.ts'
 
-import { capturePageScreenshot, consumeVisualObservation, type VisualAuthority } from './visual.ts'
+import { capturePageScreenshot, consumeVisualObservation, hasVisualObservation, type VisualAuthority } from './visual.ts'
 
 /** A tool call from the bridge. */
 export interface ToolCall {
@@ -508,7 +508,7 @@ async function dispatchOnce(
   if (call.name === 'browser_snapshot') return snapshotAllFrames(tabId, frames, call, budget, requestCurrent)
   if (call.name === 'browser_screenshot') return capturePageScreenshot(tabId, requestCurrent, visualAuthority)
   if (call.name === 'browser_click_at' && !consumeVisualObservation(tabId, call.args.screenshotRef, visualAuthority)) {
-    return unavailable('The screenshot belongs to an old document, connection, session or task revision, or was already used. Take browser_screenshot again.')
+    return staleScreenshot()
   }
 
   const frameId = requestedFrame(call.args)
@@ -761,6 +761,10 @@ export async function dispatchToolCall(
   if ((call.name === 'browser_screenshot' || call.name === 'browser_click_at') && call.args.frame !== undefined) {
     return { ok: false, error: { code: 'bad-args', message: 'Visual tools operate on the main document only.' } }
   }
+  if (call.name === 'browser_click_at' && !['x', 'y'].every(key => typeof call.args[key] === 'number'
+    && Number.isFinite(call.args[key]) && call.args[key] >= 0 && call.args[key] < 1)) {
+    return { ok: false, error: { code: 'bad-args', message: 'x and y must be whole-image fractions from 0 inclusive to 1 exclusive.' } }
+  }
   if (call.name === 'browser_open_tab') {
     return unavailable('browser_open_tab must be dispatched through the background open-tab path.')
   }
@@ -781,6 +785,11 @@ export async function dispatchToolCall(
     return { ok: false, error: { code: 'no-active-tab', message: 'No active tab is available for browser operations.' } }
   }
   if (targetStillAllowed?.() === false) return targetChanged()
+  // Reject unusable refs without a confirmation dialog or a page read. The
+  // reference is consumed only after approval, immediately before delivery.
+  if (call.name === 'browser_click_at' && !hasVisualObservation(tab.id, call.args.screenshotRef, tabManagement.visualAuthority)) {
+    return staleScreenshot()
+  }
   const frames = await listTabFrames(tab.id, tab.url)
   if (isCancelled(call, signal)) return cancelled()
   if (targetStillAllowed?.() === false) return targetChanged()
@@ -880,6 +889,10 @@ export async function dispatchToolCall(
       return unavailable('The content script did not answer after it was loaded. Call browser_snapshot again before retrying.')
     }
   }
+}
+
+function staleScreenshot(): ToolAnswer {
+  return unavailable('The screenshot belongs to an old document, connection, session or task revision, or was already used. Take browser_screenshot again.')
 }
 
 function validateFrameTarget(call: ToolCall, frames: TabFrame[]): ToolAnswer | undefined {

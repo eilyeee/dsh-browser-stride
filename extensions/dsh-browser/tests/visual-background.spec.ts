@@ -2,13 +2,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { capturePageScreenshot, consumeVisualObservation } from '../src/background/visual.ts'
 import { debuggerPages, PageDispatchRevoked } from '../src/background/debugger-pages.ts'
+import { dispatchToolCall } from '../src/background/tools.ts'
 import type { VisualObservation } from '@eilyeee/dsh-browser-stride/src/visual.ts'
 
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 function fixture() {
   const view: VisualObservation = { screenshotRef: `shot_${crypto.randomUUID()}`, width: 1000, height: 800, scrollX: 0, scrollY: 0, devicePixelRatio: 2 }
   const sendMessage = vi.fn(async () => ({ ok: true, result: { text: 'synthetic', visual: { ...view } } }))
-  vi.stubGlobal('chrome', { tabs: { sendMessage } })
+  vi.stubGlobal('chrome', { tabs: { sendMessage }, webNavigation: { getAllFrames: vi.fn(async () => [
+    { frameId: 0, parentFrameId: -1, documentId: 'synthetic-document', url: 'https://example.test/design' },
+  ]) } })
   vi.spyOn(debuggerPages, 'has').mockReturnValue(false)
   vi.spyOn(debuggerPages, 'prepareViewportCapture').mockResolvedValue()
   const capture = vi.spyOn(debuggerPages, 'captureViewport').mockResolvedValue('/9j/2Q==')
@@ -103,5 +106,48 @@ describe('visual scope ownership', () => {
     expect((await old).ok).toBe(false)
     expect(consumeVisualObservation(75, oldView.screenshotRef, first)).toBe(false)
     expect(consumeVisualObservation(75, h.view.screenshotRef, next)).toBe(true)
+  })
+  it.each(['consumed', 'other-session', 'revoked'])('refuses a %s screenshot before asking for action confirmation', async reason => {
+    const h = fixture(); let current = true
+    const owner = { scope: crypto.randomUUID(), current: () => current }
+    await capturePageScreenshot(76, () => true, owner)
+    if (reason === 'consumed') consumeVisualObservation(76, h.view.screenshotRef, owner)
+    if (reason === 'revoked') current = false
+    const authority = reason === 'other-session' ? { ...owner, scope: crypto.randomUUID() } : owner
+    const authorize = vi.fn(async () => 'approved' as const)
+    const before = h.sendMessage.mock.calls.length
+    const answer = await dispatchToolCall({ id: 'stale-point', name: 'browser_click_at', args: { screenshotRef: h.view.screenshotRef, x: .3, y: .4 } },
+      'auto', undefined, authorize, undefined, { id: 76, windowId: 1, url: 'https://example.test/design' }, () => true,
+      { unrestrictedAccess: false, visualAuthority: authority })
+    expect(answer).toMatchObject({ ok: false, error: { message: expect.stringContaining('browser_screenshot') } })
+    expect(authorize).not.toHaveBeenCalled()
+    expect(h.sendMessage).toHaveBeenCalledTimes(before)
+  })
+  it('keeps a fresh screenshot usable after a denied action confirmation', async () => {
+    const h = fixture(), authority = { scope: crypto.randomUUID(), current: () => true }
+    await capturePageScreenshot(77, () => true, authority)
+    const authorize = vi.fn(async () => 'denied' as const), commit = vi.fn()
+    const answer = await dispatchToolCall({ id: 'denied-point', name: 'browser_click_at', args: { screenshotRef: h.view.screenshotRef, x: .3, y: .4 } },
+      'auto', undefined, authorize, undefined, { id: 77, windowId: 1, url: 'https://example.test/design' }, () => true,
+      { unrestrictedAccess: false, visualAuthority: authority, commitAction: commit })
+    expect(answer.ok).toBe(false)
+    expect(authorize).toHaveBeenCalledTimes(1); expect(commit).not.toHaveBeenCalled()
+    expect(consumeVisualObservation(77, h.view.screenshotRef, authority)).toBe(true)
+  })
+  it('rechecks a screenshot replaced while action confirmation was pending', async () => {
+    const h = fixture(), authority = { scope: crypto.randomUUID(), current: () => true }, commit = vi.fn()
+    await capturePageScreenshot(78, () => true, authority)
+    const ref = h.view.screenshotRef
+    const authorize = vi.fn(async () => {
+      h.view.screenshotRef = `shot_${crypto.randomUUID()}`
+      await capturePageScreenshot(78, () => true, authority)
+      return 'approved' as const
+    })
+    const answer = await dispatchToolCall({ id: 'replaced-point', name: 'browser_click_at', args: { screenshotRef: ref, x: .3, y: .4 } },
+      'auto', undefined, authorize, undefined, { id: 78, windowId: 1, url: 'https://example.test/design' }, () => true,
+      { unrestrictedAccess: false, visualAuthority: authority, commitAction: commit })
+    expect(answer).toMatchObject({ ok: false, error: { message: expect.stringContaining('browser_screenshot') } })
+    expect(authorize).toHaveBeenCalledTimes(1); expect(commit).not.toHaveBeenCalled()
+    expect(consumeVisualObservation(78, h.view.screenshotRef, authority)).toBe(true)
   })
 })

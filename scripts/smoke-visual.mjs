@@ -35,6 +35,19 @@ async function command(sessionId, name, args = {}) {
   assert.equal(answer.probeError, undefined, 'Host visual probe failed')
   return answer
 }
+async function setActionTrust(origins) {
+  await browser.panel.evaluate(origins => new Promise((resolve, reject) => {
+    const port = window.__dshBenchmarkPort, id = crypto.randomUUID()
+    const timer = setTimeout(() => { port.onMessage.removeListener(receive); reject(new Error('Synthetic action trust settings timed out')) }, 5000)
+    function receive(message) {
+      if (message.type !== 'settings.result' || message.id !== id) return
+      clearTimeout(timer); port.onMessage.removeListener(receive)
+      message.ok ? resolve() : reject(new Error('Synthetic action trust settings failed'))
+    }
+    port.onMessage.addListener(receive)
+    port.postMessage({ type: 'settings', id, settings: { trustedActionOrigins: origins } })
+  }), origins)
+}
 async function bluePixel(image) {
   return browser.worker.evaluate(async image => {
     const data = Uint8Array.from(atob(image.data), char => char.charCodeAt(0))
@@ -83,15 +96,22 @@ try {
   const other = (await host.client.rpc('session.create', { cwd: join(root, 'other') })).sessionId
   await browser.panel.evaluate(sessionId => window.__dshBenchmarkPort.postMessage({ type: 'session.active', sessionId, isNew: true }), other)
   await wait(() => browser.worker.evaluate(async sessionId => !!(await chrome.storage.session.get('dshTabAffinity')).dshTabAffinity?.sessionTabs?.[sessionId], other), 'second conversation binding')
+  await setActionTrust([])
   assert.equal((await command(other, 'browser_click_at', { screenshotRef: shot.screenshotRef, x: .38, y: .37 })).ok, false)
+  assert.equal(await browser.panel.getByRole('button', { name: '仅允许这一次', exact: true }).count(), 0, 'A foreign screenshot must not ask for action confirmation')
   assert.deepEqual(site.state(), { selection: null, clicks: 0 })
-  const clicked = await command(sessionId, 'browser_click_at', { screenshotRef: shot.screenshotRef, x: .38, y: .37 })
+  const [clicked] = await Promise.all([
+    command(sessionId, 'browser_click_at', { screenshotRef: shot.screenshotRef, x: .38, y: .37 }),
+    browser.panel.getByRole('button', { name: '仅允许这一次', exact: true }).click(),
+  ])
   assert.equal(clicked.ok, true, clicked.text)
   await wait(() => site.state().clicks === 1, 'canvas point selection')
   const selected = await command(sessionId, 'browser_snapshot')
   assert.equal(selected.ok, true); assert.ok(selected.text.includes(site.layer)); assert.ok(selected.text.includes(site.color)); assert.ok(selected.text.includes('14px'))
   assert.equal((await command(sessionId, 'browser_click_at', { screenshotRef: shot.screenshotRef, x: .38, y: .37 })).ok, false)
+  assert.equal(await browser.panel.getByRole('button', { name: '仅允许这一次', exact: true }).count(), 0, 'A consumed screenshot must not ask for action confirmation')
   assert.equal(site.state().clicks, 1)
+  await setActionTrust([site.origin])
   phase = 'scroll-and-zoom'
   const beforeScroll = await command(sessionId, 'browser_screenshot'); assert.equal(beforeScroll.ok, true, beforeScroll.text)
   assert.equal((await command(sessionId, 'browser_scroll', { direction: 'down', amount: 100 })).ok, true)
@@ -147,6 +167,7 @@ try {
     canvasLayerSelected: true, exactDomPropertiesRead: true, crossSessionRefDenied: true, repeatedPointDenied: true,
     staleScrollAndZoomDenied: true, scrolledAndZoomedPixelsVerified: true, nativeStopDetachedVisualControl: true,
     workerRestartDetachedVisualControl: true, workerRestartRefDenied: true, workerRestartFreshCapture: true,
+    invalidRefSkippedApproval: true, validPointApprovedNatively: true,
     humanTabUntouched: true, ...(modelEvidence === undefined ? {} : { modelEvidence }) }
   await writeFile(join(artifacts, realModel ? 'real-model.json' : 'result.json'), JSON.stringify(summary, null, 2), { mode: 0o600 })
   console.log(JSON.stringify(summary))

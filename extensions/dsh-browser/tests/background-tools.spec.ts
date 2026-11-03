@@ -118,6 +118,14 @@ describe('isNavigationCandidateTool', () => {
 })
 
 describe('dispatchToolCall', () => {
+  it.each([[1, .5], [-.1, .5], [.3, Infinity], [.3, NaN]])('rejects invalid image fractions %s, %s before native reads or approval', async (x, y) => {
+    const h = mockChrome({ tab: { id: 7, url: 'https://example.com' } })
+    const authorize = vi.fn(async () => 'approved' as const)
+    const answer = await dispatchToolCall({ id: 'invalid-point', name: 'browser_click_at', args: { screenshotRef: 'shot_synthetic', x, y } },
+      'auto', undefined, authorize)
+    expect(answer).toMatchObject({ ok: false, error: { code: 'bad-args' } })
+    expect(authorize).not.toHaveBeenCalled(); expect(h.query).not.toHaveBeenCalled(); expect(h.sendMessage).not.toHaveBeenCalled()
+  })
   it('returns an empty admitted scope without querying tabs or requesting page-read approval', async () => {
     const h = mockChrome({ tabs: [managedTab(91, { title: 'Private synthetic tab', url: 'https://private.example/' })] })
     const authorize = vi.fn(async () => 'denied' as const)

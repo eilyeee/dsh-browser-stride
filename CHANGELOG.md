@@ -9,6 +9,10 @@ no release version has been assigned yet.
 
 ### Fixed
 
+- Canvas points with invalid coordinates or unavailable screenshot ownership are
+  rejected before action confirmation. Denying a valid point keeps its reference
+  available, while references replaced during approval are still refused at
+  delivery. These checks do not bypass page permission or action approval.
 - A new viewport capture removes superseded references for that page, so moving
   through conversations cannot exhaust the visual cache with unusable refs.
   Stopping control also drains a just-settled debugger attachment instead of
