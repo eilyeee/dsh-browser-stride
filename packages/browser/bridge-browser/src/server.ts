@@ -647,6 +647,7 @@ export class BridgeServer {
     }
     if (frame.method === BRIDGE_RUN_RETARGET_METHOD || frame.method === BRIDGE_TASK_START_METHOD) {
       let consumed = false
+      let targetMayHaveChanged = false
       const newPage = isRecord(frame.payload) && frame.payload.startTicket !== undefined
       try {
         const id = z.string().min(1).max(200).refine(value => value.trim() === value)
@@ -654,12 +655,16 @@ export class BridgeServer {
         const payload = z.strictObject({ runId: id, sessionId: id, expectedVersion: counter,
           controlRevision: counter, targetBinding: id, targetUrl: z.string().max(8192).optional(),
           startTicket: id.optional(), launchUrl: z.string().max(8192).optional() }).parse(frame.payload)
+        // A duplicate of an earlier committed/uncertain pin must not tell its
+        // original owner that releasing that pin is safe.
+        targetMayHaveChanged = this.runTargets.get(payload.runId)?.id === payload.targetBinding
         const runs = this.deps.runs
         if (runs === undefined) throw new Error('unavailable')
         const run = runs.get(asRunId(payload.runId))
         if (run === undefined || run.sessionId !== payload.sessionId) throw new Error('foreign run')
         if (newPage && run.state !== 'queued') throw new TaskPageAdmissionError(true)
         const attachTarget = (revision: number) => {
+          targetMayHaveChanged = true
           if (this.current !== conn || conn.abort.signal.aborted) throw new Error('connection changed')
           const previous = this.runTargets.get(run.runId)
           if (previous !== undefined && previous.controlRevision >= revision) throw new Error('target revision consumed')
@@ -689,7 +694,7 @@ export class BridgeServer {
       } catch (error) {
         sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false, error: newPage
           ? { code: consumed || (error instanceof TaskPageAdmissionError && error.mayHaveStarted) ? 'start-uncertain' : 'start-rejected', message: 'Task startup was not confirmed. Refresh task status before another action.' }
-          : browserRunPanelFailure(error) })
+          : { ...browserRunPanelFailure(error), targetState: targetMayHaveChanged ? 'uncertain' : 'unchanged' } })
       }
       return
     }

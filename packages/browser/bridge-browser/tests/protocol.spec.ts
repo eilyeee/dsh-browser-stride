@@ -5,6 +5,10 @@ const execution = { kind: 'legacy' as const }
 const action = { actionId: 'act_synthetic', requestDigest: 'a'.repeat(64) }
 
 describe('parseBridgeFrame', () => {
+  it.each(['unchanged', 'uncertain'] as const)('preserves optional native target error metadata: %s', targetState => {
+    const frame = { t: 'rpc.result', id: 'native-target', ok: false, error: { code: 'stale-version', message: 'Refresh', targetState } }
+    expect(parseBridgeFrame(JSON.stringify(frame))).toEqual(frame)
+  })
   it('preserves optional task budget signaling only on managed commands', () => {
     const frame = { t: 'tool.call', id: 'budget', action, execution: { kind: 'run', runId: 'run-a', controlRevision: 0 },
       sessionId: 'session-a', name: 'browser_snapshot', args: {}, expiresAt: 123 }

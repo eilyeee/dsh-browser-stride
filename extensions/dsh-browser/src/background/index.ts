@@ -59,6 +59,7 @@ import { ToolExecutionFence } from './execution-authority.ts'
 import { PageAccess, type CreatedPageAccess } from './page-access.ts'
 import { debuggerPages, sendPageMessage } from './debugger-pages.ts'
 import { RunTargetRegistry, type RunTargetBinding } from './run-targets.ts'
+import { commitRunTarget } from './run-target-commit.ts'
 import { startTaskPage, taskPageGrant, cleanupOwnedTaskPage, type PreparedTaskPage } from './task-page-start.ts'
 import { localBridgeUrl } from './bridge-address.ts'
 import { requestBrowserPairing, revokeBrowserPairing, type BrowserPairingStatus } from './pairing-client.ts'
@@ -1929,13 +1930,10 @@ chrome.runtime.onConnect.addListener((port) => {
           if ('ok' in live || !current() || !target.current() || controller.signal.aborted) throw new Error('target changed')
           const prepared = runTargets.prepare({ kind: 'run', runId, controlRevision: revision + (start ? 0 : 2) }, sid, target)
           if (prepared === undefined) throw new Error('target unavailable')
-          const result = await boundRpc.request(start ? BRIDGE_TASK_START_METHOD : BRIDGE_RUN_RETARGET_METHOD, { runId, sessionId: sid,
+          await commitRunTarget((method, payload, options) => boundRpc.request(method, payload, options), start ? BRIDGE_TASK_START_METHOD : BRIDGE_RUN_RETARGET_METHOD, { runId, sessionId: sid,
             expectedVersion: version, controlRevision: revision, targetBinding: prepared.id,
-            ...(start || request.task === true ? { targetUrl: target.target.url } : {}) }, { signal: controller.signal, timeoutMs: 12_000 })
-          if (typeof result !== 'object' || result === null) throw new Error('invalid result')
-          const value = result as { runId?: unknown; sessionId?: unknown; controlRevision?: unknown; state?: unknown; targetBinding?: unknown }
-          if (value.runId !== runId || value.sessionId !== sid || value.controlRevision !== revision + (start ? 0 : 2)
-            || value.state !== 'running' || value.targetBinding !== prepared.id) throw new Error('invalid result')
+            ...(start || request.task === true ? { targetUrl: target.target.url } : {}) },
+            { current: prepared.current, discard: () => runTargets.discardPrepared(prepared.id) }, controller.signal)
           reply(true)
         })().catch(error => reply(false, error instanceof BridgeRpcError ? error.code : 'handoff-failed')).finally(() => {
           clearTimeout(timer)

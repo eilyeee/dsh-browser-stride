@@ -43,6 +43,28 @@ function execution(agent: Agent, name = 'browser_snapshot', parent?: ToolExecuti
 }
 
 describe('Host-owned browser task executor', () => {
+  it('refuses provider delivery if connection authority expires during model counter persistence', async () => {
+    const h = await setup()
+    const original = h.store.updateTask.bind(h.store)
+    let armed = true, delivered = 0, denied = false
+    vi.spyOn(h.store, 'updateTask').mockImplementation(async (id, update) => {
+      const result = await original(id, update)
+      if (armed && result.task?.modelRequests === 1) {
+        armed = false
+        await h.store.pauseDisconnectedTask(id, result.controlRevision)
+      }
+      return result
+    })
+    h.work(async () => {
+      try { await h.runtime.consume(h.agent, 'modelRequests'); delivered++ }
+      catch { denied = true }
+    })
+    await h.start()
+    await vi.waitFor(() => expect(denied || delivered > 0).toBe(true))
+    expect(delivered).toBe(0)
+    expect(denied).toBe(true)
+    expect(h.current()).toMatchObject({ state: 'paused', task: { modelRequests: 1 } })
+  })
   it('cancels the owned Agent before its disconnected pause is persisted and waits for explicit continuation', async () => {
     const h = await setup()
     const hold = gate()

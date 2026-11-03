@@ -9,6 +9,14 @@ no release version has been assigned yet.
 
 ### Fixed
 
+- Native selected-page start/continuation releases its unused prepared pin when
+  the Host explicitly confirms a rejection before target attachment. A later
+  trusted click can prepare a fresh pin. Lost replies, legacy errors and any
+  attachment/commit uncertainty retain the original pin without automatic retry;
+  duplicate committed pins can never be reported safe to release.
+- Model and browser-tool admissions recheck their job after counter persistence.
+  A disconnect or pause during that write cannot return permission to enter the
+  provider or tool afterwards; counters remain monotonic.
 - Losing or replacing a browser connection immediately fences explicit tasks
   owned by its native target and cancels their active Agent scope before the
   durable pause is queued. The panel records a connection-loss pause reason;

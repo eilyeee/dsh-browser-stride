@@ -380,6 +380,7 @@ describe('recorded tool dispatch', () => {
     send(h.ws, { t: 'rpc', id: 'duplicate-handoff', method: BRIDGE_RUN_RETARGET_METHOD, payload })
     await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === 'duplicate-handoff'))
     expect(h.frames).toContainEqual(expect.objectContaining({ id: 'duplicate-handoff', ok: false }))
+    expect(h.frames).toContainEqual(expect.objectContaining({ id: 'duplicate-handoff', error: expect.objectContaining({ targetState: 'uncertain' }) }))
     expect(h.storage.store.get(run.runId)).toEqual(resumed)
     expect(h.callMock).not.toHaveBeenCalled()
   })
@@ -395,9 +396,25 @@ describe('recorded tool dispatch', () => {
       const id = `handoff-refused-${index}`
       send(h.ws, { t: 'rpc', id, method: BRIDGE_RUN_RETARGET_METHOD, payload })
       await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === id))
-      expect(h.frames).toContainEqual(expect.objectContaining({ id, ok: false }))
+      expect(h.frames).toContainEqual(expect.objectContaining({ id, ok: false, error: expect.objectContaining({ targetState: 'unchanged' }) }))
     }
     expect(h.storage.store.get(run.runId)).toEqual(paused)
+  })
+  it('cannot declare a selected target unchanged after entering attachment or on duplicate use of that pin', async () => {
+    const h = await connectedLedger(true)
+    const queued = await h.storage.store.create({ sessionId: asSessionId('uncertain-selected-target'), requiredCriteriaIds: ['saved'] })
+    const run = await h.storage.store.transition(queued.runId, queued.version, 'running')
+    const paused = await h.storage.store.control(run.runId, run.version, 'pause')
+    vi.spyOn(h.storage.store, 'retargetPaused').mockImplementation(async (_id, _version, revision, attach) => {
+      attach(revision + 2)
+      throw new Error('Synthetic commit uncertainty')
+    })
+    const payload = { sessionId: run.sessionId, runId: run.runId, expectedVersion: paused.version, controlRevision: paused.controlRevision, targetBinding: 'page_uncertain_selected' }
+    for (const id of ['uncertain-selected', 'duplicate-selected']) {
+      send(h.ws, { t: 'rpc', id, method: BRIDGE_RUN_RETARGET_METHOD, payload })
+      await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === id))
+      expect(h.frames).toContainEqual(expect.objectContaining({ id, ok: false, error: expect.objectContaining({ targetState: 'uncertain' }) }))
+    }
   })
   it('pins the first native target across calls, permits a new revision, and refuses borrowing across connections', async () => {
     const h = await connectedLedger(true, false)

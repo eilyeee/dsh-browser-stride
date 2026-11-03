@@ -6,7 +6,7 @@
  */
 
 import type { BridgeClient } from './bridge.ts'
-import type { ServerFrame } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
+import type { ServerFrame, NativeTargetState } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 
 const RPC_TIMEOUT_MS = 30_000
 
@@ -20,7 +20,7 @@ interface RpcOptions { signal?: AbortSignal; timeoutMs?: number }
 
 /** Preserve fixed bridge error codes across the panel port. */
 export class BridgeRpcError extends Error {
-  constructor(readonly code: string, message: string) { super(`${code}: ${message}`); this.name = 'BridgeRpcError' }
+  constructor(readonly code: string, message: string, readonly targetState: NativeTargetState | undefined = undefined) { super(`${code}: ${message}`); this.name = 'BridgeRpcError' }
 }
 
 /**
@@ -53,7 +53,8 @@ export function createRpc(bridge: BridgeClient): { request(method: string, paylo
     previous?.(frame)
     if (frame.t !== 'rpc.result') return
     if (frame.ok) finish(frame.id, undefined, frame.result)
-    else finish(frame.id, new BridgeRpcError(frame.error.code, frame.error.message))
+    else finish(frame.id, new BridgeRpcError(frame.error.code, frame.error.message,
+      frame.error.targetState === 'unchanged' || frame.error.targetState === 'uncertain' ? frame.error.targetState : undefined))
   }
 
   return {

@@ -49,6 +49,9 @@ export const BRIDGE_TASK_APPROVAL_METHOD = 'bridge.browserTasks.approval'
 export const BROWSER_RUN_LIST_LIMIT = 20
 export const BROWSER_RUN_STATES = ['queued', 'running', 'blocked', 'paused', 'stopping', 'stopped', 'completed', 'failed'] as const
 export type PanelRunControl = 'pause' | 'stop'
+/** Only the Host's native target commit path may declare an unchanged target. */
+export type NativeTargetState = 'unchanged' | 'uncertain'
+export interface BridgeRpcFailure { code: string; message: string; targetState?: NativeTargetState }
 export interface BrowserRunSummary {
   task?: { goal: string; activeMs: number; modelRequests: number; toolCalls: number;
     outcome: 'pending' | 'verified' | 'needs-review' | 'not-completed' | 'budget-exhausted'; canStart: boolean; canStartNewPage?: boolean }
@@ -191,7 +194,7 @@ export type ServerFrame =
   | { t: 'hello.ok'; caps: BridgeCaps; credential?: string; protocolVersion?: number }
   /** Reply to an `rpc` frame; `result` is the bridge's stable ServerResponse envelope. */
   | { t: 'rpc.result'; id: string; ok: true; result: unknown }
-  | { t: 'rpc.result'; id: string; ok: false; error: { code: string; message: string } }
+  | { t: 'rpc.result'; id: string; ok: false; error: BridgeRpcFailure }
   /** Receipt for a `respond` frame (normally `{ accepted: boolean }`). */
   | { t: 'respond.result'; id: string; ok: true; result: unknown }
   | { t: 'respond.result'; id: string; ok: false; error: { code: string; message: string } }
@@ -293,7 +296,7 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
         return { t: 'rpc.result', id: frame.id, ok: true, result: frame.result }
       }
       return typeof frame.error === 'object' && frame.error !== null
-        ? { t: 'rpc.result', id: frame.id, ok: false, error: frame.error as { code: string; message: string } }
+        ? { t: 'rpc.result', id: frame.id, ok: false, error: frame.error as BridgeRpcFailure }
         : undefined
     case 'respond.result':
       if (typeof frame.id !== 'string') return undefined

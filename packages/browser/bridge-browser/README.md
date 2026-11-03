@@ -68,6 +68,8 @@ An optional `canRetarget` summary field enables **Continue on selected page** fo
 
 The panel refreshes metadata every two seconds while open and connected. Responses contain at most 20 runs, unfinished first, with a total count; they omit criteria, facts, page evidence and arguments. A version conflict or uncertain reply triggers a state refresh, never an automatic command retry. `stopping` means the executor has not confirmed stopping yet. Ordinary chat sessions have no task card until trusted Host code creates a run. The normal chat cancel button still controls the Agent separately.
 
+Selected-page startup and handoff errors retain their original error code and may add `targetState: 'unchanged' | 'uncertain'`. The Host declares `unchanged` only before entering target attachment and when that pin is not already known from an earlier attempt. The worker releases only its unused prepared pin before send or after this explicit refusal, so a later trusted click can prepare a fresh target. Once attachment is entered, or when a reply is lost or an older Host omits the field, it retains the pin and refreshes status without retrying. Releasing a prepared pin does not close the page or revoke its native access. Model/tool counter writes also recheck the original job after persistence before allowing their caller to proceed.
+
 ## Dispatch records
 
 `ctx.browserRuns.dispatches` records every production `browser_*` dispatch, including calls without an Agent session. It uses a separate `browser_dispatches_<UTF-8 hex of pairingProfile>` domain. The Host commits request metadata and a digest before sending, then commits receipt metadata before returning the tool result. Cancellation, expiry and connection ownership are rechecked after each pre-dispatch write.

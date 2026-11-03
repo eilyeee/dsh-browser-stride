@@ -411,6 +411,39 @@ describe('background bridge lifecycle', () => {
     expect(vi.mocked(chrome.tabs.sendMessage).mock.calls.some(([, message]) => (message as { type?: string; action?: string }).type === 'DSH_ACTION'
       && (message as { action?: string }).action === 'browser_press')).toBe(false)
   })
+  it.each([false, true])('allows a fresh native attempt after a confirmed pre-commit rejection, start=%s', async start => {
+    const fixture = mockChrome({ localGet: async () => ({ dshSettings: { bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge' } }) })
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+    const panel = panelPort(); fixture.onConnect.emit(panel.port)
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const socket = FakeWebSocket.instances[0]!
+    try {
+      socket.open(); await Promise.resolve()
+      socket.receive({ t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps: { textOnly: true, snapshotMaxChars: 32000, maxInteractiveItems: 60 } })
+      panel.onMessage.emit({ type: 'session.active', sessionId: 'retry-session', isNew: true })
+      await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity', state: expect.objectContaining({ controlled: expect.objectContaining({ tabId: 1 }) }) })))
+      const method = start ? BRIDGE_TASK_START_METHOD : BRIDGE_RUN_RETARGET_METHOD
+      const requests = () => socket.sent.filter(value => (value as { method?: string }).method === method) as { id: string; payload: { targetBinding: string } }[]
+      const submit = (id: string, version: number) => {
+        const state = panel.postMessage.mock.calls.map(([message]) => message as { type: string; state?: { revision: number } }).filter(message => message.type === 'tab-affinity').at(-1)!.state!
+        panel.onMessage.emit({ type: 'browser-run.retarget', id, sessionId: 'retry-session', runId: 'run_retry', expectedVersion: version,
+          controlRevision: start ? 0 : 1, affinityRevision: state.revision, ...(start ? { start: true, task: true } : {}) })
+      }
+      submit('rejected', 2)
+      await vi.waitFor(() => expect(requests()).toHaveLength(1))
+      const first = requests()[0]!
+      socket.receive({ t: 'rpc.result', id: first.id, ok: false, error: { code: 'stale-version', message: 'Refresh task status', targetState: 'unchanged' } })
+      await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'browser-run.retarget.result', id: 'rejected', ok: false })))
+      submit('fresh', 3)
+      await vi.waitFor(() => expect(requests()).toHaveLength(2))
+      const second = requests()[1]!
+      expect(second.payload.targetBinding).not.toBe(first.payload.targetBinding)
+      socket.receive({ t: 'rpc.result', id: second.id, ok: true, result: { runId: 'run_retry', sessionId: 'retry-session', controlRevision: start ? 0 : 3,
+        state: 'running', targetBinding: second.payload.targetBinding } })
+      await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'browser-run.retarget.result', id: 'fresh', ok: true })))
+    } finally { panel.onDisconnect.emit(); socket.close() }
+  })
   it('rejects a content script attempting to open the privileged panel channel', async () => {
     const chromeMock = mockChrome()
     vi.stubGlobal('WebSocket', FakeWebSocket)

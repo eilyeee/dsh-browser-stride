@@ -5,6 +5,15 @@ import type { BridgeClient } from '../src/background/bridge.ts'
 import type { ServerFrame } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 
 describe('bridge RPC failures', () => {
+  it.each(['unchanged', 'uncertain', undefined, true, 'invalid'])('preserves only recognized native target outcome metadata: %s', async targetState => {
+    const send = vi.fn((_frame: unknown) => true)
+    const bridge = { connected: true, send, sinks: {} as { onFrame?: (frame: ServerFrame) => void } }
+    const rpc = createRpc(bridge as unknown as BridgeClient)
+    const pending = rpc.request('bridge.browserRuns.retarget', {}).catch(error => error)
+    const frame = send.mock.calls[0][0] as { id: string }
+    bridge.sinks.onFrame?.({ t: 'rpc.result', id: frame.id, ok: false, error: { code: 'stale-version', message: 'Refresh', targetState } } as unknown as ServerFrame)
+    expect(await pending).toMatchObject({ code: 'stale-version', targetState: targetState === 'unchanged' || targetState === 'uncertain' ? targetState : undefined })
+  })
   it.each(['cancel', 'disconnect'])('drops a pending confirmation on %s and ignores a late reply', async reason => {
     const send = vi.fn((_frame: unknown) => true)
     const bridge = { connected: true, send, sinks: {} as { onFrame?: (frame: ServerFrame) => void; onStateChange?: (state: 'stopped') => void } }

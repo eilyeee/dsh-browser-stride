@@ -94,6 +94,10 @@ export class BrowserTaskRuntime {
         if (job.activeMs >= TASK_LIMITS.activeMs || task[kind] >= TASK_LIMITS[kind]) throw new Error('task-budget-exhausted')
         return { ...task, activeMs: Math.ceil(job.activeMs), [kind]: task[kind] + 1 }
       })
+      // Durable counter writes yield. A pause/disconnect may revoke the job
+      // before its caller can enter the provider or browser tool.
+      this.assertJob(job)
+      if (kind === 'modelRequests') this.runs.assertDispatchAuthority(job.execution, String(agent.id))
     } catch (error) {
       if (error instanceof Error && error.message === 'task-budget-exhausted') job.exhausted = true
       this.cancel(job)
