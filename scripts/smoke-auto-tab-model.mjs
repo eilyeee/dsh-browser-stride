@@ -82,8 +82,8 @@ try {
   assert.equal(outcome.managedRuns, 0, 'Ordinary chat must not implicitly create a managed task')
   assert.ok(outcome.modelRequests > 0 && outcome.modelRequests <= MODEL_REQUEST_LIMIT)
   assert.ok(outcome.ptcCalls <= MODEL_REQUEST_LIMIT && outcome.browserCalls.length <= BROWSER_CALL_LIMIT)
-  assert.ok(outcome.browserCalls.includes('browser_open_tab'))
-  assert.ok(outcome.browserCalls.some(name => ['browser_click', 'browser_press', 'browser_type', 'browser_select'].includes(name)))
+  assert.ok(outcome.browserResults.some(row => row.name === 'browser_open_tab' && row.ok))
+  assert.ok(outcome.browserResults.some(row => row.ok && ['browser_click', 'browser_press', 'browser_type', 'browser_select'].includes(row.name)))
   assert.equal(outcome.model?.provider, model.provider)
   assert.equal(outcome.model?.model, model.model)
   assert.deepEqual(outcome.blockedTools, [])
@@ -91,14 +91,18 @@ try {
   const controlled = await browser.worker.evaluate(async ({ url, sessionId }) => {
     const [tab] = await chrome.tabs.query({ url })
     const state = await chrome.storage.session.get(['dshPageAccess', 'dshTabAffinity'])
-    const grant = state.dshPageAccess?.grants.find(row => row.tabId === tab?.id)
+    const grants = state.dshPageAccess?.grants ?? []
+    const grant = grants.find(row => row.tabId === tab?.id)
+    const group = tab?.groupId >= 0 ? await chrome.tabGroups.get(tab.groupId) : undefined
     let nativePageAccess = false
     try { await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => document.title }); nativePageAccess = true } catch {}
     const attached = tab !== undefined && await chrome.debugger.sendCommand({ tabId: tab.id }, 'Page.getFrameTree').then(() => true, () => false)
     return { created: tab !== undefined, bound: state.dshTabAffinity?.sessionTabs?.[sessionId]?.tabId === tab?.id,
-      grouped: tab?.groupId >= 0, mode: grant?.mode, nativePageAccess, attached }
+      grouped: group?.title === 'DSH 控制' && group?.color === 'blue' && group?.windowId === tab?.windowId
+        && grant?.groupId === tab?.groupId && grant?.windowId === tab?.windowId,
+      authorizedPages: grants.length, mode: grant?.mode, nativePageAccess, attached }
   }, { url: site.url, sessionId })
-  assert.deepEqual(controlled, { created: true, bound: true, grouped: true, mode: 'debugger', nativePageAccess: false, attached: true })
+  assert.deepEqual(controlled, { created: true, bound: true, grouped: true, authorizedPages: 1, mode: 'debugger', nativePageAccess: false, attached: true })
   const page = browser.context.pages().find(page => page.url() === site.url)
   assert.ok(page)
   assert.equal(await page.getByRole('checkbox', { name: '测试开关', exact: true }).isChecked(), true)

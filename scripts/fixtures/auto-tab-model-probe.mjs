@@ -39,12 +39,13 @@ export function apply(ctx, config) {
       }
       await save()
     }
-    const result = await next()
+    return next()
+  })
+  ctx.on('tools/result', (exec, result) => {
     if (belongs(exec.agent) && exec.name.startsWith('browser_')) {
-      evidence.browserResults.push({ name: exec.name, ok: !result.isError, ...(result.isError ? { code: result.error?.code } : {}) })
-      await save()
+      evidence.browserResults.push({ name: exec.name, ok: !result.isError })
+      void save()
     }
-    return result
   })
   ctx.on('session/event', (session, event) => {
     if (!belongs({ id: session.id })) return

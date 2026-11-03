@@ -677,9 +677,13 @@ try {
     const cached = await chrome.storage.session.get(['dshPageAccess', 'dshTabAffinity'])
     const grant = cached.dshPageAccess.grants.find(grant => grant.tabId === created.id)
     const binding = cached.dshTabAffinity.sessionTabs[sessionId]
+    const group = created.groupId >= 0 ? await chrome.tabGroups.get(created.groupId) : undefined
     let nativeInjection = false
     try { await chrome.scripting.executeScript({ target: { tabId: created.id }, func: () => document.title }); nativeInjection = true } catch {}
-    return { mode: grant?.mode, grouped: created.groupId >= 0, bound: binding?.tabId === created.id, nativeInjection }
+    return { mode: grant?.mode,
+      grouped: group?.title === 'DSH 控制' && group?.color === 'blue' && group?.windowId === created.windowId
+        && grant?.groupId === created.groupId && grant?.windowId === created.windowId,
+      bound: binding?.tabId === created.id, nativeInjection }
   }, { url: automaticInstance.url, sessionId: session.sessionId })
   assert.deepEqual(automaticGrant, { mode: 'debugger', grouped: true, bound: true, nativeInjection: false })
   await writeFile(`${trigger}.auto-navigate`, '', { mode: 0o600 })

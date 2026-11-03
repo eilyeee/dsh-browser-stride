@@ -9,6 +9,9 @@ no release version has been assigned yet.
 
 ### Fixed
 
+- Ordinary-chat model acceptance checks the blue DSH control group, its window
+  and the sole new-page grant, and records finalized tool outcomes. Its scope and
+  request limits have regression checks; CI also builds the Firefox extension.
 - Model-facing tools make direct URL opening explicit. Listing an empty admitted
   page scope returns an empty result without native tab reads or an approval;
   it cannot acquire pages authorized after the request arrived.

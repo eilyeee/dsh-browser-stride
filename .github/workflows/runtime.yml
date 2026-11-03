@@ -27,4 +27,5 @@ jobs:
       - run: pnpm run test
       - run: pnpm run test:benchmark
       - run: pnpm run build
+      - run: pnpm --filter dsh-browser-extension run build:firefox
       - run: pnpm run test:smoke
