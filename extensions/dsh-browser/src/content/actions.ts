@@ -14,10 +14,14 @@ import { pageText, truncate } from './extract.ts'
 import { SELECT_OPTION_LIMIT, type ElementIds } from './ids.ts'
 import type { SnapshotBudget } from './snapshot.ts'
 import { buildSnapshot, renderSnapshotDetails } from './snapshot.ts'
+import { visualViewportState } from './visual.ts'
+import type { VisualObservation } from '@eilyeee/dsh-browser-stride/src/visual.ts'
 
 /** A settled action result. */
 export interface ActionResult {
   text: string
+  /** Packaged controller metadata, never constructed by page-world scripts. */
+  visual?: VisualObservation
   /** Page-authored snapshot delta; the background must wrap it as untrusted. */
   pageContent?: string
   /** A same-frame document navigation was scheduled after this response. */
@@ -193,6 +197,16 @@ export interface ActionContext {
 /** Run one named action with its args. */
 export async function runAction(action: string, args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
   switch (action) {
+    case 'browser_screenshot': {
+      await waitForPageSettled(ACTION_SETTLE)
+      return { text: 'Screenshot viewport prepared.', visual: visualViewportState.capture() }
+    }
+    case 'browser_visual_check': return { text: 'Screenshot viewport checked.', visual: visualViewportState.check(args.screenshotRef) }
+    case 'browser_click_at': {
+      visualViewportState.click(args.screenshotRef, args.x, args.y)
+      const settled = await waitForPageSettled(ACTION_SETTLE)
+      return withPageDelta(`Sent a synthetic coordinate click.${settleNote(settled)}`, ctx, settled)
+    }
     case 'browser_snapshot':
       return snapshotAction(args, ctx)
     case 'browser_click':

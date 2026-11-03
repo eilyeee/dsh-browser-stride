@@ -15,6 +15,14 @@ function call(name: string, args: Record<string, unknown> = {}): ToolCall {
 }
 
 describe('approvalPromptForCall', () => {
+  it('treats screenshots as page sharing and coordinate input as an approved main-page action', () => {
+    expect(approvalPromptForCall(call('browser_screenshot'), 'ask', FRAMES, 'zh')).toMatchObject({
+      kind: 'read', origins: ['https://app.example', 'https://login.example.net'], canTrust: false,
+    })
+    expect(approvalPromptForCall(call('browser_click_at', { screenshotRef: 'shot_synthetic', x: .25, y: .5 }), 'auto', FRAMES, 'zh')).toMatchObject({
+      kind: 'action', origins: ['https://app.example'], canTrust: true,
+    })
+  })
   it('asks before reading and names every effective frame origin', () => {
     expect(approvalPromptForCall(call('browser_snapshot'), 'ask', FRAMES, 'zh')).toMatchObject({
       kind: 'read',

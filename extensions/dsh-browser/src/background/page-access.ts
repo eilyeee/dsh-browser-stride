@@ -50,6 +50,7 @@ export class PageAccess {
     })
   }
   private async restore(): Promise<void> {
+    await debuggerPages.recoverCaptures()
     const [cached, epoch] = await Promise.all([chrome.storage.session.get(PAGE_ACCESS_KEY), readPageAccessEpoch()])
     this.epoch = epoch
     const value = cached[PAGE_ACCESS_KEY] as { grants?: unknown; epoch?: unknown } | undefined
@@ -242,6 +243,7 @@ export class PageAccess {
     const previous = this.grants.get(tabId)
     if (previous === undefined) return Promise.resolve()
     this.grants.delete(tabId)
+    void debuggerPages.detachVisual(tabId).catch(() => {})
     if (previous.mode === 'debugger') void debuggerPages.detach(tabId)
     this.epoch = crypto.randomUUID()
     // Queue durability before notifying other components. An observer failure

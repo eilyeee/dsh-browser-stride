@@ -25,7 +25,7 @@ describe('browser page context', () => {
     })
     expect(message.content).toEqual([{
       type: 'text',
-      text: expect.stringContaining('browser page context was refreshed'),
+      text: expect.stringContaining('DSH control group'),
     }])
     expect(message.content[0].text).toContain('already completed browser_snapshot')
     expect(message.content[0].text).toContain('Use its shown elementRef values')

@@ -1,0 +1,85 @@
+// Disposable Host probe: real tool/attachment pipeline, optional bounded default-model check.
+import { readFile, writeFile } from 'node:fs/promises'
+export const name = 'stride-visual-probe'
+export const inject = ['tools', 'agents', 'attachments']
+export function apply(ctx, config) {
+  let sequence = -1, pending = false, model, probeCall, probeResult, writes = Promise.resolve()
+  const controller = new AbortController()
+  const evidence = { modelRequests: 0, browserCalls: [], results: [], blocked: [], terminal: false }
+  const belongs = agent => model !== undefined && String(agent?.id) === model.sessionId
+  const save = () => (writes = writes.then(() => writeFile(`${config.result}.model`, JSON.stringify(evidence), { mode: 0o600 })).catch(() => {}))
+  ctx.effect(() => ctx.tools.guard(exec => {
+    if (!belongs(exec.agent)) return
+    if (!['run_code','browser_screenshot','browser_snapshot','browser_click_at','browser_get_text','browser_wait','browser_scroll'].includes(exec.name)) {
+      evidence.blocked.push(exec.name); void save(); return 'This check permits only the synthetic canvas and browser tools.'
+    }
+  }))
+  ctx.on('agent/request', async (payload, next) => {
+    if (belongs(payload.agent)) { if (++evidence.modelRequests > 10) throw new Error('synthetic-visual-model-budget'); await save() }
+    return next()
+  })
+  ctx.on('tools/execute', async (exec, next) => {
+    if (belongs(exec.agent) && exec.name.startsWith('browser_')) {
+      if (evidence.browserCalls.length >= 20) throw new Error('synthetic-visual-browser-budget')
+      evidence.browserCalls.push(exec.name); await save()
+    }
+    return next()
+  })
+  ctx.on('tools/result', (exec, result) => {
+    if (probeCall !== undefined && String(exec.callId) === `${probeCall}:ptc:1`) probeResult = result
+    if (!belongs(exec.agent)) return
+    const text = result.content?.filter(block => block.type === 'text').map(block => block.text).join('\n') ?? ''
+    evidence.results.push({ name: exec.name, ok: !result.isError, imageBlocks: result.content?.filter(block => block.type === 'image').length ?? 0,
+      selectedLayerReported: text.includes(model.layer), exactColorReported: text.toLowerCase().includes(model.color.toLowerCase()) })
+    void save()
+  })
+  ctx.on('session/event', (session, event) => {
+    if (!belongs({ id: session.id })) return
+    if (event.type === 'assistant/message' && event.data?.message?.source?.kind === 'model') {
+      const message = event.data.message, text = message.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
+      evidence.model = { provider: message.source.provider, model: message.source.model }
+      evidence.finalLayerReported = text.includes(model.layer); evidence.finalColorReported = text.toLowerCase().includes(model.color.toLowerCase())
+    }
+    if (event.type === 'turn/end') { evidence.terminal = true; evidence.reason = event.data.reason.kind }
+    void save()
+  })
+  ctx.effect(() => {
+    const timer = setInterval(() => {
+      if (pending) return
+      pending = true
+      void readFile(config.trigger, 'utf8').then(async text => {
+        const command = JSON.parse(text)
+        if (!Number.isSafeInteger(command.sequence) || command.sequence <= sequence) return
+        sequence = command.sequence
+        if (command.mode === 'model') {
+          model = command; await save()
+          await writeFile(config.result, JSON.stringify({ sequence, ok: true, modelReady: true }), { mode: 0o600 }); return
+        }
+        const agent = ctx.agents.get(command.sessionId)
+        if (agent === undefined) throw new Error('Synthetic probe agent unavailable')
+        if (!/^browser_[a-z_]+$/.test(command.name)) throw new Error('Synthetic probe requires a browser tool')
+        probeCall = `visual-probe-${sequence}`; probeResult = undefined
+        const ptc = ctx.tools.schemas(agent).some(tool => tool.name === 'run_code')
+        const outer = await ctx.tools.execute({ callId: probeCall, name: ptc ? 'run_code' : command.name, arguments: ptc ? {
+          code: `return await tools.${command.name}(${JSON.stringify(command.args ?? {})})`,
+          description: 'Check the synthetic browser canvas',
+        } : command.args ?? {}, agent, signal: controller.signal })
+        const result = probeResult ?? outer
+        probeCall = undefined; probeResult = undefined
+        const value = result.value
+        const reply = { sequence, ok: !result.isError, code: result.error?.code,
+          text: result.content?.filter(block => block.type === 'text').map(block => block.text).join('\n'),
+          screenshotRef: value?.screenshotRef, imageBlocks: result.content?.filter(block => block.type === 'image').length ?? 0 }
+        if (!result.isError && value?.attachment !== undefined) {
+          const image = await ctx.attachments.readImage(value.attachment)
+          // Synthetic bytes stay only in the disposable test mailbox and are deleted afterwards.
+          reply.image = { mediaType: image.ref.mediaType, width: image.ref.width, height: image.ref.height, data: Buffer.from(image.data).toString('base64') }
+        }
+        await writeFile(config.result, JSON.stringify(reply), { mode: 0o600 })
+      }).catch(async () => {
+        if (sequence >= 0) await writeFile(config.result, JSON.stringify({ sequence, ok: false, probeError: true }), { mode: 0o600 }).catch(() => {})
+      }).finally(() => { pending = false })
+    }, 50)
+    return async () => { clearInterval(timer); controller.abort(); await writes }
+  })
+}

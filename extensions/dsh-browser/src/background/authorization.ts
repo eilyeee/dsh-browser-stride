@@ -5,9 +5,10 @@ import type { TabFrame } from './frames.ts'
 import type { ApprovalPrompt } from '../security/approval.ts'
 import { getUiLocale, type UiLocale } from '../i18n.ts'
 
-const PAGE_READS = new Set(['browser_snapshot', 'browser_get_text'])
+const PAGE_READS = new Set(['browser_snapshot', 'browser_get_text', 'browser_screenshot'])
 const STATE_CHANGING_ACTIONS = new Set([
   'browser_click',
+  'browser_click_at',
   'browser_type',
   'browser_select',
   'browser_press',
@@ -27,13 +28,13 @@ export function approvalPromptForCall(
 ): ApprovalPrompt | undefined {
   if (PAGE_READS.has(call.name)) {
     if (sharePageContent !== 'ask') return undefined
-    const targetFrames = call.name === 'browser_snapshot'
+    const targetFrames = (call.name === 'browser_snapshot' || call.name === 'browser_screenshot')
       ? frames
       : frames.filter((frame) => frame.frameId === requestedFrame(call.args))
     return {
       kind: 'read',
       action: call.name,
-      summary: call.name === 'browser_snapshot'
+      summary: call.name === 'browser_screenshot' ? localized(locale, 'Capture the selected group page’s visible viewport as an image', '截取分组内选定页面的可见区域图片') : call.name === 'browser_snapshot'
         ? localized(locale, 'Read the current page and accessible iframes', '读取当前页面及可访问 iframe')
         : localized(locale, 'Read text from the specified area of the current page', '读取当前页面的指定文本区域'),
       origins: uniqueOrigins(targetFrames, frames),
@@ -115,6 +116,7 @@ function summarizeAction(call: ToolCall, locale: UiLocale): string {
   const match = /^obs_[a-f0-9-]+:(\d+)$/i.exec(ref)
   const index = match?.[1] ?? (typeof call.args.index === 'number' ? String(call.args.index) : '?')
   switch (call.name) {
+    case 'browser_click_at': return localized(locale, 'Click a main-document point from the latest screenshot', '点击最近截图中的主文档位置')
     case 'browser_click': return localized(locale, `Click element [${index}]${frame}`, `点击元素 [${index}]${frame}`)
     case 'browser_select': return localized(locale, `Change selection in element [${index}]${frame}`, `更改元素 [${index}] 的选项${frame}`)
     case 'browser_type': {

@@ -3,7 +3,11 @@
 English | [中文](README.zh.md)
 
 `@eilyeee/dsh-browser-stride`
-The bridge mounts a loopback-only, token-authenticated WebSocket on the local DeepSeek Harness Host and registers text-based `browser_*` tools. The browser extension performs the actual page operations. See the [repository README](../../../README.md) for setup and current limitations.
+The bridge mounts a loopback-only, token-authenticated WebSocket on the local DeepSeek Harness Host and registers structured browser tools with optional Chrome viewport images. The browser extension performs the actual page operations. See the [repository README](../../../README.md) for setup and current limitations.
+
+## Viewport images
+
+`browser_screenshot` validates a bounded JPEG from the confirmed extension, admits it through the Host attachment service and renders a native image block. PTC attaches successful image content on the next model step. Canonical values expose only the durable attachment reference and screenshot metadata. `browser_click_at` is a normal approved write with a single-use screenshot ref and normalized image fractions; it retains the existing request, document, session and run/control fences. Both tools require the negotiated optional `visualViewport` capability. DOM snapshots remain text; native CDP input is not implemented. See the [Chrome visual-tool instructions](../../../extensions/dsh-browser/README.md#canvas-and-design-pages).
 
 ## Configuration
 

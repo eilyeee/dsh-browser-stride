@@ -167,6 +167,7 @@ interface ReadyConnection {
   /** Revocation can arrive before its matching native startup commits. */
   lostRunTargets: Set<string>
   taskTargetLoss: boolean
+  visualViewport: boolean
 }
 
 function targetLossKey(target: BrowserTaskTargetLoss): string {
@@ -257,6 +258,9 @@ export class BridgeServer {
     const conn = this.current
     if (conn === null) {
       throw new BridgeToolError('bridge-closed', 'no browser extension is connected to the bridge')
+    }
+    if ((name === 'browser_screenshot' || name === 'browser_click_at') && !conn.visualViewport) {
+      throw new BridgeToolError('content-unavailable', 'Visual browser tools require an updated Chrome extension and Host Bridge.')
     }
     const targetBinding = execution !== undefined && isPageBrowserTool(name) ? this.expectedRunTarget(execution, conn) : undefined
     // A caller that already aborted must not dispatch: the abort listener
@@ -496,6 +500,7 @@ export class BridgeServer {
         }
         const caps: BridgeCaps = {
           textOnly: true,
+          ...(frame.caps.visualViewport === true && this.deps.caps.visualViewport === true ? { visualViewport: true } : {}),
           snapshotMaxChars: Math.min(this.deps.caps.snapshotMaxChars, frame.caps.snapshotMaxChars),
           maxInteractiveItems: Math.min(this.deps.caps.maxInteractiveItems, frame.caps.maxInteractiveItems),
           ...(frame.caps.taskTargetLoss === true && this.deps.runs?.pauseLostTargetTask !== undefined ? { taskTargetLoss: true } : {}),
@@ -554,7 +559,7 @@ export class BridgeServer {
         }
       }
     })()
-    this.current = { connectionId: randomUUID(), ws, remoteAddress, abort, pump, ping, orderedSessionRpcs: new Map(), confirmedTools: new Set(), lostRunTargets: new Set(), taskTargetLoss: caps.taskTargetLoss === true,
+    this.current = { connectionId: randomUUID(), ws, remoteAddress, abort, pump, ping, orderedSessionRpcs: new Map(), confirmedTools: new Set(), lostRunTargets: new Set(), taskTargetLoss: caps.taskTargetLoss === true, visualViewport: caps.visualViewport === true,
       ...(installationId === undefined ? {} : { installationId }) }
     sendFrame(ws, { t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps, ...(credential === undefined ? {} : { credential }) })
     ws.once('close', () => {

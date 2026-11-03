@@ -109,6 +109,18 @@ no release version has been assigned yet.
 
 ### Added
 
+- Optional Chrome viewport images and screenshot-bound synthetic points for canvas
+  and image-based pages. Screenshots use native tab identity and Host image
+  attachments, including PTC delivery; base64 bytes are not model text. Points
+  retain group authorization, page-sharing/action approval, original document,
+  session/connection and managed revision fences. References are single-use and
+  invalidated by observed page/viewport changes. Visual debugger connections keep
+  manual origin limits, revoke with their owner and clean up after worker loss.
+  Controlled canvas checks cover attachment pixels, layer inspector readback,
+  scroll/zoom, conversation isolation and native revocation; real-model checks
+  remain explicit and bounded. Native input, Firefox/desktop vision and hidden
+  design metadata extraction are not provided.
+
 - Chrome queued tasks offer native **Open a new page and start** with a typed
   HTTP(S) URL and the saved automatic-control opt-in. Connection-owned, single-use
   Host tickets reserve startup before creation; the worker authorizes, groups and

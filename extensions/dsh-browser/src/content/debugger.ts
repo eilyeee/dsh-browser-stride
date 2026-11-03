@@ -1,14 +1,18 @@
 /** Packaged DOM operations for a Chrome debugger isolated world. No extension APIs or page bridge. */
 import { runAction, ActionError, resetDeltaState } from './actions.ts'
+import { visualViewportState } from './visual.ts'
 import { ElementIds } from './ids.ts'
 import { DEFAULT_SNAPSHOT_MAX_CHARS } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 
 const ids = new ElementIds()
+const visualGlobal = globalThis as typeof globalThis & { __strideVisualState?: { dispose: () => void } }
+visualGlobal.__strideVisualState?.dispose()
+visualGlobal.__strideVisualState = visualViewportState
 const lifecycleKey = '__strideDebuggerLifecycle'
 const lifecycleGlobal = globalThis as typeof globalThis & { [lifecycleKey]?: (event: Event) => void }
 const previous = lifecycleGlobal[lifecycleKey]
 const lifecycle = (event: Event) => {
-  if (event.type !== 'pageshow' || (event as PageTransitionEvent).persisted) resetDeltaState(ids)
+  if (event.type !== 'pageshow' || (event as PageTransitionEvent).persisted) { resetDeltaState(ids); visualViewportState.dispose() }
 }
 for (const event of ['pagehide', 'pageshow', 'popstate', 'hashchange']) {
   if (previous !== undefined) window.removeEventListener(event, previous)

@@ -1,5 +1,6 @@
-/** Chrome-only transport. Only the open-tab path may attach a newly created tab. */
+/** Chrome transport: automatic new pages and authorized visual connections. */
 import type { TabFrame } from './frames.ts'
+import { MAX_SCREENSHOT_BASE64, type VisualObservation } from '@eilyeee/dsh-browser-stride/src/visual.ts'
 
 interface Session {
   current: () => boolean
@@ -8,8 +9,10 @@ interface Session {
   preparing?: Promise<string>
 }
 interface Frame { id: string; loaderId: string; url: string }
+interface VisualConnection { valid: boolean; attached: boolean; current: () => boolean; preparing?: Promise<void>; closing?: Promise<void> }
 interface Evaluation { result?: { value?: unknown }; exceptionDetails?: unknown }
 const CONTROLLER_WORLD = 'DSH Stride controller'
+const VISUAL_CAPTURES_KEY = 'dshVisualCaptures'
 
 /** Request authority is checked at the transport's actual delivery boundary. */
 export interface PageDispatch {
@@ -26,11 +29,25 @@ function commitDispatch(dispatch?: PageDispatch): void {
 
 export class DebuggerPages {
   private sessions = new Map<number, Session>()
+  private captures = new Map<number, VisualConnection>()
+  private captureRecovery?: Promise<void>
+  private captureWrites = Promise.resolve()
   private source?: Promise<string>
   onDetached: (tabId: number) => void = () => {}
   constructor() {
     if (typeof chrome !== 'undefined') chrome.debugger?.onDetach.addListener(target => {
-      if (target.tabId === undefined || !this.sessions.delete(target.tabId)) return
+      if (target.tabId === undefined) return
+      const capture = this.captures.get(target.tabId)
+      if (capture !== undefined) {
+        capture.valid = false
+        capture.attached = false
+        if (capture.closing === undefined) {
+          this.onDetached(target.tabId)
+          void this.detachVisual(target.tabId).catch(() => {})
+        }
+        return
+      }
+      if (!this.sessions.delete(target.tabId)) return
       this.onDetached(target.tabId)
     })
     if (typeof chrome !== 'undefined') chrome.debugger?.onEvent?.addListener((target, method, params) => {
@@ -59,6 +76,32 @@ export class DebuggerPages {
     })
   }
   has(tabId: number): boolean { return this.sessions.has(tabId) }
+  private async detachRecordedVisual(tabId: number): Promise<void> {
+    try { await chrome.debugger.detach({ tabId }) }
+    catch (error) {
+      // Only native evidence of an absent target/connection confirms cleanup.
+      // Unknown failures retain the invalid owned record and block successors.
+      if (!(error instanceof Error) || !/(?:Debugger is not attached|No tab with|No target with|Target closed)/i.test(error.message)) throw error
+    }
+  }
+  /** Cleanup records never restore authority, including after a worker crash. */
+  recoverCaptures(): Promise<void> {
+    return this.captureRecovery ??= (async () => {
+      if (chrome.debugger === undefined) return
+      const stored = (await chrome.storage.session.get(VISUAL_CAPTURES_KEY))[VISUAL_CAPTURES_KEY]
+      if (stored === undefined) return
+      if (Array.isArray(stored)) for (const id of stored) {
+        if (typeof id === 'number' && Number.isSafeInteger(id) && id >= 0) await this.detachRecordedVisual(id)
+      }
+      await chrome.storage.session.set({ [VISUAL_CAPTURES_KEY]: [] })
+    })()
+  }
+  private persistCaptures(): Promise<void> {
+    const ids = [...this.captures.keys()]
+    const pending = this.captureWrites.catch(() => {}).then(() => chrome.storage.session.set({ [VISUAL_CAPTURES_KEY]: ids }))
+    this.captureWrites = pending
+    return pending
+  }
   private allowed(tabId: number, session: Session): void {
     if (this.sessions.get(tabId) !== session || !session.current()) throw new Error('The debugger page is no longer authorized.')
   }
@@ -70,7 +113,7 @@ export class DebuggerPages {
     return answer
   }
   async attachCreated(tabId: number, current: () => boolean, signal?: AbortSignal, timeoutMs = 8000): Promise<void> {
-    if (chrome.debugger === undefined || !current() || this.has(tabId)) throw new Error('Automatic page control is unavailable.')
+    if (chrome.debugger === undefined || !current() || this.has(tabId) || this.captures.has(tabId)) throw new Error('Automatic page control is unavailable.')
     const session: Session = { current, worlds: new Map() }
     this.sessions.set(tabId, session)
     try {
@@ -110,6 +153,88 @@ export class DebuggerPages {
       await chrome.debugger.detach({ tabId }).catch(() => {})
       throw error
     }
+  }
+  /** Attach before measuring the viewport; Chrome's debug UI can resize it. */
+  async prepareViewportCapture(tabId: number, current: () => boolean, authorization: () => boolean): Promise<void> {
+    await this.recoverCaptures()
+    if (!current() || !authorization()) throw new PageDispatchRevoked()
+    if (this.has(tabId)) { this.session(tabId); return }
+    const previous = this.captures.get(tabId)
+    if (previous !== undefined && (!previous.valid || !previous.current())) await this.detachVisual(tabId)
+    if (!current() || !authorization()) throw new PageDispatchRevoked()
+    const live = this.captures.get(tabId)
+    if (live !== undefined) {
+      if (!live.attached) throw new Error('A visual connection is still being prepared.')
+      return
+    }
+    if (chrome.debugger === undefined) throw new Error('Chrome visual capture is unavailable.')
+    const lease: VisualConnection = { valid: true, attached: false, current: authorization }
+    this.captures.set(tabId, lease)
+    const preparing = (async () => {
+      try {
+        await this.persistCaptures()
+        if (!current() || !lease.current() || !lease.valid) throw new PageDispatchRevoked()
+        await chrome.debugger.attach({ tabId }, '1.3')
+        lease.attached = true
+        if (!current() || !lease.current() || !lease.valid || this.captures.get(tabId) !== lease) throw new PageDispatchRevoked()
+      } catch (error) {
+        lease.valid = false
+        // Keep ownership through a late attach and its confirmed detach. A
+        // successor cannot acquire this native tab while cleanup is pending.
+        const closing = Promise.resolve().then(async () => {
+          if (lease.attached) await this.detachRecordedVisual(tabId)
+          if (this.captures.get(tabId) === lease) this.captures.delete(tabId)
+          await this.persistCaptures()
+        })
+        lease.closing = closing
+        await closing
+        throw error
+      }
+    })()
+    lease.preparing = preparing
+    try { await preparing } finally { if (lease.preparing === preparing) lease.preparing = undefined }
+  }
+  /** Only already-authorized native targets; never the currently visible personal tab. */
+  async captureViewport(tabId: number, view: VisualObservation, current: () => boolean): Promise<string> {
+    if (!current()) throw new PageDispatchRevoked()
+    const zoom = await chrome.tabs.getZoom(tabId)
+    if (!current() || !Number.isFinite(zoom) || zoom <= 0) throw new PageDispatchRevoked()
+    // CDP clips use device-independent pixels; page events use CSS pixels.
+    // Browser page zoom is distinct from the screen's device pixel ratio.
+    const params = { format: 'jpeg', quality: 85, fromSurface: true, captureBeyondViewport: false,
+      clip: { x: view.scrollX * zoom, y: view.scrollY * zoom, width: view.width * zoom, height: view.height * zoom,
+        scale: Math.min(1, 1600 / view.width, 1200 / view.height) / view.devicePixelRatio } }
+    let answer: { data?: unknown }
+    if (!current()) throw new PageDispatchRevoked()
+    if (this.has(tabId)) answer = await this.command(tabId, this.session(tabId), 'Page.captureScreenshot', params, { current })
+    else {
+      const lease = this.captures.get(tabId)
+      if (lease === undefined || !lease.attached || !lease.valid || !lease.current()) throw new PageDispatchRevoked()
+      answer = await chrome.debugger.sendCommand({ tabId }, 'Page.captureScreenshot', params) as { data?: unknown }
+      if (this.captures.get(tabId) !== lease || !lease.valid || !lease.current()) throw new PageDispatchRevoked()
+    }
+    if (!current() || typeof answer.data !== 'string' || answer.data.length === 0 || answer.data.length > MAX_SCREENSHOT_BASE64) {
+      throw new Error('The screenshot was cancelled or exceeded its image budget.')
+    }
+    return answer.data
+  }
+  /** Withdraw first; the native slot stays owned until pending cleanup settles. */
+  async detachVisual(tabId: number): Promise<void> {
+    const lease = this.captures.get(tabId)
+    if (lease === undefined) return
+    lease.valid = false
+    if (lease.closing !== undefined) { await lease.closing; return }
+    if (lease.preparing !== undefined) { await lease.preparing.catch(() => {}); return }
+    const closing = Promise.resolve().then(async () => {
+      if (lease.attached) await this.detachRecordedVisual(tabId)
+      if (this.captures.get(tabId) === lease) this.captures.delete(tabId)
+      await this.persistCaptures()
+    })
+    lease.closing = closing
+    await closing
+  }
+  async releaseStaleVisual(): Promise<void> {
+    await Promise.all([...this.captures].filter(([, lease]) => !lease.current()).map(([id]) => this.detachVisual(id)))
   }
   async detach(tabId: number): Promise<void> {
     // Withdraw locally before awaiting Chrome. No late command can acquire a new session.

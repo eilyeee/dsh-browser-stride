@@ -1,6 +1,6 @@
 /**
  * Tool dispatch: executes `tool.call` frames in an explicitly selected tab via
- * the content script and answers with the text-only result.
+ * the packaged controller and answers with structured observations.
  *
  * The background service owns tab-affinity policy. Direct callers may omit a
  * target for backward-compatible active-tab dispatch in isolated tests.
@@ -25,6 +25,8 @@ import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval
 import { getUiLocale } from '../i18n.ts'
 import { debuggerPages, sendPageMessage, PageDispatchRevoked, type PageDispatch } from './debugger-pages.ts'
 import type { CreatedPageAccess } from './page-access.ts'
+
+import { capturePageScreenshot, consumeVisualObservation, type VisualAuthority } from './visual.ts'
 
 /** A tool call from the bridge. */
 export interface ToolCall {
@@ -53,6 +55,7 @@ export interface ContentBudget {
 const CONTENT_SCRIPT_FILE = 'content.js'
 const ACTION_DELTA_TOOLS = new Set([
   'browser_click',
+  'browser_click_at',
   'browser_type',
   'browser_select',
   'browser_press',
@@ -66,6 +69,7 @@ const FRAME_NOTES_CHARS = 160
 const MIN_FRAME_SNAPSHOT_CHARS = 100
 const NAVIGATION_CANDIDATE_TOOLS = new Set([
   'browser_click',
+  'browser_click_at',
   'browser_navigate',
   'browser_back',
   'browser_forward',
@@ -81,6 +85,7 @@ const TAB_NATIVE_TOOLS = new Set([
 ])
 const STATE_CHANGING_PAGE_TOOLS = new Set([
   'browser_click',
+  'browser_click_at',
   'browser_type',
   'browser_select',
   'browser_press',
@@ -127,6 +132,8 @@ export function isTabManagementTool(name: string): boolean {
 export interface TabManagementContext {
   /** Skip all browser approval prompts after the user enables unrestricted access. */
   unrestrictedAccess: boolean
+  /** Original document, permission, connection and Host scope for visual observations. */
+  visualAuthority?: VisualAuthority
   /** Immutable admission scope contains no authorized pages; return no metadata. */
   emptyAuthorizedScope?: boolean
   /** Controlled tab for the calling session, when one still exists. */
@@ -493,11 +500,16 @@ async function dispatchOnce(
   includeActionDelta: boolean = false,
   commitAction?: () => void,
   rollbackActionCommit?: () => void,
+  visualAuthority?: VisualAuthority,
 ): Promise<ToolAnswer> {
   if (isCancelled(call, signal)) return cancelled()
   if (targetStillAllowed?.() === false) return targetChanged()
   const requestCurrent = () => !isCancelled(call, signal) && targetStillAllowed?.() !== false
   if (call.name === 'browser_snapshot') return snapshotAllFrames(tabId, frames, call, budget, requestCurrent)
+  if (call.name === 'browser_screenshot') return capturePageScreenshot(tabId, requestCurrent, visualAuthority)
+  if (call.name === 'browser_click_at' && !consumeVisualObservation(tabId, call.args.screenshotRef, visualAuthority)) {
+    return unavailable('The screenshot belongs to an old document, connection, session or task revision, or was already used. Take browser_screenshot again.')
+  }
 
   const frameId = requestedFrame(call.args)
   if (frameId < 0) return { ok: false, error: { code: 'action-failed', message: 'frame must be a non-negative integer.' } }
@@ -746,6 +758,9 @@ export async function dispatchToolCall(
   targetStillAllowed?: () => boolean,
   tabManagement: TabManagementContext = { unrestrictedAccess: false },
 ): Promise<ToolAnswer> {
+  if ((call.name === 'browser_screenshot' || call.name === 'browser_click_at') && call.args.frame !== undefined) {
+    return { ok: false, error: { code: 'bad-args', message: 'Visual tools operate on the main document only.' } }
+  }
   if (call.name === 'browser_open_tab') {
     return unavailable('browser_open_tab must be dispatched through the background open-tab path.')
   }
@@ -757,7 +772,7 @@ export async function dispatchToolCall(
   // Privacy boundary: with sharing off, no page content may leave the page.
   if (!tabManagement.unrestrictedAccess
     && sharePageContent === 'off'
-    && (call.name === 'browser_snapshot' || call.name === 'browser_get_text')) {
+    && (call.name === 'browser_snapshot' || call.name === 'browser_get_text' || call.name === 'browser_screenshot')) {
     return { ok: false, error: { code: 'action-failed', message: 'Page content sharing is disabled in Settings > Page content sharing.' } }
   }
   const tab = targetTab ?? (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]
@@ -817,6 +832,7 @@ export async function dispatchToolCall(
       tabManagement.unrestrictedAccess || sharePageContent === 'auto',
       tabManagement.commitAction,
       tabManagement.rollbackActionCommit,
+      tabManagement.visualAuthority,
     )
   } catch (error: unknown) {
     if (isCancelled(call, signal)) return cancelled()
@@ -858,6 +874,7 @@ export async function dispatchToolCall(
         tabManagement.unrestrictedAccess || sharePageContent === 'auto',
         tabManagement.commitAction,
         tabManagement.rollbackActionCommit,
+        tabManagement.visualAuthority,
       )
     } catch {
       return unavailable('The content script did not answer after it was loaded. Call browser_snapshot again before retrying.')

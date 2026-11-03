@@ -352,7 +352,10 @@ async function persistSettings(next: Partial<Settings>, enableConnection = false
     automaticTransition = pageAccess.revokeAutomatic()
   }
   const revokesUnrestrictedAccess = settings.unrestrictedBrowserAccess && !updated.unrestrictedBrowserAccess
-  if (settings.sharePageContent !== updated.sharePageContent || revokesUnrestrictedAccess) pageSharingRevision += 1
+  if (settings.sharePageContent !== updated.sharePageContent || revokesUnrestrictedAccess) {
+    pageSharingRevision += 1
+    void debuggerPages.releaseStaleVisual().catch(() => {})
+  }
   settings = updated
   if (!updated.unrestrictedBrowserAccess) unrestrictedAccessActive = false
   syncSelectionWatch()
@@ -695,6 +698,7 @@ function cancelPendingApprovals(sessionId?: string): void {
 }
 
 function revokeStaleTargetCalls(): void {
+  void debuggerPages.releaseStaleVisual().catch(() => {})
   for (const call of activeToolCalls.values()) {
     if (!call.committed && call.targetLease?.current() === false) call.controller.abort()
   }
@@ -1384,6 +1388,7 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
     }
     return authorizeToolCall(prompt, controller.signal, windowId, call.sessionId, unrestrictedAccess, notify)
   }
+  const visualSharingRevision = pageSharingRevision
   const dispatch = (): Promise<ToolAnswer> => (isTabManagementTool(call.name)
     ? managementDispatch()
     : call.name === 'browser_open_tab'
@@ -1421,11 +1426,20 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
           controller.signal,
           prepared,
           () => targetAllowed() && prepared.id !== undefined && tabAffinity.allowsTarget(prepared.id, call.sessionId),
-          { unrestrictedAccess, commitAction, rollbackActionCommit },
+          { unrestrictedAccess, commitAction, rollbackActionCommit,
+            visualAuthority: {
+              scope: JSON.stringify([call.sessionId ?? null, call.execution, runTarget?.id ?? null]),
+              current: () => target !== undefined && !('ok' in target) && target.current() && pageLease() && pageSharingRevision === visualSharingRevision,
+              captureCurrent: () => target !== undefined && !('ok' in target) && target.sameBinding() && pageLease() && pageSharingRevision === visualSharingRevision,
+            },
+          },
         ))
   )
   const dispatchAndCheckpoint = async (): Promise<ToolAnswer> => {
     if (tabAffinity.isDetached(call.sessionId)) return affinityFailure('detached')
+    if ((call.name === 'browser_screenshot' || call.name === 'browser_click_at') && caps?.visualViewport !== true) {
+      return { ok: false, error: { code: 'content-unavailable', message: 'Visual tools require an updated Chrome extension and Host Bridge.' } }
+    }
     if (call.execution.kind === 'run') {
       if (isRunTabMutation(call.name)) return { ok: false, error: { code: 'execution-denied',
         message: 'Run-bound tab creation, follow and close are unavailable. Pause the task and use its selected-page continuation control.' } }
@@ -1450,7 +1464,7 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
       await checkpointSessionPage(call.sessionId, targetAllowed)
     }
     if (sharingAtDispatch !== pageSharingRevision && !unrestrictedAccessEnabled() && settings.sharePageContent !== 'auto') {
-      if (call.name === 'browser_snapshot' || call.name === 'browser_get_text') {
+      if (call.name === 'browser_snapshot' || call.name === 'browser_get_text' || call.name === 'browser_screenshot') {
         answer = { ok: false, error: { code: 'action-failed', message: 'Page sharing changed before the observation could be delivered.' } }
       } else if (answer.ok && typeof answer.result === 'object' && answer.result !== null
         && typeof (answer.result as { text?: unknown }).text === 'string'
@@ -1543,6 +1557,7 @@ async function revokeUnrestrictedAccess(): Promise<void> {
 function cancelAllToolCalls(): void {
   targetLeases.revokeAll()
   runTargets.revokeAll()
+  void debuggerPages.releaseStaleVisual().catch(() => {})
   for (const call of activeToolCalls.values()) {
     call.executionFence?.revoke()
     if (!call.committed) call.controller.abort()

@@ -21,6 +21,40 @@ describe('registerBrowserTools', () => {
     return { ctx, bridge, requestTool, registered }
   }
 
+  it('admits screenshot bytes through Host storage and renders a real image block, including inside run_code', async () => {
+    const h = makeHarness()
+    const attachment = { attachmentId: 'synthetic-image', mediaType: 'image/jpeg', bytes: 4, width: 800, height: 600, name: 'Browser viewport.jpg' }
+    const saveImage = vi.fn(async () => attachment)
+    Object.assign(h.ctx, { get: vi.fn(() => ({ saveImage })) })
+    h.requestTool.mockResolvedValueOnce({ text: 'Synthetic design canvas', screenshotRef: 'shot_00000000-0000-4000-8000-000000000001',
+      width: 1000, height: 800, scrollX: 0, scrollY: 0, devicePixelRatio: 2, mediaType: 'image/jpeg', data: '/9j/2Q==' })
+    registerBrowserTools(h.ctx, h.bridge, { toolTimeoutMs: 1000, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
+    const tool = h.registered.find(item => item.name === 'browser_screenshot')!.definition
+    const execute = tool.execute as (args: unknown, exec: unknown) => Promise<{ text: string; attachment: unknown }>
+    const value = await execute({}, { signal: new AbortController().signal, agent: { id: 'image-session' } })
+    expect(h.requestTool).toHaveBeenCalledWith('browser_screenshot', {}, expect.any(AbortSignal), 1000, 'image-session')
+    expect(saveImage).toHaveBeenCalledWith({ data: Buffer.from('/9j/2Q==', 'base64'), mediaType: 'image/jpeg', name: 'Browser viewport.jpg' })
+    expect(value).not.toHaveProperty('data')
+    const render = (tool.output as { render: (args: unknown, value: unknown) => unknown }).render
+    expect(render({}, value)).toEqual([{ type: 'text', text: expect.stringContaining('next model step') }, { type: 'image', attachment }])
+  })
+
+  it('does not acquire image bytes when Host attachment storage is unavailable', async () => {
+    const h = makeHarness(); Object.assign(h.ctx, { get: () => undefined })
+    registerBrowserTools(h.ctx, h.bridge, { toolTimeoutMs: 1000, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
+    const tool = h.registered.find(item => item.name === 'browser_screenshot')!.definition
+    await expect((tool.execute as (a: unknown, e: unknown) => Promise<unknown>)({}, { signal: new AbortController().signal })).rejects.toThrow('attachment service')
+    expect(h.requestTool).not.toHaveBeenCalled()
+  })
+
+  it('keeps screenshot coordinates separate from DOM element refs and strips unrecognized fields', async () => {
+    const h = makeHarness(); registerBrowserTools(h.ctx, h.bridge, { toolTimeoutMs: 1000, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
+    const tool = h.registered.find(item => item.name === 'browser_click_at')!.definition
+    const signal = new AbortController().signal
+    await (tool.execute as (a: unknown, e: unknown) => Promise<unknown>)({ screenshotRef: 'shot_synthetic', x: 0.25, y: 0.5, frame: 7, scope: 'forged' }, { signal })
+    expect(h.requestTool).toHaveBeenCalledWith('browser_click_at', { screenshotRef: 'shot_synthetic', x: 0.25, y: 0.5 }, signal, 1000)
+  })
+
   it('registers the full v1 tool set', () => {
     const { ctx, bridge, registered } = makeHarness()
     const disposers = registerBrowserTools(ctx, bridge, { toolTimeoutMs: 1_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
@@ -177,7 +211,7 @@ describe('registerBrowserTools', () => {
     const { ctx, bridge, registered } = makeHarness()
     registerBrowserTools(ctx, bridge, { toolTimeoutMs: 5_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
     const descriptionChars = registered.reduce((sum, { definition }) => sum + String(definition.description).length, 0)
-    expect(descriptionChars).toBeLessThan(1_500)
+    expect(descriptionChars).toBeLessThan(1_900)
   })
 
   it('exposes optional frame routing on frame-local tools only', () => {

@@ -3,9 +3,8 @@
  * accessible names, interactive inventory, main-content heuristic, and
  * truncation helpers.
  *
- * The snapshot is the model's entire view of the page (no screenshots), so
- * every helper is written to produce dense, model-usable text under a hard
- * character budget.
+ * DOM snapshots complement optional viewport images with exact readable text
+ * and control references under a hard character budget.
  *
  * @module
  */

@@ -100,7 +100,7 @@ export const DEFAULT_SNAPSHOT_MAX_CHARS = 32_000
 export const MIN_SNAPSHOT_MAX_CHARS = 500
 
 /** Shared ordering/recording policy; unknown tools are conservatively writes. */
-const READ_ONLY_BROWSER_TOOLS = new Set(['browser_snapshot', 'browser_get_text', 'browser_wait', 'browser_list_tabs'])
+const READ_ONLY_BROWSER_TOOLS = new Set(['browser_snapshot', 'browser_screenshot', 'browser_get_text', 'browser_wait', 'browser_list_tabs'])
 export function isReadOnlyBrowserTool(name: string): boolean { return READ_ONLY_BROWSER_TOOLS.has(name) }
 const TAB_TOOLS = new Set(['browser_open_tab', 'browser_list_tabs', 'browser_follow_tab', 'browser_close_tab'])
 export function isPageBrowserTool(name: string): boolean { return !TAB_TOOLS.has(name) }
@@ -169,7 +169,7 @@ export type RespondResult =
 
 /** Snapshot bounds and optional coordination features negotiated in `hello`/`hello.ok`. */
 export interface BridgeCaps {
-  /** The extension renders page state as text only (no screenshots). */
+  /** DOM snapshots are text. Optional viewport tools negotiate image observations separately. */
   textOnly: true
   /** Upper bound on one rendered snapshot's characters (plugin config, minimum 500). */
   snapshotMaxChars: number
@@ -177,6 +177,8 @@ export interface BridgeCaps {
   maxInteractiveItems: number
   /** Both peers support background-owned task-target revocation on this connection. */
   taskTargetLoss?: boolean
+  /** Bounded image observations and single-use viewport coordinate clicks. */
+  visualViewport?: boolean
 }
 
 /** Frames sent by the extension to the bridge plugin. */
@@ -364,6 +366,7 @@ function isCaps(value: unknown): value is BridgeCaps {
     && caps.snapshotMaxChars >= MIN_SNAPSHOT_MAX_CHARS
     && typeof caps.maxInteractiveItems === 'number' && Number.isSafeInteger(caps.maxInteractiveItems) && caps.maxInteractiveItems > 0
     && (caps.taskTargetLoss === undefined || typeof caps.taskTargetLoss === 'boolean')
+    && (caps.visualViewport === undefined || typeof caps.visualViewport === 'boolean')
 }
 
 function isToolError(value: unknown): value is ToolError {

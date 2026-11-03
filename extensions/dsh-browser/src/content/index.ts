@@ -1,17 +1,18 @@
 /**
  * Content script entry: listens for DSH_ACTION messages from the background
  * service worker, runs the action against the real page, and answers with a
- * text-only result. Starts the DOM watcher that marks the snapshot dirty, and
+ * structured result. Starts the DOM watcher that marks the snapshot dirty, and
  * the panel-gated watcher that reports what the user highlights.
  *
- * The content script is the only part that touches the page; the bridge and
- * the model never see page internals beyond the structured text snapshots.
+ * Content scripts handle DOM reads and events; the background captures separately
+ * authorized viewport images. The model receives structured text or image attachments.
  *
  * @module
  */
 
 import { DEFAULT_SNAPSHOT_MAX_CHARS } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 import { runAction, ActionError, resetDeltaState } from './actions.ts'
+import { visualViewportState } from './visual.ts'
 import { ElementIds } from './ids.ts'
 import { SelectionWatcher } from './selection.ts'
 import type { SnapshotBudget } from './snapshot.ts'
@@ -28,6 +29,7 @@ const selectionWatcher = new SelectionWatcher((selection) => {
 const CONTENT_SCRIPT_LISTENER = '__dshBrowserContentScriptListener__'
 const CONTENT_SELECTION_WATCHER = '__dshBrowserSelectionWatcher__'
 const CONTENT_LIFECYCLE_LISTENER = '__dshBrowserLifecycleListener__'
+const CONTENT_VISUAL_STATE = '__dshBrowserVisualState__'
 type ContentListener = typeof onMessage
 
 /** A tool-call result for the bridge. */
@@ -43,6 +45,7 @@ function onMessage(message: unknown, _sender: chrome.runtime.MessageSender, send
   if (msg.type === 'DSH_PING') { sendResponse({ ok: true }); return }
   if (msg.type === 'DSH_DEACTIVATE') {
     selectionWatcher.dispose()
+    visualViewportState.dispose()
     resetDeltaState(ids)
     chrome.runtime.onMessage.removeListener(onMessage)
     sendResponse({ ok: true })
@@ -99,6 +102,7 @@ function onMessage(message: unknown, _sender: chrome.runtime.MessageSender, send
 // Replace any stale listener left in the isolated world so a reload always
 // installs a listener belonging to the current extension context.
 const contentGlobal = globalThis as typeof globalThis & {
+  [CONTENT_VISUAL_STATE]?: { dispose: () => void }
   [CONTENT_SCRIPT_LISTENER]?: ContentListener
   [CONTENT_SELECTION_WATCHER]?: { dispose: () => void }
   [CONTENT_LIFECYCLE_LISTENER]?: (event?: Event) => void
@@ -110,6 +114,8 @@ if (previousListener !== undefined) {
 // A replaced content script keeps its page listeners until this instance
 // releases them: `selectionchange` is a document listener, not an extension one.
 contentGlobal[CONTENT_SELECTION_WATCHER]?.dispose()
+contentGlobal[CONTENT_VISUAL_STATE]?.dispose()
+contentGlobal[CONTENT_VISUAL_STATE] = visualViewportState
 const previousLifecycle = contentGlobal[CONTENT_LIFECYCLE_LISTENER]
 if (previousLifecycle !== undefined) {
   for (const event of ['pagehide', 'pageshow', 'popstate', 'hashchange']) window.removeEventListener(event, previousLifecycle)
@@ -117,6 +123,7 @@ if (previousLifecycle !== undefined) {
 const clearReferences = (event?: Event): void => {
   if (event?.type === 'pageshow' && !(event as PageTransitionEvent).persisted) return
   resetDeltaState(ids)
+  visualViewportState.dispose()
   void chrome.runtime.sendMessage({ type: 'DSH_DOCUMENT_CHANGED' }).catch(() => {})
 }
 for (const event of ['pagehide', 'pageshow', 'popstate', 'hashchange']) window.addEventListener(event, clearReferences)

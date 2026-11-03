@@ -934,6 +934,25 @@ describe('recorded tool dispatch', () => {
 })
 
 describe('BridgeServer', () => {
+  it.each([false, true])('requires both peers to negotiate viewport tools, offered=%s', async offered => {
+    const h = await startBridge({ caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60, visualViewport: true } })
+    harnesses.push(h)
+    const { ws, frames } = await connect(h.url)
+    send(ws, { t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: TOKEN, caps: { ...CAPS, ...(offered ? { visualViewport: true } : {}) } })
+    await waitFor(() => frames.some(frame => frame.t === 'hello.ok'))
+    expect(frames.find(frame => frame.t === 'hello.ok')).toMatchObject({ caps: offered ? { visualViewport: true } : { textOnly: true } })
+    if (!offered) {
+      expect(() => h.bridge.requestTool('browser_screenshot', {}, new AbortController().signal)).toThrow('updated Chrome')
+      expect(frames.some(frame => frame.t === 'tool.call')).toBe(false)
+    } else {
+      const pending = h.bridge.requestTool('browser_screenshot', {}, new AbortController().signal)
+      await waitFor(() => frames.some(frame => frame.t === 'tool.call'))
+      const call = frames.find((frame): frame is Extract<BridgeFrame, { t: 'tool.call' }> => frame.t === 'tool.call')!
+      send(ws, { t: 'tool.result', id: call.id, action: call.action, ok: true, result: { text: 'synthetic viewport' } })
+      expect(await pending).toEqual({ text: 'synthetic viewport' })
+    }
+    ws.close()
+  })
   it('negotiates snapshot bounds without exceeding either peer offer', async () => {
     const h = await startBridge()
     harnesses.push(h)

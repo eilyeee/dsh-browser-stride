@@ -1,8 +1,7 @@
 /**
- * Model-facing browser page context injected after an explicit tab handoff.
+ * Model-facing context for the selected authorized group page.
  *
- * The extension captures the page immediately after the user chooses to
- * follow it. A live Agent receives that snapshot at once; a deferred session
+ * The extension captures an authorized selected group page. A live Agent receives that snapshot at once; a deferred session
  * keeps only its newest snapshot until `agent/created` publishes the
  * Agent. Live inboxes also keep only the newest unclaimed browser snapshot.
  * Injection deliberately does not wake an idle Agent — the snapshot is
@@ -32,7 +31,7 @@ const DEFAULT_MAX_PENDING = 32
 /** Build one immutable context message from a captured browser snapshot. */
 export function createBrowserSnapshotMessage(snapshot: string): UserMessage {
   const text = [
-    'The user chose to follow the newly active browser tab. The browser page context was refreshed immediately after that choice.',
+    'This conversation is bound to an authorized page in the DSH control group. Human tab switches do not change its target. The browser context below describes that selected page.',
     'The following is an already completed browser_snapshot of the current page. Use its shown elementRef values for the next request; take a new snapshot if a reference is stale or missing.',
     snapshot,
   ].join('\n\n')

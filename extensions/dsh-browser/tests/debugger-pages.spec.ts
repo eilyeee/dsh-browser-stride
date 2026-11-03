@@ -21,17 +21,76 @@ function fixture() {
   const attach = vi.fn(async () => {})
   const detach = vi.fn(async () => {})
   const get = vi.fn(async (): Promise<Pick<chrome.tabs.Tab, 'id' | 'windowId' | 'url' | 'pendingUrl' | 'status'>> => ({ id: 42, windowId: 1, url: 'https://example.test/', status: 'complete' }))
-  vi.stubGlobal('chrome', { tabs: { get }, debugger: { attach, detach, sendCommand: commands,
+  const cache: Record<string, unknown> = {}
+  vi.stubGlobal('chrome', { storage: { session: { get: vi.fn(async (key: string) => ({ [key]: cache[key] })), set: vi.fn(async (value: Record<string, unknown>) => { Object.assign(cache, value) }) } }, tabs: { get, getZoom: vi.fn(async () => 1) }, debugger: { attach, detach, sendCommand: commands,
     onDetach: { addListener: (listener: typeof detached) => { detached = listener } },
     onEvent: { addListener: (listener: typeof event) => { event = listener } } },
   runtime: { getURL: (file: string) => `chrome-extension://synthetic/${file}` } })
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: async () => '/* packaged controller */' })))
   const pages = new DebuggerPages()
-  return { pages, attach, detach, get, commands, event, navigate: () => { loader = 'document-b' }, disconnect: () => detached({ tabId: 42 }) }
+  return { pages, attach, detach, get, commands, event, cache, navigate: () => { loader = 'document-b' }, disconnect: () => detached({ tabId: 42 }) }
 }
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 describe('new-tab debugger transport', () => {
+  it('captures an explicitly authorized native target without querying or activating the human tab', async () => {
+    const h = fixture()
+    h.commands.mockResolvedValueOnce({ data: '/9j/2Q==' } as never)
+    const view = { screenshotRef: 'shot_00000000-0000-4000-8000-000000000001', width: 1200, height: 800, scrollX: 0, scrollY: 100, devicePixelRatio: 2 }
+    await h.pages.prepareViewportCapture(42, () => true, () => true)
+    expect(await h.pages.captureViewport(42, view, () => true)).toBe('/9j/2Q==')
+    expect(h.attach).toHaveBeenCalledWith({ tabId: 42 }, '1.3')
+    expect(h.commands).toHaveBeenCalledWith({ tabId: 42 }, 'Page.captureScreenshot', expect.objectContaining({ captureBeyondViewport: false }))
+    expect(h.detach).not.toHaveBeenCalled()
+    expect(h.pages.has(42)).toBe(false) // Native DOM transport is not promoted to automatic control.
+    expect(h.cache.dshVisualCaptures).toEqual([42])
+    await h.pages.detachVisual(42)
+    expect(h.detach).toHaveBeenCalledWith({ tabId: 42 })
+    expect(h.cache.dshVisualCaptures).toEqual([])
+  })
+
+  it('withdraws a temporary attachment without capturing if its owner is revoked during attach', async () => {
+    const h = fixture(); let current = true
+    h.attach.mockImplementationOnce(async () => { current = false })
+    await expect(h.pages.prepareViewportCapture(42, () => current, () => current)).rejects.toThrow()
+    expect(h.commands).not.toHaveBeenCalled(); expect(h.detach).toHaveBeenCalledWith({ tabId: 42 })
+    expect(h.cache.dshVisualCaptures).toEqual([])
+  })
+
+  it('cleans a crashed temporary attachment before granting any new visual authority', async () => {
+    const h = fixture(); h.cache.dshVisualCaptures = [42]
+    await h.pages.recoverCaptures()
+    expect(h.detach).toHaveBeenCalledWith({ tabId: 42 })
+    expect(h.cache.dshVisualCaptures).toEqual([])
+    expect(h.pages.has(42)).toBe(false)
+    expect(h.attach).not.toHaveBeenCalled()
+  })
+  it('holds the native slot through a revoked pending attach so old cleanup cannot detach its successor', async () => {
+    const h = fixture(); let current = true, finish!: () => void
+    h.attach.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve }))
+    const old = h.pages.prepareViewportCapture(42, () => current, () => current).catch(error => error)
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
+    current = false
+    const cleanup = h.pages.detachVisual(42)
+    const next = h.pages.prepareViewportCapture(42, () => true, () => true)
+    await Promise.resolve(); expect(h.attach).toHaveBeenCalledTimes(1)
+    finish()
+    expect(await old).toBeInstanceOf(Error)
+    await cleanup; await next
+    expect(h.attach).toHaveBeenCalledTimes(2)
+    expect(h.detach).toHaveBeenCalledTimes(1)
+    expect(h.cache.dshVisualCaptures).toEqual([42])
+    await h.pages.detachVisual(42)
+  })
+  it('retains an invalid cleanup record and refuses replacement when native detach is unconfirmed', async () => {
+    const h = fixture()
+    await h.pages.prepareViewportCapture(42, () => true, () => true)
+    h.detach.mockRejectedValue(new Error('Synthetic unknown detach failure'))
+    await expect(h.pages.detachVisual(42)).rejects.toThrow('unknown detach')
+    expect(h.cache.dshVisualCaptures).toEqual([42])
+    await expect(h.pages.prepareViewportCapture(42, () => true, () => true)).rejects.toThrow('unknown detach')
+    expect(h.attach).toHaveBeenCalledTimes(1)
+  })
   it('waits for the new HTTP(S) tab and retries only an explicit not-ready attachment', async () => {
     const h = fixture()
     h.get.mockResolvedValueOnce({ id: 42, windowId: 1, url: 'chrome://newtab/', pendingUrl: 'https://example.test/', status: 'loading' })

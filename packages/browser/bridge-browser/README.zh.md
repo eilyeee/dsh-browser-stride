@@ -5,6 +5,10 @@
 `@eilyeee/dsh-browser-stride`
 Bridge 在本机 DeepSeek Harness Host 上提供只允许回环访问、需要 token 的 WebSocket，并注册文本形式的 `browser_*` 工具；页面操作由浏览器扩展执行。安装步骤和当前限制见[仓库首页](../../../README.zh.md)。
 
+## 视口图片
+
+`browser_screenshot` 验证原连接扩展返回的有限 JPEG，通过 Host 附件服务保存，并渲染为原生图片块。PTC 会把成功的图片内容附加到下一次模型请求；结构化返回值只提供持久附件引用和截图元数据。`browser_click_at` 是正常审批的写操作，要求单次截图引用和图片比例坐标，并沿用请求、文档、会话及运行控制版本的检查。两者都需要协商可选的 `visualViewport` 能力。DOM 快照仍是文本，原生 CDP 输入尚未实现。使用方法见 [Chrome 视觉工具说明](../../../extensions/dsh-browser/README.zh.md#画布与设计稿)。
+
 ## 配置
 
 首次连接可在扩展设置中点击「连接本机 DSH」，再在已登录的 DSH「设置 → 通用 → 浏览器配对」中核对校验码并确认。请求只在内存中保留五分钟，最多八个；只有通过 Connection 登录和 owner 检查的接口可以确认。请求证明与安装凭据不进入 Host 页面或 URL。凭据领取只进行一次，丢失回复、重启或存储失败后需重新确认。手动配对码仍可使用。普通源码更新保留原扩展安装与 Host 数据时无需重配；更新流程见仓库首页。

@@ -1,6 +1,6 @@
 /**
  * `@eilyeee/dsh-browser-stride`: token-authenticated WebSocket bridge for
- * the browser extension plus the text-only `browser_*` tool set.
+ * the browser extension plus structured browser tools and optional viewport images.
  *
  * The bridge mounts its own upgrade route (`/ext/bridge`) on the host
  * webserver, OUTSIDE the /api trust fence — so it brings its own bearer-token
@@ -293,6 +293,7 @@ function mountBridge(
     toolTimeoutMs: resolved.toolTimeoutMs,
     caps: {
       textOnly: true,
+      visualViewport: true,
       snapshotMaxChars: resolved.snapshotMaxChars,
       maxInteractiveItems: resolved.maxInteractiveItems,
     },
