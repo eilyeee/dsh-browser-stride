@@ -1384,6 +1384,7 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
       {
         unrestrictedAccess,
         allowsTab: admittedPages.allows,
+        emptyAuthorizedScope: admittedPages.empty,
         ...(controlledTabId === undefined ? {} : { controlledTabId }),
         followTab: (tab) => followModelSelectedTab(tab, call.sessionId, () => targetAllowed() && admittedPages.allows(tab)),
         commitAction,

@@ -83,4 +83,6 @@ pnpm run test:benchmark
 
 构建后可选运行 `pnpm run test:smoke-browser`，使用临时 profile 在本地合成页面上检查真实 Host 与 Chromium 扩展；该测试不调用模型。运行时 smoke 也使用隔离的临时 DSH home；桌面端和真实站点场景需要另行验收。另见[贡献指南](CONTRIBUTING.md)、[安全政策](SECURITY.md)和[基准测试方法](benchmark/README.md)。
 
+`pnpm run test:smoke-auto-tab-model` 是单独启用的真实模型验收：从普通 DSH 对话打开并控制新页面，检查服务端保存结果、会话绑定及控制分组，目标页面不预先点击工具栏授权。配置方式见[扩展验收说明](extensions/dsh-browser/README.zh.md#普通对话的真实模型验收)。
+
 本仓库保留上游 MIT 许可证及来源声明：[LICENSE](LICENSE)、[NOTICE.md](NOTICE.md)。

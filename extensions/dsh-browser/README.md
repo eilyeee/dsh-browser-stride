@@ -51,6 +51,12 @@ If a new page cannot be bound, cleanup first releases that attempt's page grant,
 
 Firefox does not offer this mode. Managed `/browser` tasks still require trusted selected-page binding and cannot create/follow/close tabs. `pnpm run test:smoke-browser` exercises ordinary real Host tool dispatch into an automatically controlled synthetic page; it does not call a model or establish DSH Desktop integration.
 
+### Real-model ordinary-chat check
+
+After building, run `pnpm run test:smoke-auto-tab-model` with `STRIDE_REAL_MODEL=1` to permit real model requests. Optional `STRIDE_MODEL_PATCH` supplies a private DSH configuration patch and `STRIDE_MODEL_CREDENTIALS` supplies an existing credentials file. The script uses the configured temporary Host's default model without selecting another model; copy your default configuration through the private patch when required. Credential copies are restricted to the temporary home and removed at cleanup. Keep both input files out of Git.
+
+This check creates a disposable Host, Chromium profile and synthetic site. It enables automatic control through the extension UI, starts an ordinary Host conversation outside the extension history workspace, and submits a natural-language open/change/save request. No target toolbar grant or initial page binding is performed. Success requires completed model activity, the new tab's conversation binding and group, debugger access, page confirmation and independently saved server state. The test guard limits this session to twelve model requests and twenty browser calls on the fixture. Metadata-only results are stored under ignored `.stride-private/validation/auto-tab-model/`. This is one controlled Chrome scenario; Desktop, Firefox and arbitrary sites require separate validation.
+
 ## Pending page calls
 
 For received page-tool requests, the background captures the selected tab/window and URL before waiting for IndexedDB admission, approval or a write turn. Native navigation/history events invalidate the captured document generation, including same-URL reloads; explicit rebinds, tab replacement/moves and connection replacement invalidate the old binding. A rejected call does not retry itself against a new page. Expired reads are withheld. Already dispatched operations are awaited before later writes; they are not undone or replayed. A committed action may observe its own navigation while its original binding remains valid.

@@ -83,4 +83,6 @@ pnpm run test:benchmark
 
 After building, `pnpm run test:smoke-browser` optionally checks the real Host and a Chromium extension against a synthetic local page, using temporary profiles. It does not call a model. The runtime smoke also uses an isolated temporary DSH home; Desktop and real-site scenarios need separate evidence. See [contributing](CONTRIBUTING.md), [security](SECURITY.md), and [benchmark methodology](benchmark/README.md).
 
+`pnpm run test:smoke-auto-tab-model` is a separate opt-in real-model check for ordinary DSH chat opening and controlling a new page. It verifies the saved server state, conversation binding and control group without a toolbar page grant. See the [extension validation instructions](extensions/dsh-browser/README.md#real-model-ordinary-chat-check).
+
 The repository retains the upstream MIT license and attribution in [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md).

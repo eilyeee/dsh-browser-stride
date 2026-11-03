@@ -118,6 +118,18 @@ describe('isNavigationCandidateTool', () => {
 })
 
 describe('dispatchToolCall', () => {
+  it('returns an empty admitted scope without querying tabs or requesting page-read approval', async () => {
+    const h = mockChrome({ tabs: [managedTab(91, { title: 'Private synthetic tab', url: 'https://private.example/' })] })
+    const authorize = vi.fn(async () => 'denied' as const)
+    const answer = await dispatchToolCall({ id: 'empty-tab-scope', name: 'browser_list_tabs', args: {} }, 'off',
+      undefined, authorize, undefined, undefined, undefined,
+      { unrestrictedAccess: false, emptyAuthorizedScope: true, allowsTab: () => false })
+    expect(answer.ok).toBe(true)
+    expect((answer.result as { text: string }).text).toContain('"tabs":[]')
+    expect((answer.result as { text: string }).text).not.toContain('private.example')
+    expect(authorize).not.toHaveBeenCalled()
+    expect(h.query).not.toHaveBeenCalled()
+  })
   it('uses an already-loaded content script without injecting', async () => {
     const chromeMock = mockChrome({ tab: { id: 7, url: 'https://example.com' } })
 

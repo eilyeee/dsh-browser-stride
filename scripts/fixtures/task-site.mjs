@@ -1,7 +1,7 @@
 import { createServer } from 'node:http'
 
 /** Synthetic business state belongs to this test server, never model output. */
-export async function startTaskSite() {
+export async function startTaskSite({ hostname = '127.0.0.1' } = {}) {
   let state = { enabled: false, saved: false }
   const server = createServer(async (request, response) => {
     response.setHeader('cache-control', 'no-store')
@@ -31,6 +31,6 @@ export async function startTaskSite() {
       document.querySelector('#status').textContent=reply.ok?'设置已保存':'保存失败'};</script></html>`)
   })
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
-  const origin = `http://127.0.0.1:${server.address().port}`
+  const origin = `http://${hostname}:${server.address().port}`
   return { origin, url: `${origin}/settings`, state: () => ({ ...state }), close: () => new Promise(resolve => server.close(resolve)) }
 }

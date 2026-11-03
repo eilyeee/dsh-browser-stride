@@ -9,6 +9,9 @@ no release version has been assigned yet.
 
 ### Fixed
 
+- Model-facing tools make direct URL opening explicit. Listing an empty admitted
+  page scope returns an empty result without native tab reads or an approval;
+  it cannot acquire pages authorized after the request arrived.
 - Failed new-tab adoption releases its own page grant independently of browser
   tab removal, including metadata failures, cancellation and expired admission.
   Cleanup cannot revoke a newer user grant or close a page after user takeover.
@@ -48,6 +51,9 @@ no release version has been assigned yet.
 
 ### Added
 
+- An opt-in real-model ordinary-chat acceptance script verifies new-tab creation,
+  conversation binding, the control group and independently saved synthetic-site
+  state, using temporary Host/browser homes and the configured default model.
 - Chrome settings offer opt-in automatic control of DSH-created tabs using
   `debugger` and tab-metadata permissions. New tabs bind to the originating ordinary
   conversation and join the control group without another toolbar click. Only the

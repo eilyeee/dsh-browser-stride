@@ -127,6 +127,8 @@ export function isTabManagementTool(name: string): boolean {
 export interface TabManagementContext {
   /** Skip all browser approval prompts after the user enables unrestricted access. */
   unrestrictedAccess: boolean
+  /** Immutable admission scope contains no authorized pages; return no metadata. */
+  emptyAuthorizedScope?: boolean
   /** Controlled tab for the calling session, when one still exists. */
   controlledTabId?: number
   /** Rebind subsequent tools to one existing tab without activating it. */
@@ -648,6 +650,9 @@ async function dispatchTabManagementTool(
   context: TabManagementContext,
 ): Promise<ToolAnswer> {
   if (call.name === 'browser_list_tabs') {
+    if (context.emptyAuthorizedScope === true) {
+      return { ok: true, result: { text: wrapUntrustedContent(JSON.stringify({ tabs: [], scope: 'authorized-tabs' }), budget.maxChars) } }
+    }
     const approval = tabManagementApproval(call)
     const rejected = await authorizeTabManagement(approval, context.unrestrictedAccess, authorize, call, signal)
     if (rejected !== undefined) return rejected

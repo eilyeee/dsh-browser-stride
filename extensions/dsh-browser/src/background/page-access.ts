@@ -100,9 +100,10 @@ export class PageAccess {
     return () => captured !== undefined && this.grants.get(tabId) === captured
   }
   /** A request cannot inherit a later toolbar grant, including one for the same tab. */
-  snapshot(): { allows: (tab: Page) => boolean; current: () => boolean } {
+  snapshot(): { empty: boolean; allows: (tab: Page) => boolean; current: () => boolean } {
     const captured = new Map(this.restoring ? [] : [...this.grants].filter(([, grant]) => grant.pending !== true))
     return {
+      empty: captured.size === 0,
       allows: tab => tab.id !== undefined && captured.get(tab.id) === this.grants.get(tab.id) && this.allows(tab),
       current: () => [...captured].every(([tabId, grant]) => this.grants.get(tabId) === grant),
     }
