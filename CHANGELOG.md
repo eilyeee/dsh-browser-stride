@@ -9,6 +9,11 @@ no release version has been assigned yet.
 
 ### Fixed
 
+- Continued tasks start with a pending outcome while retaining their fixed goal,
+  cumulative counters and committed evidence. A verifier draining from an older
+  control revision cannot replace a paused, stopped or newly running outcome.
+  Its elapsed verification time is still counted. Regression checks cover
+  continuation both before evidence returns and after an earlier fact commits.
 - Native selected-page start/continuation releases its unused prepared pin when
   the Host explicitly confirms a rejection before target attachment. A later
   trusted click can prepare a fresh pin. Lost replies, legacy errors and any

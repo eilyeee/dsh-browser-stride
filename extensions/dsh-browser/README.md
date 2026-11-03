@@ -33,6 +33,8 @@ Losing the browser connection pauses explicit tasks pinned to that connection an
 
 If the Host confirms that **Bind and start** or selected-page continuation was refused before the Host registered that target, the extension releases that attempt's unused binding record. After refreshing task status, another trusted click can prepare a fresh binding. A lost or uncertain reply retains the original binding and never causes an automatic retry. This cleanup preserves the page and its native permission.
 
+Continuing a task clears its previous outcome message while preserving cumulative limits and saved evidence. A late verifier from an earlier activity cannot make the running continuation display “Needs verification; automatic actions have stopped” or “Result independently verified”. The current activity is verified separately.
+
 ## Authorizing one page
 
 For an existing page, open it and click the **DSH Stride toolbar icon**, then select the task and choose **Bind and start** in the side panel. Opening the sidebar through the browser menu, clicking a sidebar button or sending model instructions cannot authorize an existing page. Same-site sibling tabs require their own toolbar click. Newly created Chrome pages have the separate opt-in flow below.

@@ -43,6 +43,87 @@ function execution(agent: Agent, name = 'browser_snapshot', parent?: ToolExecuti
 }
 
 describe('Host-owned browser task executor', () => {
+  it('does not publish a delayed busy-Agent verdict after the task was paused', async () => {
+    const h = await setup(), hold = gate()
+    close.push(async () => { hold.release() })
+    const original = h.store.updateTask.bind(h.store)
+    let armed = true, outcomeWrite: ReturnType<typeof h.store.updateTask> | undefined
+    vi.spyOn(h.store, 'updateTask').mockImplementation((id, update) => {
+      if (armed) {
+        armed = false
+        const current = h.current()
+        void h.store.control(id, current.version, 'pause')
+      }
+      outcomeWrite = original(id, update)
+      return outcomeWrite
+    })
+    h.work(async () => { await hold.promise })
+    await h.store.startTask(h.run.runId, h.current().version, () => {
+      h.runtime.selectTarget(h.run.runId, 'https://synthetic.test/settings')
+      h.agent.followup({} as Parameters<Agent['followup']>[0])
+    })
+    await outcomeWrite
+    expect(h.current()).toMatchObject({ state: 'paused', task: { outcome: 'pending', modelRequests: 0 } })
+    expect(h.followup).toHaveBeenCalledOnce()
+    expect(h.cancel).not.toHaveBeenCalled()
+  })
+  it('does not let an old verifier overwrite a running continuation and retains verification time', async () => {
+    let now = 0
+    vi.spyOn(performance, 'now').mockImplementation(() => now)
+    const h = await setup()
+    const verifying = gate(), oldVerifier = gate(), continued = gate(), activity = gate()
+    close.push(async () => { oldVerifier.release(); activity.release() })
+    let checks = 0, round = 0
+    h.runtime.registerVerifier(h.run.runId, { acceptsTarget: () => true, verify: async () => {
+      if (++checks === 1) { verifying.release(); await oldVerifier.promise }
+      return { fieldValues: { saved: 'synthetic' } }
+    } })
+    h.work(async () => {
+      await h.runtime.consume(h.agent, 'modelRequests')
+      if (++round === 2) { continued.release(); await activity.promise }
+    })
+    await h.start(); await verifying.promise
+    now = 1000
+    const paused = await h.store.control(h.run.runId, h.current().version, 'pause')
+    await h.store.retargetPaused(h.run.runId, paused.version, paused.controlRevision,
+      () => h.runtime.selectTarget(h.run.runId, 'https://synthetic.test/settings'))
+    oldVerifier.release()
+    await continued.promise
+    expect(h.current()).toMatchObject({ state: 'running', controlRevision: 3,
+      task: { outcome: 'pending', activeMs: 1000, modelRequests: 2 }, facts: [] })
+    activity.release(); await h.settled()
+    expect(h.current()).toMatchObject({ state: 'completed', task: { outcome: 'verified', activeMs: 1000 },
+      facts: [{ controlRevision: 3, outcome: 'verified' }] })
+    expect(checks).toBe(2)
+  })
+  it('keeps an earlier verified fact without presenting it as the new continuation outcome', async () => {
+    const h = await setup()
+    const continued = gate(), activity = gate()
+    close.push(async () => { activity.release() })
+    const record = h.store.recordFact.bind(h.store)
+    let armed = true, round = 0
+    vi.spyOn(h.store, 'recordFact').mockImplementation(async (id, version, fact) => {
+      const result = await record(id, version, fact)
+      if (armed) {
+        armed = false
+        const paused = await h.store.control(id, result.version, 'pause')
+        await h.store.retargetPaused(id, paused.version, paused.controlRevision,
+          () => h.runtime.selectTarget(id, 'https://synthetic.test/settings'))
+      }
+      return result
+    })
+    h.runtime.registerVerifier(h.run.runId, { acceptsTarget: () => true, verify: async () => ({ fieldValues: { saved: 'synthetic' } }) })
+    h.work(async () => {
+      await h.runtime.consume(h.agent, 'modelRequests')
+      if (++round === 2) { continued.release(); await activity.promise }
+    })
+    await h.start(); await continued.promise
+    expect(h.current()).toMatchObject({ state: 'running', controlRevision: 3, task: { outcome: 'pending', modelRequests: 2 },
+      facts: [{ controlRevision: 0, outcome: 'verified' }] })
+    activity.release(); await h.settled()
+    expect(h.current()).toMatchObject({ state: 'completed', task: { outcome: 'verified' },
+      facts: [{ controlRevision: 0 }, { controlRevision: 3 }] })
+  })
   it('refuses provider delivery if connection authority expires during model counter persistence', async () => {
     const h = await setup()
     const original = h.store.updateTask.bind(h.store)

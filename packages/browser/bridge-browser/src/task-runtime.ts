@@ -181,6 +181,16 @@ export class BrowserTaskRuntime {
     job.agent.cancel({ kind: 'hook', reason: 'browser-task-control' })
   }
 
+  private markOutcome(runId: RunId, revision: number, outcome: BrowserTask['outcome'], activeMs?: number): Promise<BrowserRunRecord> {
+    return this.runs.updateTask(runId, task => {
+      const current = this.runs.get(runId)!
+      // Settlement may wait behind pause/continuation. Preserve cumulative
+      // time, but only the still-running original revision owns its outcome.
+      return { ...task, ...(activeMs === undefined ? {} : { activeMs: Math.max(task.activeMs, Math.ceil(activeMs)) }),
+        ...(current.state === 'running' && current.controlRevision === revision ? { outcome } : {}) }
+    })
+  }
+
   private changed(run: BrowserRunRecord): void {
     if (this.closed || run.task === undefined) return
     if (isTerminal(run.state) && !this.jobs.has(run.runId)) {
@@ -198,7 +208,7 @@ export class BrowserTaskRuntime {
       const agent = this.ctx.agents.get(String(run.sessionId) as Agent['id'])
       if (agent === undefined || agent.status !== 'idle') {
         this.driven.set(run.runId, run.controlRevision)
-        void this.runs.updateTask(run.runId, task => ({ ...task, outcome: 'needs-review' })).then(async marked => {
+        void this.markOutcome(run.runId, run.controlRevision, 'needs-review').then(async marked => {
           if (marked.state === 'running' && marked.controlRevision === run.controlRevision) await this.runs.transition(marked.runId, marked.version, 'blocked')
         }).catch(() => {})
         return
@@ -211,7 +221,7 @@ export class BrowserTaskRuntime {
         try {
           const latest = this.runs.get(run.runId)
           if (latest?.state === 'running' && latest.controlRevision === value.revision) {
-            const marked = await this.runs.updateTask(run.runId, task => ({ ...task, outcome: 'needs-review' }))
+            const marked = await this.markOutcome(run.runId, value.revision, 'needs-review')
             if (marked.state === 'running' && marked.controlRevision === value.revision) await this.runs.transition(marked.runId, marked.version, 'blocked')
           }
         } catch { /* A storage fault already fences every execution. */ }
@@ -286,7 +296,7 @@ export class BrowserTaskRuntime {
       } catch { outcome = job.exhausted ? 'budget-exhausted' : 'needs-review' }
     }
     this.tick(job)
-    run = await this.runs.updateTask(run.runId, task => ({ ...task, outcome, activeMs: Math.ceil(job.activeMs) }))
+    run = await this.markOutcome(run.runId, job.revision, outcome, job.activeMs)
     if (run.state !== 'running' || run.controlRevision !== job.revision) return
     await this.runs.transition(run.runId, run.version, outcome === 'verified' ? 'completed' : outcome === 'not-completed' ? 'failed' : 'blocked')
   }

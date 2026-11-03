@@ -51,6 +51,17 @@ async function running(store: BrowserRunStore) {
 }
 
 describe('durable Host browser run records', () => {
+  it.each(['resume', 'retarget'] as const)('clears the previous task verdict on %s while preserving the goal and cumulative counters', async action => {
+    const { store } = await setup()
+    const queued = await store.create({ ...input(), task: newBrowserTask('Synthetic fixed goal') })
+    const run = await store.startTask(queued.runId, queued.version, () => {})
+    const counted = await store.updateTask(run.runId, task => ({ ...task, activeMs: 1000, modelRequests: 2, toolCalls: 3, outcome: 'needs-review' }))
+    const paused = await store.control(run.runId, counted.version, 'pause')
+    const current = action === 'resume' ? await store.control(run.runId, paused.version, 'resume')
+      : await store.retargetPaused(run.runId, paused.version, paused.controlRevision, () => {})
+    expect(current).toMatchObject({ state: 'running', controlRevision: action === 'resume' ? 2 : 3,
+      task: { goal: 'Synthetic fixed goal', outcome: 'pending', activeMs: 1000, modelRequests: 2, toolCalls: 3 } })
+  })
   it('fences a disconnected task synchronously, then pauses the current record without losing queued counters', async () => {
     const { store } = await setup()
     const queued = await store.create({ ...input(), task: newBrowserTask('Synthetic task') })

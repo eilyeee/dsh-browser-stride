@@ -333,7 +333,8 @@ export class BrowserRunStore {
       const state = control === 'pause' ? requestPause(run.state) : control === 'resume' ? requestResume(run.state) : requestStop(run.state)
       if (state === run.state) return snapshot(run)
       if (state === 'running') { this.assertReconciled(run); this.assertSessionAvailable(run) }
-      return this.save({ ...run, state, controlRevision: asControlRevision(nextControlRevision(run.controlRevision, control)) })
+      return this.save({ ...run, state, controlRevision: asControlRevision(nextControlRevision(run.controlRevision, control)),
+        ...(state === 'running' && run.task !== undefined ? { task: { ...run.task, outcome: 'pending' } } : {}) })
     })
   }
 
@@ -350,7 +351,8 @@ export class BrowserRunStore {
       const revision = nextControlRevision(nextControlRevision(run.controlRevision, 'target_changed'), 'resume')
       if (!Number.isSafeInteger(revision)) throw new BrowserRunStoreError('invalid-state')
       attachTarget(revision)
-      return this.save({ ...run, state: 'running', controlRevision: revision })
+      return this.save({ ...run, state: 'running', controlRevision: revision,
+        ...(run.task === undefined ? {} : { task: { ...run.task, outcome: 'pending' } }) })
     })
   }
 
