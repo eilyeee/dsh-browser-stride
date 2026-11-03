@@ -44,7 +44,7 @@ test('the task fixture verifies persisted state over loopback while pinning the 
   assert.deepEqual(await verifier.verify({ signal }), { fieldValues: { testSetting: 'enabled', persisted: 'true' } })
 })
 
-test('the disconnect fixture holds just one completed snapshot until its original tool signal aborts', async t => {
+for (const mode of ['disconnectOnce', 'targetLossOnce']) test(`the ${mode} fixture holds just one completed snapshot until its original tool signal aborts`, async t => {
   const root = await mkdtemp(join(tmpdir(), 'stride-task-disconnect-test-'))
   const trigger = join(root, 'trigger.json'), result = join(root, 'result.json')
   const events = new Map(), cleanup = []
@@ -57,7 +57,7 @@ test('the disconnect fixture holds just one completed snapshot until its origina
     for (const stop of cleanup.reverse()) await stop()
     await rm(root, { recursive: true, force: true })
   })
-  await writeFile(trigger, JSON.stringify({ sessionId: agent.id, disconnectOnce: true }))
+  await writeFile(trigger, JSON.stringify({ sessionId: agent.id, [mode]: true }))
   apply(ctx, { trigger, result })
   const waitFile = async path => {
     const deadline = Date.now() + 3000
@@ -72,7 +72,7 @@ test('the disconnect fixture holds just one completed snapshot until its origina
   const answer = { isError: false, content: [] }
   const call = () => events.get('tools/execute')({ agent, name: 'browser_snapshot', signal: controller.signal }, async () => { invocations++; return answer })
   const pending = call().then(value => { settled = true; return value })
-  await waitFile(`${result}.disconnect-ready`)
+  await waitFile(`${result}.${mode === 'targetLossOnce' ? 'target-loss-ready' : 'disconnect-ready'}`)
   assert.equal(settled, false)
   controller.abort()
   assert.equal(await pending, answer)

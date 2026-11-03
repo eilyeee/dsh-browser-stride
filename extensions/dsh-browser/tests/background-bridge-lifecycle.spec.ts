@@ -3,7 +3,7 @@
 import { authorizedExamplePages, exampleNativePageProbe } from './page-access-fixture.ts'
 import { PAGE_ACCESS_KEY } from '../src/background/page-access.ts'
 
-import { BRIDGE_PROTOCOL_VERSION, BRIDGE_RUN_RETARGET_METHOD, BRIDGE_RUN_LIST_METHOD, BRIDGE_TASK_START_METHOD } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
+import { BRIDGE_PROTOCOL_VERSION, BRIDGE_TASK_TARGET_LOST_METHOD, BRIDGE_RUN_RETARGET_METHOD, BRIDGE_RUN_LIST_METHOD, BRIDGE_TASK_START_METHOD } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { wireToolCall, confirmTestTool } from './wire-tool-call.ts'
 import { PAGE_SESSION_CONTEXT_STORAGE_KEY } from '../src/background/session-continuity.ts'
@@ -167,6 +167,54 @@ afterEach(() => {
 })
 
 describe('background bridge lifecycle', () => {
+  it.each(['confirmed', 'rejected', 'superseded'] as const)('notifies the original task pin on page revocation with %s confirmation', async confirmation => {
+    const h = mockChrome({ localGet: async () => ({ dshSettings: { bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge' } }) })
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+    const panel = panelPort(); h.onConnect.emit(panel.port)
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const socket = FakeWebSocket.instances[0]!
+    socket.open(); await Promise.resolve()
+    socket.receive({ t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      caps: { textOnly: true, snapshotMaxChars: 32000, maxInteractiveItems: 60, taskTargetLoss: true } })
+    panel.onMessage.emit({ type: 'session.active', sessionId: 'loss-session', isNew: true })
+    await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity', state: expect.objectContaining({ controlled: expect.objectContaining({ tabId: 1 }) }) })))
+    const state = panel.postMessage.mock.calls.map(([message]) => message).filter(message => message.type === 'tab-affinity').at(-1)!.state
+    panel.onMessage.emit({ type: 'browser-run.retarget', id: 'start-loss', sessionId: 'loss-session', runId: 'run_loss', expectedVersion: 0,
+      controlRevision: 0, affinityRevision: state.revision, start: true, task: true })
+    await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({ method: BRIDGE_TASK_START_METHOD })))
+    const start = socket.sent.find(value => (value as { method?: string }).method === BRIDGE_TASK_START_METHOD) as { id: string; payload: { targetBinding: string } }
+    socket.receive({ t: 'rpc.result', id: start.id, ok: true, result: { runId: 'run_loss', sessionId: 'loss-session', controlRevision: 0,
+      state: 'running', targetBinding: start.payload.targetBinding } })
+    panel.onMessage.emit({ type: 'rpc', id: 'forged-loss', method: BRIDGE_TASK_TARGET_LOST_METHOD, payload: {} })
+    expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'rpc.result', id: 'forged-loss', ok: false }))
+    expect(socket.sent).not.toContainEqual(expect.objectContaining({ method: BRIDGE_TASK_TARGET_LOST_METHOD }))
+    panel.onMessage.emit({ type: 'page-access.revoke', id: 'revoke-loss', tabId: 1 })
+    await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({ method: BRIDGE_TASK_TARGET_LOST_METHOD })))
+    const loss = socket.sent.find(value => (value as { method?: string }).method === BRIDGE_TASK_TARGET_LOST_METHOD) as { id: string; payload: unknown }
+    expect(loss.payload).toEqual({ runId: 'run_loss', sessionId: 'loss-session', controlRevision: 0, targetBinding: start.payload.targetBinding })
+    await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith({ type: 'page-access.revoke.result', id: 'revoke-loss', ok: true }))
+    if (confirmation === 'confirmed') {
+      socket.receive({ t: 'rpc.result', id: loss.id, ok: true, result: { accepted: true } })
+      expect(socket.readyState).toBe(FakeWebSocket.OPEN)
+    } else if (confirmation === 'rejected') {
+      socket.receive({ t: 'rpc.result', id: loss.id, ok: false, error: { code: 'unavailable', message: 'Synthetic refusal' } })
+      await vi.waitFor(() => expect(socket.readyState).toBe(FakeWebSocket.CLOSED))
+    } else {
+      panel.onMessage.emit({ type: 'settings', id: 'replace-loss-owner', settings: { bridgeUrl: 'ws://127.0.0.1:39002/ext/bridge' }, connect: true })
+      await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2))
+      const next = FakeWebSocket.instances[1]!
+      next.open(); await Promise.resolve()
+      next.receive({ t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps: { textOnly: true, snapshotMaxChars: 32000, maxInteractiveItems: 60, taskTargetLoss: true } })
+      socket.receive({ t: 'rpc.result', id: loss.id, ok: false, error: { code: 'unavailable', message: 'Late synthetic refusal' } })
+      await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'status', state: 'connected' })))
+      expect(next.readyState).toBe(FakeWebSocket.OPEN)
+      next.close()
+    }
+    expect(socket.sent.filter(value => (value as { method?: string }).method === BRIDGE_TASK_TARGET_LOST_METHOD)).toHaveLength(1)
+    panel.onDisconnect.emit(); socket.close()
+  })
+
   it('requires native page authorization even with confirmation bypass enabled; panel messages cannot grant it', async () => {
     const h = mockChrome({ authorizedPages: false,
       localGet: async () => ({ dshSettings: { bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge', unrestrictedBrowserAccess: true } }),

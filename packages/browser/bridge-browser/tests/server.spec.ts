@@ -1,4 +1,4 @@
-import { BRIDGE_PROTOCOL_VERSION } from '../src/protocol.ts'
+import { BRIDGE_PROTOCOL_VERSION, BRIDGE_TASK_TARGET_LOST_METHOD } from '../src/protocol.ts'
 import { createServer, type Server } from 'node:http'
 import { readFile, rename, rm, writeFile } from 'node:fs/promises'
 import type { AddressInfo } from 'node:net'
@@ -21,7 +21,7 @@ const EXT_ORIGIN = 'chrome-extension://test-extension-id'
 const FIREFOX_EXT_ORIGIN = 'moz-extension://per-install-uuid'
 
 /** Extension caps used by every hello in this suite. */
-const CAPS = { textOnly: true as const, snapshotMaxChars: 12_000, maxInteractiveItems: 60 }
+const CAPS = { textOnly: true as const, snapshotMaxChars: 12_000, maxInteractiveItems: 60, taskTargetLoss: true }
 
 interface Harness {
   bridge: BridgeServer
@@ -133,7 +133,112 @@ async function connectedLedger(scoped = false, autoConfirm = true, overrides: Pa
   return { ...h, ...client, storage, ledger }
 }
 
+async function taskRpc(h: { ws: WebSocket; frames: BridgeFrame[] }, method: string, payload: unknown) {
+  const id = crypto.randomUUID()
+  send(h.ws, { t: 'rpc', id, method, payload })
+  await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === id))
+  return h.frames.find((frame): frame is Extract<BridgeFrame, { t: 'rpc.result' }> => frame.t === 'rpc.result' && frame.id === id)!
+}
+
 describe('recorded tool dispatch', () => {
+  it('omits the new persisted pause reason for an older compatible panel', async () => {
+    const h = await connectedLedger(true, true, { tasks: { selectTarget: vi.fn(), approval: vi.fn() } })
+    const run = await h.storage.store.create({ sessionId: asSessionId('legacy-pause-reason'), requiredCriteriaIds: ['task-goal'], task: newBrowserTask('Synthetic task') })
+    const target = { runId: run.runId, sessionId: run.sessionId, controlRevision: 0, targetBinding: 'page_legacy_reason' }
+    await taskRpc(h, BRIDGE_TASK_START_METHOD, { ...target, expectedVersion: run.version, targetUrl: 'https://synthetic.test/' })
+    await taskRpc(h, BRIDGE_TASK_TARGET_LOST_METHOD, target)
+    expect(h.storage.store.get(run.runId)?.pauseReason).toBe('page-unavailable')
+    const older = await connect(h.url)
+    send(older.ws, { t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: TOKEN,
+      caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
+    await waitFor(() => older.frames.some(frame => frame.t === 'hello.ok'))
+    expect(older.frames.find(frame => frame.t === 'hello.ok')).not.toHaveProperty('caps.taskTargetLoss')
+    const response = await taskRpc(older, BRIDGE_RUN_LIST_METHOD, { sessionId: run.sessionId })
+    expect(response).toMatchObject({ ok: true, result: { result: { value: { items: [{ state: 'paused' }] } } } })
+    expect(JSON.stringify(response)).not.toContain('page-unavailable')
+    expect(h.storage.store.get(run.runId)?.pauseReason).toBe('page-unavailable')
+  })
+
+  it.each([true, false])('remembers page loss before native start=%s commits without revoking a fresh pin', async start => {
+    const selectTarget = vi.fn()
+    const h = await connectedLedger(true, true, { tasks: { selectTarget, approval: vi.fn() } })
+    let run = await h.storage.store.create({ sessionId: asSessionId('early-page-loss'), requiredCriteriaIds: ['task-goal'], task: newBrowserTask('Synthetic task') })
+    if (!start) {
+      await taskRpc(h, BRIDGE_TASK_START_METHOD, { runId: run.runId, sessionId: run.sessionId, controlRevision: 0,
+        expectedVersion: run.version, targetBinding: 'page_before_pause', targetUrl: 'https://synthetic.test/' })
+      const running = h.storage.store.get(run.runId)!
+      run = await h.storage.store.control(run.runId, running.version, 'pause')
+    }
+    const target = { runId: run.runId, sessionId: run.sessionId, controlRevision: run.controlRevision + (start ? 0 : 2), targetBinding: 'page_revoked' }
+    expect(await taskRpc(h, BRIDGE_TASK_TARGET_LOST_METHOD, target)).toMatchObject({ ok: true, result: { accepted: true } })
+    const callsBefore = selectTarget.mock.calls.length
+    const payload = { ...target, controlRevision: run.controlRevision, expectedVersion: run.version, targetUrl: 'https://synthetic.test/' }
+    const method = start ? BRIDGE_TASK_START_METHOD : BRIDGE_RUN_RETARGET_METHOD
+    expect(await taskRpc(h, method, payload)).toMatchObject({ ok: false, error: { targetState: 'unchanged' } })
+    expect(h.storage.store.get(run.runId)).toEqual(run)
+    expect(selectTarget).toHaveBeenCalledTimes(callsBefore)
+    expect(await taskRpc(h, method, { ...payload, targetBinding: 'page_fresh' })).toMatchObject({ ok: true })
+    const fresh = h.storage.store.get(run.runId)!
+    expect(fresh.state).toBe('running')
+    await taskRpc(h, BRIDGE_TASK_TARGET_LOST_METHOD, target)
+    expect(h.storage.store.get(run.runId)).toEqual(fresh)
+  })
+
+  it('ignores stale, foreign and mismatched loss notices after an explicit continuation', async () => {
+    const h = await connectedLedger(true, true, { tasks: { selectTarget: vi.fn(), approval: vi.fn() } })
+    const run = await h.storage.store.create({ sessionId: asSessionId('stale-page-loss'), requiredCriteriaIds: ['task-goal'], task: newBrowserTask('Synthetic task') })
+    const target = { runId: run.runId, sessionId: run.sessionId, controlRevision: 0, targetBinding: 'page_original' }
+    await taskRpc(h, BRIDGE_TASK_START_METHOD, { ...target, expectedVersion: run.version, targetUrl: 'https://synthetic.test/' })
+    const active = h.storage.store.get(run.runId)!
+    const paused = await h.storage.store.control(run.runId, active.version, 'pause')
+    await taskRpc(h, BRIDGE_RUN_RETARGET_METHOD, { ...target, controlRevision: paused.controlRevision, expectedVersion: paused.version,
+      targetBinding: 'page_successor', targetUrl: 'https://synthetic.test/' })
+    const continued = h.storage.store.get(run.runId)!
+    for (const payload of [target, { ...target, controlRevision: 3 }, { ...target, controlRevision: 3, targetBinding: 'page_successor', sessionId: 'foreign' }]) {
+      await taskRpc(h, BRIDGE_TASK_TARGET_LOST_METHOD, payload)
+      expect(h.storage.store.get(run.runId)).toEqual(continued)
+    }
+    expect(h.bridge.hasConnection()).toBe(true)
+  })
+
+  it('retains unanswered writes as unresolved after page loss and blocks continuation without replay', async () => {
+    const h = await connectedLedger(true, true, { tasks: { selectTarget: vi.fn(), approval: vi.fn() } })
+    const run = await h.storage.store.create({ sessionId: asSessionId('page-loss-write'), requiredCriteriaIds: ['task-goal'], task: newBrowserTask('Synthetic task') })
+    const target = { runId: run.runId, sessionId: run.sessionId, controlRevision: 0, targetBinding: 'page_write' }
+    await taskRpc(h, BRIDGE_TASK_START_METHOD, { ...target, expectedVersion: run.version, targetUrl: 'https://synthetic.test/' })
+    await h.storage.store.withExecution(run.runId, 0, async () => {
+      const pending = h.bridge.requestTool('browser_click', { ref: 'synthetic' }, new AbortController().signal).catch(error => error)
+      await waitFor(() => h.frames.some(frame => frame.t === 'tool.call'))
+      const call = h.frames.find((frame): frame is Extract<BridgeFrame, { t: 'tool.call' }> => frame.t === 'tool.call')!
+      await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === `confirm-${call.id}`))
+      await taskRpc(h, BRIDGE_TASK_TARGET_LOST_METHOD, target)
+      expect(await pending).toBeInstanceOf(BridgeToolError)
+      expect(h.ledger.get(call.id)).toMatchObject({ state: 'unresolved', interruption: { reason: 'cancelled' } })
+    })
+    const paused = h.storage.store.get(run.runId)!
+    await expect(h.storage.store.retargetPaused(run.runId, paused.version, paused.controlRevision, () => {})).rejects.toMatchObject({ code: 'reconciliation-required' })
+    expect(h.frames.filter(frame => frame.t === 'tool.call')).toHaveLength(1)
+    expect(h.bridge.hasConnection()).toBe(true)
+  })
+
+  it('pauses an exact native task target after page access is lost without disconnecting', async () => {
+    const h = await connectedLedger(true, true, { tasks: { selectTarget: vi.fn(), approval: vi.fn() } })
+    const queued = await h.storage.store.create({ sessionId: asSessionId('page-loss-task'), requiredCriteriaIds: ['task-goal'], task: newBrowserTask('Synthetic task') })
+    const target = { runId: queued.runId, sessionId: queued.sessionId, controlRevision: 0, targetBinding: 'page_original' }
+    send(h.ws, { t: 'rpc', id: 'start-page-loss', method: BRIDGE_TASK_START_METHOD,
+      payload: { ...target, expectedVersion: queued.version, targetUrl: 'https://synthetic.test/' } })
+    await waitFor(() => h.storage.store.get(queued.runId)?.state === 'running')
+    await h.storage.store.withExecution(queued.runId, 0, async () => {
+      const execution = h.storage.store.executionFor()!
+      send(h.ws, { t: 'rpc', id: 'lose-page', method: BRIDGE_TASK_TARGET_LOST_METHOD, payload: target })
+      await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === 'lose-page'))
+      expect(h.storage.store.get(queued.runId)).toMatchObject({ state: 'paused', controlRevision: 1, pauseReason: 'page-unavailable' })
+      expect(execution.signal.aborted).toBe(true)
+      expect(() => h.storage.store.assertDispatchAuthority(execution)).toThrow()
+      expect(h.bridge.hasConnection()).toBe(true)
+    })
+  })
+
   it.each(['close', 'replace'] as const)('pauses only the task owned by a lost native connection on %s and permits explicit fresh handoff', async loss => {
     const h = await connectedLedger(true, true, { tasks: { selectTarget: vi.fn(), approval: vi.fn() } })
     const queued = await h.storage.store.create({ sessionId: asSessionId('disconnect-task'), requiredCriteriaIds: ['task-goal'], task: newBrowserTask('Synthetic task') })
@@ -791,6 +896,7 @@ describe('recorded tool dispatch', () => {
     const pending = h.bridge.requestTool('browser_click', {}, abort.signal).catch(error => error)
     await waitFor(() => h.frames.some(frame => frame.t === 'tool.call'))
     const call = h.frames.find(frame => frame.t === 'tool.call')!
+    await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === `confirm-${call.id}` && frame.ok))
     abort.abort()
     expect(await pending).toMatchObject({ code: 'bridge-closed', message: expect.stringContaining('may have started') })
     expect(h.ledger.get(call.id)?.state).toBe('unresolved')

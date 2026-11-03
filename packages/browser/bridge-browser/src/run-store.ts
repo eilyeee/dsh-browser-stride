@@ -59,7 +59,7 @@ const runSchema = z.strictObject({
   createdAt: counter, updatedAt: counter,
   requiredCriteriaIds: criteria,
   recoveryRequired: z.boolean(),
-  pauseReason: z.literal('browser-disconnected').optional(),
+  pauseReason: z.enum(['browser-disconnected', 'page-unavailable']).optional(),
   facts: z.array(factSchema).max(256),
   task: taskSchema.optional(),
 }).superRefine((run, ctx) => {
@@ -123,8 +123,8 @@ export class BrowserRunStore {
   private writeFaulted = false
   private disposal: Promise<void> | undefined
   private readonly executions = new Set<ExecutionContext>()
-  /** Synchronous fence while a lost native target's durable pause is queued. */
-  private readonly disconnectedTargets = new Map<RunId, number>()
+  /** Synchronous fence while an unavailable native target's durable pause is queued. */
+  private readonly unavailableTargets = new Map<RunId, number>()
   private constructor(private readonly domain: RunDomain, readonly dispatches: BrowserDispatchLedger) {}
 
   static async open(facility: Pick<DomainFacility, 'open'>, profile: string): Promise<BrowserRunStore> {
@@ -202,9 +202,23 @@ export class BrowserRunStore {
 
   /** Host transport only. Old connection revisions cannot interrupt their successors. */
   pauseDisconnectedTask(runId: RunId, controlRevision: number): Promise<BrowserRunRecord | undefined> {
+    return this.pauseUnavailableTask(runId, controlRevision, 'browser-disconnected')
+  }
+
+  /** Host validates the original native pin and connection before calling this. */
+  pauseLostTargetTask(runId: RunId, controlRevision: number): Promise<BrowserRunRecord | undefined> {
+    return this.pauseUnavailableTask(runId, controlRevision, 'page-unavailable')
+  }
+
+  private pauseUnavailableTask(runId: RunId, controlRevision: number, reason: NonNullable<BrowserRunRecord['pauseReason']>): Promise<BrowserRunRecord | undefined> {
     const run = this.get(runId)
-    if (run?.task === undefined || run.controlRevision !== controlRevision || !['queued', 'running'].includes(run.state)) return Promise.resolve(undefined)
-    this.disconnectedTargets.set(runId, controlRevision)
+    if (run?.task === undefined) return Promise.resolve(undefined)
+    const current = run.controlRevision === controlRevision && ['queued', 'running'].includes(run.state)
+    // A native handoff reserves its future pin before publishing running.
+    // Fence it now; the serialized pause only commits if that revision does.
+    const pendingHandoff = run.state === 'paused' && controlRevision === run.controlRevision + 2
+    if (!current && !pendingHandoff) return Promise.resolve(undefined)
+    this.unavailableTargets.set(runId, controlRevision)
     for (const context of this.executions) {
       if (context.execution.runId === runId && context.execution.controlRevision === controlRevision) {
         context.controller.abort(new BrowserRunStoreError('execution-context-expired'))
@@ -213,7 +227,7 @@ export class BrowserRunStore {
     return this.exclusive(async () => {
       const latest = this.require(runId)
       if (latest.task === undefined || latest.controlRevision !== controlRevision || !['queued', 'running'].includes(latest.state)) return undefined
-      return this.save({ ...latest, state: 'paused', pauseReason: 'browser-disconnected',
+      return this.save({ ...latest, state: 'paused', pauseReason: reason,
         controlRevision: asControlRevision(nextControlRevision(latest.controlRevision, 'pause')) })
     })
   }
@@ -271,7 +285,7 @@ export class BrowserRunStore {
   }
 
   private executionRun(runId: RunId, controlRevision: number, pending: 'all' | 'managed' | 'none' = 'none'): BrowserRunRecord {
-    if (this.disconnectedTargets.get(runId) === controlRevision) throw new BrowserRunStoreError('execution-context-expired')
+    if (this.unavailableTargets.get(runId) === controlRevision) throw new BrowserRunStoreError('execution-context-expired')
     this.assertOpen()
     if (this.writeFaulted) throw new BrowserRunStoreError('storage-unavailable')
     const run = this.require(runId)
@@ -448,7 +462,7 @@ export class BrowserRunStore {
   private async persist(run: BrowserRunRecord): Promise<void> {
     try {
       await this.domain.table('runs').put(run.runId, run)
-      if (this.disconnectedTargets.get(run.runId) !== run.controlRevision) this.disconnectedTargets.delete(run.runId)
+      if (this.unavailableTargets.get(run.runId) !== run.controlRevision) this.unavailableTargets.delete(run.runId)
       this.invalidateExecutions()
       for (const listener of this.listeners) { try { listener(snapshot(run)) } catch { /* observers cannot undo committed state */ } }
     }

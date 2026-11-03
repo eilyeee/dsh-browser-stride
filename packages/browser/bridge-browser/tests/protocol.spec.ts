@@ -63,6 +63,16 @@ describe('parseBridgeFrame', () => {
     expect(frame).toEqual({ t: 'hello', token: 'abc123', caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
   })
 
+  it('keeps target-loss capability optional on wire v4 and rejects malformed declarations', () => {
+    for (const taskTargetLoss of [undefined, false, true]) {
+      const frame = { t: 'hello.ok', caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60, taskTargetLoss } }
+      expect(parseBridgeFrame(JSON.stringify(frame))).toEqual(JSON.parse(JSON.stringify(frame)))
+    }
+    for (const taskTargetLoss of [null, 'true', 1, {}]) {
+      expect(parseBridgeFrame(JSON.stringify({ t: 'hello.ok', caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60, taskTargetLoss } }))).toBeUndefined()
+    }
+  })
+
   it('rejects hello with wrong caps shape', () => {
     expect(parseBridgeFrame(JSON.stringify({ t: 'hello', token: 'x', caps: { textOnly: false, snapshotMaxChars: 500, maxInteractiveItems: 10 } }))).toBeUndefined()
     expect(parseBridgeFrame(JSON.stringify({ t: 'hello', token: 'x', caps: { textOnly: true } }))).toBeUndefined()

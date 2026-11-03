@@ -46,6 +46,9 @@ export const BRIDGE_TASK_START_METHOD = 'bridge.browserTasks.start'
 export const BRIDGE_TASK_PAGE_PREPARE_METHOD = 'bridge.browserTasks.preparePage'
 export const BRIDGE_TASK_PAGE_CANCEL_METHOD = 'bridge.browserTasks.cancelPage'
 export const BRIDGE_TASK_APPROVAL_METHOD = 'bridge.browserTasks.approval'
+/** Background-owned revocation of one native task pin; never grants execution. */
+export const BRIDGE_TASK_TARGET_LOST_METHOD = 'bridge.browserTasks.targetLost'
+export interface BrowserTaskTargetLoss { runId: string; sessionId: string; controlRevision: number; targetBinding: string }
 export const BROWSER_RUN_LIST_LIMIT = 20
 export const BROWSER_RUN_STATES = ['queued', 'running', 'blocked', 'paused', 'stopping', 'stopped', 'completed', 'failed'] as const
 export type PanelRunControl = 'pause' | 'stop'
@@ -58,7 +61,7 @@ export interface BrowserRunSummary {
   /** Optional capability: absent on older compatible Hosts. */
   canRetarget?: boolean
   /** Optional Host-recorded reason; never supplied by a page or model. */
-  pauseReason?: 'browser-disconnected'
+  pauseReason?: 'browser-disconnected' | 'page-unavailable'
   runId: string
   sessionId: string
   state: typeof BROWSER_RUN_STATES[number]
@@ -164,7 +167,7 @@ export type RespondResult =
   | { ok: true; value?: unknown }
   | { ok: false; error: { code: string; message: string; details: Record<string, unknown> } }
 
-/** Capabilities negotiated in `hello`/`hello.ok`. The extension performs its own actions; these bounds shape page snapshots. */
+/** Snapshot bounds and optional coordination features negotiated in `hello`/`hello.ok`. */
 export interface BridgeCaps {
   /** The extension renders page state as text only (no screenshots). */
   textOnly: true
@@ -172,6 +175,8 @@ export interface BridgeCaps {
   snapshotMaxChars: number
   /** Upper bound on interactive inventory items per snapshot (plugin config). */
   maxInteractiveItems: number
+  /** Both peers support background-owned task-target revocation on this connection. */
+  taskTargetLoss?: boolean
 }
 
 /** Frames sent by the extension to the bridge plugin. */
@@ -358,6 +363,7 @@ function isCaps(value: unknown): value is BridgeCaps {
     && Number.isSafeInteger(caps.snapshotMaxChars)
     && caps.snapshotMaxChars >= MIN_SNAPSHOT_MAX_CHARS
     && typeof caps.maxInteractiveItems === 'number' && Number.isSafeInteger(caps.maxInteractiveItems) && caps.maxInteractiveItems > 0
+    && (caps.taskTargetLoss === undefined || typeof caps.taskTargetLoss === 'boolean')
 }
 
 function isToolError(value: unknown): value is ToolError {

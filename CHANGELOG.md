@@ -9,6 +9,14 @@ no release version has been assigned yet.
 
 ### Fixed
 
+- Losing a managed task's page control or native binding now pauses its exact
+  control revision and cancels its Agent while keeping the confirmed browser
+  connection. Background-owned revocation also fences a pin lost before startup
+  commits; stale pins cannot interrupt a fresh handoff. The optional wire-v4
+  capability is negotiated by both peers, and older panels receive generic
+  paused metadata. Unconfirmed notifications close only their original owner.
+- Connection loss during a paused task's handoff also fences the reserved future
+  revision before `running` is saved. No model activity may start in that gap.
 - Tasks whose cumulative time, model-request or browser-call limit is already
   exhausted cannot start or resume, including native page handoff. The Host
   refuses activation before attaching a target, and the panel keeps stop

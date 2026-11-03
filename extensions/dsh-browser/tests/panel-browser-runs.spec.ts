@@ -23,6 +23,17 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => { root.unmount() }); vi.useRealTimers(); vi.restoreAllMocks() })
 
 describe('browser task panel boundaries', () => {
+  it.each(['en', 'zh'] as const)('explains a native target-loss pause without claiming reconnection or authorization resumes it in %s', async locale => {
+    const paused = { ...item('session-a', 'paused'), pauseReason: 'page-unavailable' as const, canRetarget: true,
+      controls: ['stop' as const], task: { goal: 'Synthetic task', activeMs: 1, modelRequests: 1, toolCalls: 1, outcome: 'pending' as const, canStart: false } }
+    const rpc = vi.fn(async () => list(paused)), copy = PANEL_COPY[locale].runs
+    await act(async () => { root.render(createElement(BrowserRuns, { api: { rpc: rpc as PanelApi['rpc'], retargetRun: vi.fn() },
+      sessionId: 'session-a', connected: true, targetRevision: 4, copy })) })
+    expect(document.body.textContent).toContain(copy.targetLostHelp)
+    expect(document.body.textContent).not.toContain(copy.disconnectedHelp)
+    expect(parseBrowserRuns(list(paused), 'session-a').items[0]?.pauseReason).toBe('page-unavailable')
+  })
+
   it.each((['activeMs', 'modelRequests', 'toolCalls'] as const).flatMap(counter =>
     (['en', 'zh'] as const).map(locale => ({ counter, locale }))))(
     'keeps stop available without advertising exhausted $counter continuation in $locale', async ({ counter, locale }) => {

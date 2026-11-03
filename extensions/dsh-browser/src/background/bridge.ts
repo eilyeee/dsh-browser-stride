@@ -158,7 +158,7 @@ export class BridgeClient {
 
       // Authenticate: hello must be accepted before any other traffic.
       const presentedToken = this.token
-      const offeredCaps: BridgeCaps = { textOnly: true, snapshotMaxChars: DEFAULT_SNAPSHOT_MAX_CHARS, maxInteractiveItems: 60 }
+      const offeredCaps: BridgeCaps = { textOnly: true, snapshotMaxChars: DEFAULT_SNAPSHOT_MAX_CHARS, maxInteractiveItems: 60, taskTargetLoss: true }
       socket.send(JSON.stringify({
         t: 'hello',
         protocolVersion: BRIDGE_PROTOCOL_VERSION,

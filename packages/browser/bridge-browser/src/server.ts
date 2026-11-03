@@ -24,7 +24,7 @@ import { WebSocket, WebSocketServer } from 'ws'
 import { isRecord, type BrowserHostApi } from './host-api.ts'
 import { canonicalize, makeActionId, asRunId } from './contracts/ids.ts'
 import { z } from 'zod'
-import { BRIDGE_TASK_START_METHOD, BRIDGE_TASK_APPROVAL_METHOD, BRIDGE_TASK_PAGE_PREPARE_METHOD, BRIDGE_TASK_PAGE_CANCEL_METHOD, BRIDGE_RUN_LIST_METHOD, taskPageUrl } from './protocol.ts'
+import { BRIDGE_TASK_START_METHOD, BRIDGE_TASK_APPROVAL_METHOD, BRIDGE_TASK_PAGE_PREPARE_METHOD, BRIDGE_TASK_PAGE_CANCEL_METHOD, BRIDGE_TASK_TARGET_LOST_METHOD, BRIDGE_RUN_LIST_METHOD, taskPageUrl, type BrowserTaskTargetLoss } from './protocol.ts'
 import { TaskPageAdmissions, TaskPageAdmissionError } from './task-page-admissions.ts'
 import type { BrowserTaskRuntime } from './task-runtime.ts'
 import { toolCommandMaterial } from './tool-identity.ts'
@@ -125,7 +125,7 @@ export interface BridgeServerDeps {
   dispatches?: Pick<BrowserDispatchLedger, 'prepare' | 'markSent' | 'settle' | 'get'>
   /** Trusted Host async execution scopes; never caller/model-supplied ids. */
   runs?: Pick<BrowserRunStore, 'executionFor' | 'assertDispatchAuthority' | 'retargetPaused' | 'startTask'> & RunPanelStore
-    & Partial<Pick<BrowserRunStore, 'pauseDisconnectedTask'>>
+    & Partial<Pick<BrowserRunStore, 'pauseDisconnectedTask' | 'pauseLostTargetTask'>>
   tasks?: Pick<BrowserTaskRuntime, 'selectTarget' | 'approval'> & Partial<Pick<BrowserTaskRuntime, 'validateTarget'>>
   /**
    * Test seam: force the remote address seen by the privilege gate. The
@@ -164,6 +164,13 @@ interface ReadyConnection {
   /** Ordered requests belong to this connection, never to its replacement. */
   orderedSessionRpcs: Map<string, Promise<void>>
   confirmedTools: Set<string>
+  /** Revocation can arrive before its matching native startup commits. */
+  lostRunTargets: Set<string>
+  taskTargetLoss: boolean
+}
+
+function targetLossKey(target: BrowserTaskTargetLoss): string {
+  return JSON.stringify([target.runId, target.sessionId, target.controlRevision, target.targetBinding])
 }
 
 function sendFrame(ws: WebSocket, frame: BridgeFrame): void {
@@ -282,6 +289,7 @@ export class BridgeServer {
   }
 
   private bindRunTarget(execution: BrowserRunExecution, conn: ReadyConnection, id: string): boolean {
+    if (conn.lostRunTargets.has(targetLossKey({ ...execution, targetBinding: id }))) return false
     const previous = this.runTargets.get(execution.runId)
     if (previous !== undefined && previous.controlRevision >= execution.controlRevision) {
       return previous.controlRevision === execution.controlRevision && previous.sessionId === execution.sessionId
@@ -488,6 +496,7 @@ export class BridgeServer {
           textOnly: true,
           snapshotMaxChars: Math.min(this.deps.caps.snapshotMaxChars, frame.caps.snapshotMaxChars),
           maxInteractiveItems: Math.min(this.deps.caps.maxInteractiveItems, frame.caps.maxInteractiveItems),
+          ...(frame.caps.taskTargetLoss === true && this.deps.runs?.pauseLostTargetTask !== undefined ? { taskTargetLoss: true } : {}),
         }
         authenticating = true
         // Origin headers are not credentials: a local process can forge them.
@@ -543,7 +552,7 @@ export class BridgeServer {
         }
       }
     })()
-    this.current = { connectionId: randomUUID(), ws, remoteAddress, abort, pump, ping, orderedSessionRpcs: new Map(), confirmedTools: new Set(),
+    this.current = { connectionId: randomUUID(), ws, remoteAddress, abort, pump, ping, orderedSessionRpcs: new Map(), confirmedTools: new Set(), lostRunTargets: new Set(), taskTargetLoss: caps.taskTargetLoss === true,
       ...(installationId === undefined ? {} : { installationId }) }
     sendFrame(ws, { t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps, ...(credential === undefined ? {} : { credential }) })
     ws.once('close', () => {
@@ -606,6 +615,40 @@ export class BridgeServer {
     // An ordered call may have waited while another connection replaced its
     // owner. It must never borrow the new connection's identity or signal.
     if (this.current !== conn || conn.abort.signal.aborted) return
+    if (frame.method === BRIDGE_TASK_TARGET_LOST_METHOD) {
+      try {
+        const id = z.string().min(1).max(200).refine(value => value.trim() === value)
+        const payload = z.strictObject({ runId: id, sessionId: id, targetBinding: id,
+          controlRevision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER) }).parse(frame.payload)
+        const runs = this.deps.runs
+        if (!conn.taskTargetLoss || runs?.pauseLostTargetTask === undefined) throw new Error('unavailable')
+        const run = runs.get(asRunId(payload.runId))
+        const eligible = run?.task !== undefined && run.sessionId === payload.sessionId
+          && ['queued', 'running', 'paused'].includes(run.state)
+          && (run.controlRevision === payload.controlRevision || (run.state === 'paused' && run.controlRevision + 2 === payload.controlRevision))
+        if (!eligible) {
+          sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true, result: { accepted: false } })
+          return
+        }
+        const key = targetLossKey(payload)
+        if (!conn.lostRunTargets.has(key) && conn.lostRunTargets.size >= 5000) {
+          // An unrecorded revocation must not leave this connection executing.
+          this.replaceConnection()
+          return
+        }
+        conn.lostRunTargets.add(key)
+        const target = this.runTargets.get(payload.runId)
+        if (target?.connectionId === conn.connectionId && target.sessionId === payload.sessionId
+          && target.controlRevision === payload.controlRevision && target.id === payload.targetBinding) {
+          await this.track(runs.pauseLostTargetTask(asRunId(payload.runId), payload.controlRevision))
+        }
+        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true, result: { accepted: true } })
+      } catch {
+        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false,
+          error: { code: 'target-loss-unconfirmed', message: 'Task target revocation could not be confirmed.' } })
+      }
+      return
+    }
     if (frame.method === BRIDGE_TASK_PAGE_PREPARE_METHOD || frame.method === BRIDGE_TASK_PAGE_CANCEL_METHOD) {
       try {
         const id = z.string().min(1).max(200).refine(value => value.trim() === value)
@@ -664,6 +707,7 @@ export class BridgeServer {
         if (run === undefined || run.sessionId !== payload.sessionId) throw new Error('foreign run')
         if (newPage && run.state !== 'queued') throw new TaskPageAdmissionError(true)
         const attachTarget = (revision: number) => {
+          if (conn.lostRunTargets.has(targetLossKey({ ...payload, controlRevision: revision }))) throw new Error('target revoked')
           targetMayHaveChanged = true
           if (this.current !== conn || conn.abort.signal.aborted) throw new Error('connection changed')
           const previous = this.runTargets.get(run.runId)
@@ -727,6 +771,10 @@ export class BridgeServer {
       try {
         const value = await browserRunPanelRpc(this.deps.runs, frame.method, frame.payload, conn.abort.signal,
           this.deps.tasks?.validateTarget === undefined ? undefined : run => this.taskPages.available(run))
+        if (!conn.taskTargetLoss) {
+          // Older panels only understand the original pause-reason values.
+          for (const item of 'items' in value ? value.items : [value.item]) if (item.pauseReason === 'page-unavailable') delete item.pauseReason
+        }
         sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true,
           result: { type: 'server-response', rpcId: frame.id, result: { ok: true, value } } })
       } catch (error) {

@@ -113,6 +113,17 @@ describe('durable Host browser run records', () => {
     await expect(store.withExecution(queued.runId, 0, async () => {})).rejects.toThrow()
     expect(await paused).toMatchObject({ state: 'paused', pauseReason: 'browser-disconnected' })
   })
+  it.each(['pauseDisconnectedTask', 'pauseLostTargetTask'] as const)('fences the pending continuation revision on %s before running is saved', async method => {
+    const { store } = await setup()
+    const queued = await store.create({ ...input(), task: newBrowserTask('Synthetic task') })
+    const run = await store.startTask(queued.runId, queued.version, () => {})
+    const paused = await store.control(run.runId, run.version, 'pause')
+    let lost: ReturnType<typeof store.pauseDisconnectedTask> | undefined
+    const continued = await store.retargetPaused(run.runId, paused.version, paused.controlRevision,
+      revision => { lost = store[method](run.runId, revision) })
+    await expect(store.withExecution(run.runId, continued.controlRevision, async () => {})).rejects.toThrow()
+    expect(await lost).toMatchObject({ state: 'paused', controlRevision: 4, pauseReason: method === 'pauseDisconnectedTask' ? 'browser-disconnected' : 'page-unavailable' })
+  })
   it('does not turn disconnect into continuation authority or modify unrelated records', async () => {
     const { store, open } = await setup()
     const legacy = await running(store)

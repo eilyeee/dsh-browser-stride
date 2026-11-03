@@ -42,6 +42,7 @@ import {
   BRIDGE_TASK_START_METHOD,
   BRIDGE_TASK_PAGE_PREPARE_METHOD,
   BRIDGE_TASK_PAGE_CANCEL_METHOD,
+  BRIDGE_TASK_TARGET_LOST_METHOD,
   BRIDGE_TASK_APPROVAL_METHOD,
   isPageBrowserTool,
   isRunTabMutation,
@@ -681,6 +682,23 @@ function cancelPendingApprovals(sessionId?: string): void {
 function revokeStaleTargetCalls(): void {
   for (const call of activeToolCalls.values()) {
     if (!call.committed && call.targetLease?.current() === false) call.controller.abort()
+  }
+  notifyLostTaskTargets()
+}
+
+function notifyLostTaskTargets(): void {
+  const lost = runTargets.takeLost()
+  const client = bridge, originalRpc = rpc
+  if (client?.connected !== true || originalRpc === null || caps?.taskTargetLoss !== true) return
+  for (const target of lost) {
+    const unconfirmed = () => {
+      // Never let an old generation's failure stop its successor. Closing an
+      // unconfirmed owner lets the Host's connection-loss fence cancel work.
+      if (target.owned() && bridge === client && rpc === originalRpc && client.connected) client.stop()
+    }
+    void originalRpc.request(BRIDGE_TASK_TARGET_LOST_METHOD, target.payload, { timeoutMs: 2000 }).then(result => {
+      if (typeof result !== 'object' || result === null || typeof (result as { accepted?: unknown }).accepted !== 'boolean') unconfirmed()
+    }, unconfirmed)
   }
 }
 
@@ -1966,7 +1984,7 @@ chrome.runtime.onConnect.addListener((port) => {
       }
       case 'rpc': {
         const rpcMsg = message as { id: string; method: string; payload?: unknown }
-        if ([BRIDGE_RUN_RETARGET_METHOD, BRIDGE_TASK_START_METHOD, BRIDGE_TASK_APPROVAL_METHOD, BRIDGE_TASK_PAGE_PREPARE_METHOD, BRIDGE_TASK_PAGE_CANCEL_METHOD].includes(rpcMsg.method)) {
+        if ([BRIDGE_RUN_RETARGET_METHOD, BRIDGE_TASK_START_METHOD, BRIDGE_TASK_APPROVAL_METHOD, BRIDGE_TASK_PAGE_PREPARE_METHOD, BRIDGE_TASK_PAGE_CANCEL_METHOD, BRIDGE_TASK_TARGET_LOST_METHOD].includes(rpcMsg.method)) {
           try { port.postMessage({ type: 'rpc.result', id: rpcMsg.id, ok: false,
             error: { code: 'forbidden', message: 'Use the selected-page task control.' } }) } catch { /* panel closed */ }
           break

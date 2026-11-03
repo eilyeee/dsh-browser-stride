@@ -13,6 +13,36 @@ function fixture(capacity = 5000) {
   return { targets, runs, capture, select: (tab: Partial<ToolTargetIdentity>) => { selected = { ...selected, ...tab } } }
 }
 describe('run target pins', () => {
+  it('reports a lost prepared pin once and never restores it or its notification owner', () => {
+    const { runs, targets, capture } = fixture()
+    const prepared = runs.prepare(scope, 'session-a', capture())!
+    targets.forgetTab(1)
+    const [lost] = runs.takeLost()
+    expect(lost?.payload).toEqual({ runId: scope.runId, sessionId: 'session-a', controlRevision: 0, targetBinding: prepared.id })
+    expect(lost?.owned()).toBe(true)
+    expect(runs.takeLost()).toEqual([])
+    expect(prepared.current()).toBe(false)
+    expect(runs.join(scope, 'session-a', capture(), prepared.id)).toBeUndefined()
+    runs.discardPrepared(prepared.id)
+    expect(lost?.owned()).toBe(false)
+  })
+  it('keeps accepted same-binding navigation live, but reports a rebind and fences the old connection owner', () => {
+    const { runs, targets, capture, select } = fixture()
+    const prepared = runs.prepare(scope, 'session-a', capture())!
+    const joined = runs.join(scope, 'session-a', capture(), prepared.id)!
+    expect(joined.accept()).toBe(true)
+    targets.invalidateDocument(1); select({ url: 'https://example.test/next' })
+    expect(runs.takeLost()).toEqual([])
+    expect(joined.current()).toBe(true)
+    targets.invalidateSession('session-a')
+    const [lost] = runs.takeLost()
+    expect(lost?.payload.targetBinding).toBe(prepared.id)
+    expect(joined.current()).toBe(false)
+    runs.revokeAll()
+    expect(lost?.owned()).toBe(false)
+    expect(runs.takeLost()).toEqual([])
+  })
+
   it('refuses duplicate preparations and discards only an unused pin', () => {
     const { runs, capture } = fixture()
     const prepared = runs.prepare(scope, 'session-a', capture())!

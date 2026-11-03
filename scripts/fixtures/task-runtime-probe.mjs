@@ -16,11 +16,11 @@ export function apply(ctx, config) {
     }
     const result = await next()
     // Fault injection only: hold one completed read so the real browser can
-    // disconnect between actions, before any synthetic-site write is needed.
-    if (expected?.disconnectOnce === true && !heldSnapshot && String(exec.agent?.id) === expected.sessionId
+    // lose its connection or page before any synthetic-site write is needed.
+    if ((expected?.disconnectOnce === true || expected?.targetLossOnce === true) && !heldSnapshot && String(exec.agent?.id) === expected.sessionId
       && exec.name === 'browser_snapshot' && !result.isError && exec.signal !== undefined) {
       heldSnapshot = true
-      await writeFile(`${config.result}.disconnect-ready`, 'ready', { mode: 0o600 })
+      await writeFile(`${config.result}.${expected.targetLossOnce ? 'target-loss-ready' : 'disconnect-ready'}`, 'ready', { mode: 0o600 })
       await new Promise(resolve => {
         if (exec.signal.aborted) resolve()
         else exec.signal.addEventListener('abort', resolve, { once: true })
