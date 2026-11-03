@@ -3,6 +3,7 @@ import { createServer, type Server } from 'node:http'
 import { readFile, rename, rm, writeFile } from 'node:fs/promises'
 import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { setTimeout as delay } from 'node:timers/promises'
 import WebSocket from 'ws'
 import { BridgeServer, BridgeToolError, isLoopbackAddress, messageToText, payloadCode, payloadMessage } from '../src/server.ts'
 import { isPageBrowserTool, BRIDGE_CONFIRM_TOOL_METHOD, BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, BRIDGE_SESSION_PURGE_METHOD, BRIDGE_RUN_LIST_METHOD, BRIDGE_RUN_CONTROL_METHOD, BRIDGE_RUN_RETARGET_METHOD, BRIDGE_TASK_START_METHOD, BRIDGE_TASK_APPROVAL_METHOD, type BridgeFrame } from '../src/protocol.ts'
@@ -101,16 +102,17 @@ function send(ws: WebSocket, frame: BridgeFrame): void {
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
-  const start = Date.now()
+  const start = performance.now()
   while (!predicate()) {
-    if (Date.now() - start > timeoutMs) throw new Error('waitFor timed out')
-    await new Promise((resolve) => { setTimeout(resolve, 10) })
+    if (performance.now() - start > timeoutMs) throw new Error('waitFor timed out')
+    await delay(10)
   }
 }
 
 const harnesses: Harness[] = []
 const storageFixtures: Awaited<ReturnType<typeof createRunStorage>>[] = []
 afterEach(async () => {
+  vi.useRealTimers()
   for (const h of harnesses.splice(0)) {
     await h.bridge.close()
     await new Promise<void>((resolve) => { h.server.close(() => resolve()) })
@@ -161,6 +163,9 @@ describe('recorded tool dispatch', () => {
       tasks: { selectTarget: vi.fn(), approval } })
     const queued = await h.storage.store.create({ sessionId: asSessionId('approval-cleanup-task'), requiredCriteriaIds: ['task-goal'], task: newBrowserTask('Synthetic goal') })
     const run = await h.storage.store.transition(queued.runId, queued.version, 'running')
+    // This case tests expiry after approval began, not time spent on durable
+    // admission. Advance the deadline only after the real socket accepted it.
+    if (reason === 'expired') vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
     await h.storage.store.withExecution(run.runId, 0, async () => {
       const controller = new AbortController()
       const result = h.bridge.requestTool('browser_snapshot', {}, controller.signal).catch(error => error)
@@ -169,6 +174,7 @@ describe('recorded tool dispatch', () => {
       send(h.ws, { t: 'rpc', id: 'wait-for-read', method: BRIDGE_TASK_APPROVAL_METHOD, payload: { requestId: call.id, waiting: true } })
       await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === 'wait-for-read'))
       expect(approval).toHaveBeenCalledExactlyOnceWith(run.runId, call.id, true)
+      if (reason === 'expired') await vi.advanceTimersByTimeAsync(500)
       if (reason === 'cancelled') controller.abort()
       if (reason === 'connection-closed') { h.ws.close(); await h.done }
       expect(await result).toBeInstanceOf(BridgeToolError)
