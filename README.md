@@ -62,7 +62,7 @@ Native CDP input, webpage uploads/downloads, reliable run recovery and a shared 
 
 For canvas design pages, `browser_screenshot` attaches the selected group page’s visible image to DSH; `browser_click_at` selects a point from that screenshot, then `browser_snapshot` can read the page’s layer inspector. These clicks are synthetic and do not expose hidden layer metadata. See the [visual-tools instructions](extensions/dsh-browser/README.md#canvas-and-design-pages). Firefox keeps its existing text path.
 
-`browser_read_design_styles` organizes explicitly labelled properties with source evidence, missing fields and conflicts. The default model has passed separate background/text reads on local synthetic pages; real Lanhu inspector compatibility needs separate acceptance. See [supported formats and limits](packages/browser/bridge-browser/README.md#reading-design-style-fields).
+`browser_read_design_styles` organizes explicitly labelled properties with source evidence, missing fields and conflicts. The default model has passed separate background/text reads on local synthetic pages and the inspected Lanhu interface in regular Chrome after enlarging its view; other layouts need separate acceptance. See [supported formats and limits](packages/browser/bridge-browser/README.md#reading-design-style-fields).
 
 Build the Bridge and extension from the same checkout: click, type and select now require an `elementRef` from the latest observation. Earlier bare-index clients are incompatible. A delta only provides references for controls it shows; take a full snapshot when a target is missing. References do not yet bind a task run, account or tenant.
 

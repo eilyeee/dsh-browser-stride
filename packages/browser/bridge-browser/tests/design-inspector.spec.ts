@@ -15,7 +15,7 @@ describe('visible design inspector parsing', () => {
   it('reads bilingual adjacent labels and keeps font names separate from explicit font weight', () => {
     const report = parseDesignInspector('图层名称\n文字\n字体：Synthetic-Medium\n字号\n18 px\n字重：400\n行高: 24px\n宽度: 126px\n高度: 24px\n颜色：rgba(255, 255, 255, 1)')
     expect(report.layer?.value).toBe('文字')
-    expect(report.properties).toMatchObject({ fontFamily: { value: 'Synthetic-Medium' }, fontSize: { value: '18px', evidence: ['字号\n18 px'] },
+    expect(report.properties).toMatchObject({ fontFace: { value: 'Synthetic-Medium' }, fontSize: { value: '18px', evidence: ['字号\n18 px'] },
       fontWeight: { value: '400' }, lineHeight: { value: '24px' }, color: { value: 'rgba(255, 255, 255, 1)' }, width: { value: '126px' } })
     const namedOnly = parseDesignInspector('Layer: Text Medium\nfont-family: Font-Bold\nfont-size: 18px')
     expect(namedOnly.properties.fontWeight).toBeUndefined()
@@ -84,6 +84,45 @@ describe('visible design inspector parsing', () => {
     const report = parseDesignInspector('图层：文字\n宽度：10dp\n字号：1.5rem\n字间距：-0.5px\n不透明度：80%\n字重：bold\n行高：normal')
     expect(report.properties).toMatchObject({ width: { value: '10dp' }, fontSize: { value: '1.5rem' }, letterSpacing: { value: '-0.5px' },
       opacity: { value: '80%' }, fontWeight: { value: 'bold' }, lineHeight: { value: 'normal' } })
+  })
+
+  it('reads an inspector background shorthand, four corners and color swatch with alpha', () => {
+    const report = parseDesignInspector('样式信息\n图层\nSynthetic card\n不透明度\n90%\n圆角\n12px 12px 12px 12px\n颜色\n#336699 100%\n代码\nwidth: 318px;\nheight: 54px;\nbackground: #336699;\nborder-radius: 12px;')
+    expect(report.status).toBe('parsed')
+    expect(report.properties).toMatchObject({ fill: { value: '#336699' }, color: { value: '#336699' },
+      borderRadius: { value: '12px', evidence: ['圆角\n12px 12px 12px 12px', 'border-radius: 12px;'] }, opacity: { value: '90%' } })
+    expect(report.conflicts).toEqual({})
+  })
+
+  it.each([
+    ['1px 2px 1px 2px', '1px 2px'], ['1px 2px 3px 2px', '1px 2px 3px'],
+    ['1px 2px 3px 4px', '1px 2px 3px 4px'], ['12 px 12 px 12 px 12 px', '12px'],
+  ])('normalizes equivalent corner shorthand %s without losing evidence', (input, expected) => {
+    expect(parseDesignInspector(`圆角: ${input}`).properties.borderRadius).toEqual({ value: expected, evidence: [`圆角: ${input}`] })
+  })
+
+  it('keeps swatch alpha separate from layer opacity and refuses unsupported backgrounds or corners', () => {
+    const report = parseDesignInspector('图层: Synthetic card\n颜色: #369 25%\n不透明度: 80%\nbackground: linear-gradient(red, blue);\n圆角: 1px 2px 3px 4px 5px')
+    expect(report.properties.color?.value).toBe('rgba(51, 102, 153, 0.25)')
+    expect(report.properties.opacity?.value).toBe('80%')
+    expect(report.properties.fill).toBeUndefined()
+    expect(report.properties.borderRadius).toBeUndefined()
+    for (const input of ['#336699 101%', '#336699 -1%', '#11223344 50%', '#123456 12% !important']) {
+      expect(parseDesignInspector(`颜色: ${input}`).properties.color).toBeUndefined()
+    }
+    expect(parseDesignInspector('圆角: 1px / 2px').properties.borderRadius).toBeUndefined()
+  })
+
+  it('separates the inspector font face from CSS family and reads a labelled named-color row', () => {
+    const report = parseDesignInspector('图层\nSynthetic text\n字体\nSynthetic-Medium\n字重\n400\n颜色\n颜色样式\nSynthetic light\n#FFFFFF 100%\nfont-family: Synthetic, sans-serif;\nfont-weight: 400;\nfont-size: 17px;\ncolor: #ffffff;')
+    expect(report.status).toBe('parsed')
+    expect(report.properties.fontFace?.value).toBe('Synthetic-Medium')
+    expect(report.properties.fontFamily?.value).toBe('Synthetic, sans-serif')
+    expect(report.properties.fontWeight?.value).toBe('400')
+    expect(report.properties.color).toEqual({ value: '#ffffff', evidence: ['颜色\n颜色样式\nSynthetic light\n#FFFFFF 100%', 'color: #ffffff;'] })
+    expect(report.conflicts).toEqual({})
+    const invalid = parseDesignInspector('颜色\n颜色样式\n字重\n400\n#ffffff 100%')
+    expect(invalid.properties.color).toBeUndefined()
   })
 
   it('recognizes no fields in an unrelated page or a failed selector message', () => {

@@ -23,6 +23,18 @@ no release version has been assigned yet.
 
 ### Fixed
 
+- Inspector style reads recognize plain-color `background`, one-to-four corner
+  radii and HEX swatches with alpha percentages. Named-color rows keep their
+  original evidence. Inspector `fontFace` and CSS `fontFamily` remain distinct,
+  preventing false conflicts without inferring font weight from a name.
+  The existing default model completed both layer reads on the inspected Lanhu
+  page in regular Chrome after enlarging its view; other layouts remain unverified.
+  PTC guidance passes an empty object to tools with no arguments. Benchmark
+  suite 9 records the model-visible report and guidance changes.
+- Design-to-code guidance checks selector matches and rendered spacing, treats
+  unmeasured margins/padding/gaps as unknown and preserves existing spacing
+  unless observed evidence supports a change. Declared CSS or an unverified
+  fidelity percentage cannot establish a correct layout.
 - Approval timeouts and unavailable panels stop further browser requests from
   that Agent until a new turn, without affecting other conversations or treating
   ordinary page/transport timeouts as approval failures. Shared model guidance

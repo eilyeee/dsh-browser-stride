@@ -62,7 +62,7 @@ Host 管理员令牌默认保存在 `$DSH_HOME/ext-bridge-token`，未设置 `DS
 
 对于画布设计页，`browser_screenshot` 会把选定分组页的可见图片传入 DSH；`browser_click_at` 可点击截图位置，再用 `browser_snapshot` 读取页面显示的图层属性。这是合成点击，不能生成页面未提供的图层元数据。使用方法见[画布与设计稿](extensions/dsh-browser/README.zh.md#画布与设计稿)。Firefox 保留原有文本路径。
 
-`browser_read_design_styles` 可进一步整理明确标注的属性，并保留原文依据、缺项和冲突。已通过默认模型加本地合成页面的背景、文字分层读取；真实蓝湖面板兼容性需单独验收。支持格式与限制见[样式字段说明](packages/browser/bridge-browser/README.zh.md#读取设计稿样式字段)。
+`browser_read_design_styles` 可进一步整理明确标注的属性，并保留原文依据、缺项和冲突。已通过默认模型加本地合成页面的背景、文字分层读取，也在放大视图后验证了常用 Chrome 中所测蓝湖面板；其他布局仍需分别验收。支持格式与限制见[样式字段说明](packages/browser/bridge-browser/README.zh.md#读取设计稿样式字段)。
 
 Bridge 和扩展需要从同一次检出构建：点击、输入和单选现在要求最近一次观察给出的 `elementRef`，与旧版裸编号接口不兼容。增量快照只提供本次展示控件的引用；目标未出现时需重新获取完整快照。目前引用还没有绑定任务运行、账号或租户。
 

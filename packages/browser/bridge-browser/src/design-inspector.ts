@@ -1,7 +1,7 @@
 /** Conservative parsing of readable inspector labels; no design-file metadata API. */
 export const DESIGN_STYLE_KEYS = [
   'width', 'height', 'fill', 'color', 'borderRadius', 'borderWidth', 'borderColor',
-  'fontFamily', 'fontSize', 'fontWeight', 'lineHeight', 'letterSpacing', 'opacity',
+  'fontFamily', 'fontFace', 'fontSize', 'fontWeight', 'lineHeight', 'letterSpacing', 'opacity',
 ] as const
 export type DesignStyleKey = typeof DESIGN_STYLE_KEYS[number]
 type Field = DesignStyleKey | 'layer'
@@ -20,12 +20,13 @@ export interface DesignInspectorReport {
 const LABELS: Record<Field, readonly string[]> = {
   layer: ['layer', 'layer name', '图层', '图层名称'],
   width: ['width', '宽度'], height: ['height', '高度'],
-  fill: ['fill', 'fill color', 'background-color', '填充', '填充色', '填充颜色', '背景色', '背景颜色'],
+  fill: ['fill', 'fill color', 'background', 'background-color', '填充', '填充色', '填充颜色', '背景色', '背景颜色'],
   color: ['color', 'text color', '颜色', '文字颜色', '文本颜色'],
   borderRadius: ['border-radius', 'border radius', 'radius', '圆角', '圆角半径'],
   borderWidth: ['border-width', 'border width', '边框宽度', '描边宽度'],
   borderColor: ['border-color', 'border color', '边框颜色', '描边颜色'],
-  fontFamily: ['font-family', 'font family', '字体', '字体家族'],
+  fontFamily: ['font-family', 'font family', '字体家族'],
+  fontFace: ['font face', '字体', '字体名称'],
   fontSize: ['font-size', 'font size', '字号'],
   fontWeight: ['font-weight', 'font weight', '字重'],
   lineHeight: ['line-height', 'line height', '行高'],
@@ -37,6 +38,17 @@ const cleanLabel = (text: string) => text.trim().toLowerCase().replace(/\s+/g, '
 const dimension = /^(-?(?:\d+(?:\.\d+)?|\.\d+))\s*(px|pt|rem|em|rpx|dp|%)?$/i
 
 function color(value: string): string | undefined {
+  // Inspector swatches often show a HEX color followed by its alpha percent.
+  // Keep that alpha in the color; it is not the layer's separate opacity.
+  const swatch = /^(#[\da-f]{3}|#[\da-f]{6})\s+(\d+(?:\.\d+)?)%$/i.exec(value)
+  if (swatch !== null) {
+    const alpha = Number(swatch[2]) / 100
+    if (alpha > 1) return
+    const hex = swatch[1]!.slice(1).toLowerCase()
+    if (alpha === 1) return `#${hex}`
+    const rgb = hex.length === 3 ? [...hex].map(char => char + char).join('') : hex
+    return `rgba(${[0, 2, 4].map(index => Number.parseInt(rgb.slice(index, index + 2), 16)).join(', ')}, ${alpha})`
+  }
   if (/^#(?:[\da-f]{3}|[\da-f]{4}|[\da-f]{6}|[\da-f]{8})$/i.test(value)) return value.toLowerCase()
   const match = /^(rgb|rgba)\(\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)(?:\s*,\s*(0(?:\.\d+)?|1(?:\.0+)?))?\s*\)$/i.exec(value)
   if (match === null || (match[1]!.toLowerCase() === 'rgba') !== (match[5] !== undefined)
@@ -48,13 +60,22 @@ function normalize(field: Field, input: string): string | undefined {
   const value = field === 'layer' ? input.trim() : input.trim().replace(/;$/, '').trim()
   if (value.length === 0 || value.length > 160) return
   if (field === 'layer') return /[\u0000-\u001f<>]/.test(value) ? undefined : value
-  if (field === 'fontFamily') return /^[\p{L}\p{M}\p{N} _.,'"-]+$/u.test(value) ? value : undefined
+  if (field === 'fontFamily' || field === 'fontFace') return /^[\p{L}\p{M}\p{N} _.,'"-]+$/u.test(value) ? value : undefined
   if (field === 'fill' || field === 'color' || field === 'borderColor') return color(value)
   if (field === 'fontWeight') {
     if (/^(normal|bold)$/i.test(value)) return value.toLowerCase()
     return /^\d+(?:\.\d+)?$/.test(value) && Number(value) >= 1 && Number(value) <= 1000 ? String(Number(value)) : undefined
   }
   if ((field === 'lineHeight' || field === 'letterSpacing') && value.toLowerCase() === 'normal') return 'normal'
+  if (field === 'borderRadius') {
+    const parts = value.replace(/(\d)\s+(px|pt|rem|em|rpx|dp|%)(?=\s|$)/gi, '$1$2').split(/\s+/)
+    if (parts.length > 4) return
+    const lengths = parts.map(part => dimension.exec(part))
+    if (lengths.some(length => length === null || !Number.isFinite(Number(length[1])) || Number(length[1]) < 0)) return
+    const normalized = lengths.map(length => `${Number(length![1])}${length![2]?.toLowerCase() ?? ''}`)
+    const [a, b = a, c = a, d = b] = normalized
+    return a === b && a === c && a === d ? a : a === c && b === d ? `${a} ${b}` : b === d ? `${a} ${b} ${c}` : normalized.join(' ')
+  }
   const match = dimension.exec(value)
   if (match === null || !Number.isFinite(Number(match[1]))) return
   const number = Number(match[1]), unit = match[2]?.toLowerCase() ?? ''
@@ -103,6 +124,16 @@ export function parseDesignInspector(text: string): DesignInspectorReport {
     const label = aliases.get(cleanLabel(line.replace(/[:：]$/, '')))
     const next = lines[index + 1]
     if (label !== undefined) {
+      // Named color-style rows place a style name between the heading and
+      // swatch. Read only this bounded labelled layout, not arbitrary later
+      // colors elsewhere in the page.
+      if (label === 'color' && next === '颜色样式') {
+        const styleName = lines[index + 2], swatch = lines[index + 3]
+        if (styleName !== undefined && styleName.length <= 160 && !aliases.has(cleanLabel(styleName)) && swatch !== undefined) {
+          add(label, swatch, lines.slice(index, index + 4).join('\n'))
+        } else unsupported.add(label)
+        continue
+      }
       if (next === undefined || aliases.has(cleanLabel(next.replace(/[:：].*$/, '')))) unsupported.add(label)
       else add(label, next, `${line}\n${next}`)
     }

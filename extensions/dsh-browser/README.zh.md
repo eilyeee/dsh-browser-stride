@@ -73,7 +73,7 @@ Chrome 可能显示调试提示。视觉连接保留在已授权的分组页上�
 
 运行 `node scripts/smoke-visual.mjs`，可用临时 Host、Chromium 和合成画布验收，不调用模型。检查包括真实图片附件存储、在另一标签页可见时核对受控页像素、背景层和文字层分别回读、引用单次使用和会话隔离、滚动及缩放失效、同页切稿后旧坐标拒绝及新图像和属性核对、原生撤销控制和 worker 重启后的连接清理。设置 `STRIDE_REAL_MODEL=1` 可追加现有默认模型的分层选择和精确数值检查，沿用下文可选的私有输入 `STRIDE_MODEL_PATCH` 和 `STRIDE_MODEL_CREDENTIALS`；该会话最多十次模型请求、二十次浏览器调用。仅使用合成页面，`.stride-private/validation/visual/` 中保留元数据，不保存真实设计稿内容；这不代表 Firefox、Desktop 或真实网站已经验收。
 
-Host 新增的 `browser_read_design_styles` 可把当前可读的属性标签整理成固定字段，并保留原文依据、缺项和冲突。它复用现有页面读取权限；不支持的面板布局仍用快照读取，背景与文字分别处理。已通过默认模型加合成页面的分层读取检查，通用蓝湖面板布局需另验。更新后重启 Host 并重载扩展，文本读取才能保留属性换行。参数、支持格式与限制见 [Bridge 样式字段说明](../../packages/browser/bridge-browser/README.zh.md#读取设计稿样式字段)。
+Host 新增的 `browser_read_design_styles` 可把当前可读的属性标签整理成固定字段，并保留原文依据、缺项和冲突。它复用现有页面读取权限；不支持的面板布局仍用快照读取，背景与文字分别处理。已通过默认模型加合成页面的分层读取检查，并在放大视图后验证了常用 Chrome 的所测蓝湖面板；其他布局需另验。更新后重启 Host 并重载扩展，文本读取才能保留属性换行。参数、支持格式与限制见 [Bridge 样式字段说明](../../packages/browser/bridge-browser/README.zh.md#读取设计稿样式字段)。
 
 ## 自动控制 Chrome 新页面
 
