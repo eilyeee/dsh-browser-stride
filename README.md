@@ -68,6 +68,8 @@ For canvas design pages, `browser_screenshot` attaches the selected group pageâ€
 
 `browser_measure_layout` reads unique DOM boxes, computed spacing and actual aligned gaps, so generated-page checks can distinguish a missing measurement from 0px. It does not measure hidden canvas layers or judge full-page fidelity. Both peers need the optional layout capability; see [parameters and limits](packages/browser/bridge-browser/README.md#measuring-rendered-layout).
 
+`browser_set_design_zoom` can adjust one clearly labelled native zoom select and check its percentage. Failed preparation pauses that Agent's browser calls until a new user turn. Custom menus, including the current Lanhu menu, remain unsupported; see [supported controls and checks](packages/browser/bridge-browser/README.md#preparing-small-design-views).
+
 Build the Bridge and extension from the same checkout: click, type and select now require an `elementRef` from the latest observation. Earlier bare-index clients are incompatible. A delta only provides references for controls it shows; take a full snapshot when a target is missing. References do not yet bind a task run, account or tenant.
 
 Connections require wire protocol version 4. Tool calls carry an explicit legacy or Host-run scope; the command digest includes that scope. After execution admission and any write turn, the extension confirms the original pending request with the same Host connection before entering browser dispatch. Revocation cannot be renewed by a late confirmation. Missing or incompatible versions stop the connection with update guidance. Build and restart the Host Bridge and reload the extension from the same checkout. Existing replay fences remain in place; this does not provide automatic task recovery.

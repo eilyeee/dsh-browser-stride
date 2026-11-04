@@ -11,6 +11,7 @@ const STATE_CHANGING_ACTIONS = new Set([
   'browser_click_at',
   'browser_type',
   'browser_select',
+  'browser_set_design_zoom',
   'browser_press',
   'browser_navigate',
   'browser_open_tab',
@@ -117,6 +118,7 @@ function summarizeAction(call: ToolCall, locale: UiLocale): string {
   const match = /^obs_[a-f0-9-]+:(\d+)$/i.exec(ref)
   const index = match?.[1] ?? (typeof call.args.index === 'number' ? String(call.args.index) : '?')
   switch (call.name) {
+    case 'browser_set_design_zoom': return localized(locale, 'Set the labelled design zoom control to ' + String(call.args.percent) + '%' + frame, '将明确标注的设计缩放控件调整为 ' + String(call.args.percent) + '%' + frame)
     case 'browser_click_at': return localized(locale, 'Click a main-document point from the latest screenshot', '点击最近截图中的主文档位置')
     case 'browser_click': return localized(locale, `Click element [${index}]${frame}`, `点击元素 [${index}]${frame}`)
     case 'browser_select': return localized(locale, `Change selection in element [${index}]${frame}`, `更改元素 [${index}] 的选项${frame}`)

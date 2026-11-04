@@ -4,6 +4,12 @@ import { isReadOnlyBrowserTool, parseBridgeFrame } from '../src/protocol.ts'
 const screenshot = { text: 'Synthetic viewport', screenshotRef: 'shot_00000000-0000-4000-8000-000000000001', width: 1000, height: 800,
   scrollX: 0, scrollY: 0, devicePixelRatio: 2, mediaType: 'image/jpeg', data: '/9j/2Q==' }
 describe('bounded visual protocol', () => {
+  it('negotiates design zoom optionally and classifies it as a write', () => {
+    const caps = { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 }
+    expect(parseBridgeFrame(JSON.stringify({ t: 'hello.ok', caps: { ...caps, designViewZoom: true } }))).toMatchObject({ caps: { designViewZoom: true } })
+    for (const designViewZoom of ['true', 1, null]) expect(parseBridgeFrame(JSON.stringify({ t: 'hello.ok', caps: { ...caps, designViewZoom } }))).toBeUndefined()
+    expect(isReadOnlyBrowserTool('browser_set_design_zoom')).toBe(false)
+  })
   it('keeps optional layout metrics compatible and read-only', () => {
     const caps = { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 }
     expect(parseBridgeFrame(JSON.stringify({ t: 'hello', token: 'synthetic', caps: { ...caps, layoutMetrics: true } }))).toMatchObject({ caps: { layoutMetrics: true } })

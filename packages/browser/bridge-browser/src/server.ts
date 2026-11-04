@@ -169,6 +169,7 @@ interface ReadyConnection {
   taskTargetLoss: boolean
   visualViewport: boolean
   layoutMetrics: boolean
+  designViewZoom: boolean
 }
 
 function targetLossKey(target: BrowserTaskTargetLoss): string {
@@ -265,6 +266,9 @@ export class BridgeServer {
     }
     if (name === 'browser_measure_layout' && !conn.layoutMetrics) {
       throw new BridgeToolError('content-unavailable', 'Layout measurement requires an updated extension and Host Bridge.')
+    }
+    if (name === 'browser_set_design_zoom' && !conn.designViewZoom) {
+      throw new BridgeToolError('content-unavailable', 'Design zoom requires an updated extension and Host Bridge.')
     }
     const targetBinding = execution !== undefined && isPageBrowserTool(name) ? this.expectedRunTarget(execution, conn) : undefined
     // A caller that already aborted must not dispatch: the abort listener
@@ -506,6 +510,7 @@ export class BridgeServer {
           textOnly: true,
           ...(frame.caps.visualViewport === true && this.deps.caps.visualViewport === true ? { visualViewport: true } : {}),
           ...(frame.caps.layoutMetrics === true && this.deps.caps.layoutMetrics === true ? { layoutMetrics: true } : {}),
+          ...(frame.caps.designViewZoom === true && this.deps.caps.designViewZoom === true ? { designViewZoom: true } : {}),
           snapshotMaxChars: Math.min(this.deps.caps.snapshotMaxChars, frame.caps.snapshotMaxChars),
           maxInteractiveItems: Math.min(this.deps.caps.maxInteractiveItems, frame.caps.maxInteractiveItems),
           ...(frame.caps.taskTargetLoss === true && this.deps.runs?.pauseLostTargetTask !== undefined ? { taskTargetLoss: true } : {}),
@@ -564,7 +569,7 @@ export class BridgeServer {
         }
       }
     })()
-    this.current = { connectionId: randomUUID(), ws, remoteAddress, abort, pump, ping, orderedSessionRpcs: new Map(), confirmedTools: new Set(), lostRunTargets: new Set(), taskTargetLoss: caps.taskTargetLoss === true, visualViewport: caps.visualViewport === true, layoutMetrics: caps.layoutMetrics === true,
+    this.current = { connectionId: randomUUID(), ws, remoteAddress, abort, pump, ping, orderedSessionRpcs: new Map(), confirmedTools: new Set(), lostRunTargets: new Set(), taskTargetLoss: caps.taskTargetLoss === true, visualViewport: caps.visualViewport === true, layoutMetrics: caps.layoutMetrics === true, designViewZoom: caps.designViewZoom === true,
       ...(installationId === undefined ? {} : { installationId }) }
     sendFrame(ws, { t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps, ...(credential === undefined ? {} : { credential }) })
     ws.once('close', () => {

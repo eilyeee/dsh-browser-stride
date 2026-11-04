@@ -954,6 +954,26 @@ describe('BridgeServer', () => {
     }
     ws.close()
   })
+  it.each([[false, false], [false, true], [true, false], [true, true]])('negotiates design zoom only with both peers, host=%s extension=%s', async (host, extension) => {
+    const h = await startBridge({ caps: { ...CAPS, designViewZoom: host } })
+    harnesses.push(h)
+    const { ws, frames } = await connect(h.url)
+    send(ws, { t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: TOKEN, caps: { ...CAPS, ...(extension ? { designViewZoom: true } : {}) } })
+    await waitFor(() => frames.some(frame => frame.t === 'hello.ok'))
+    const hello = frames.find((frame): frame is Extract<BridgeFrame, { t: 'hello.ok' }> => frame.t === 'hello.ok')!
+    expect(hello.caps.designViewZoom === true).toBe(host && extension)
+    if (!host || !extension) {
+      expect(() => h.bridge.requestTool('browser_set_design_zoom', { percent: 150 }, new AbortController().signal)).toThrow('updated extension')
+      expect(frames.some(frame => frame.t === 'tool.call')).toBe(false)
+    } else {
+      const pending = h.bridge.requestTool('browser_set_design_zoom', { percent: 150 }, new AbortController().signal)
+      await waitFor(() => frames.some(frame => frame.t === 'tool.call'))
+      const call = frames.find((frame): frame is Extract<BridgeFrame, { t: 'tool.call' }> => frame.t === 'tool.call')!
+      send(ws, { t: 'tool.result', id: call.id, action: call.action, ok: true, result: { text: 'Synthetic design zoom' } })
+      expect(await pending).toEqual({ text: 'Synthetic design zoom' })
+    }
+    ws.close()
+  })
   it.each([false, true])('requires both peers to negotiate viewport tools, offered=%s', async offered => {
     const h = await startBridge({ caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60, visualViewport: true } })
     harnesses.push(h)

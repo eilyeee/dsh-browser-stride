@@ -4,7 +4,7 @@ import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
-import { apply, MODEL_BROWSER_TOOLS, matchesLayerReport, matchesLayoutReport } from '../fixtures/visual-probe.mjs'
+import { apply, MODEL_BROWSER_TOOLS, matchesLayerReport, matchesLayoutReport, reportedDesignZoom } from '../fixtures/visual-probe.mjs'
 
 const expected = { layer: 'background', textLayer: 'text-Medium', color: '#2563eb', width: 320, height: 144, radius: 14,
   text: { width: 126, height: 24, fontSize: 18, fontWeight: 400, lineHeight: 24, color: '#ffffff' } }
@@ -29,7 +29,15 @@ test('layout acceptance requires measured before/after gaps without coercing mis
   assert.equal(matchesLayoutReport('No measurement'), false)
 })
 
-for (const reportKind of ['styles', 'layout']) test(`${reportKind} model tools are restricted only in the test Agent scope before arming`, async t => {
+test('design zoom acceptance requires an explicit bounded percentage, not a guessed scale or missing value', () => {
+  assert.equal(reportedDesignZoom('{"viewZoom":"125%"}'), 125)
+  for (const viewZoom of [null, false, 120, '120px', '120% guessed', '27%', '201%', '1000%']) {
+    assert.equal(reportedDesignZoom(JSON.stringify({ viewZoom })), null)
+  }
+  assert.equal(reportedDesignZoom('No measured zoom'), null)
+})
+
+for (const reportKind of ['styles', 'layout', 'zoom']) test(`${reportKind} model tools are restricted only in the test Agent scope before arming`, async t => {
   const root = await mkdtemp(join(tmpdir(), 'stride-visual-scope-'))
   const trigger = join(root, 'trigger.json'), result = join(root, 'result.json'), stops = []
   let restriction, released = false, guard
@@ -40,7 +48,7 @@ for (const reportKind of ['styles', 'layout']) test(`${reportKind} model tools a
     on() {}, effect(fn) { stops.push(fn()) },
   }
   t.after(async () => { for (const stop of stops.reverse()) await stop(); await rm(root, { recursive: true, force: true }) })
-  await writeFile(trigger, JSON.stringify({ sequence: 1, mode: 'model', sessionId: 'synthetic-model', reportKind, allowedUrls: ['http://stride-layout.test/fixed'] }))
+  await writeFile(trigger, JSON.stringify({ sequence: 1, mode: 'model', sessionId: 'synthetic-model', reportKind, autoZoom: reportKind === 'zoom', allowedUrls: ['http://stride-layout.test/fixed'] }))
   apply(ctx, { trigger, result })
   let ready
   for (let i = 0; i < 200; i++) {
@@ -48,7 +56,10 @@ for (const reportKind of ['styles', 'layout']) test(`${reportKind} model tools a
     await delay(10)
   }
   assert.equal(ready?.modelReady, true)
-  assert.deepEqual(restriction, { allow: reportKind === 'layout' ? ['browser_snapshot', 'browser_measure_layout', 'browser_navigate', 'browser_wait'] : MODEL_BROWSER_TOOLS })
+  assert.deepEqual(restriction, { allow: reportKind === 'layout' ? ['browser_snapshot', 'browser_measure_layout', 'browser_navigate', 'browser_wait']
+    : reportKind === 'zoom' ? [...MODEL_BROWSER_TOOLS, 'browser_set_design_zoom'] : MODEL_BROWSER_TOOLS })
+  assert.equal(typeof guard({ agent: { id: 'synthetic-model' }, name: 'bash' }), 'string')
+  if (reportKind !== 'layout') assert.equal(guard({ agent: { id: 'synthetic-model' }, name: 'browser_set_design_zoom' }) === undefined, reportKind === 'zoom')
   assert.equal(guard({ agent: { id: 'other' }, name: 'bash' }), undefined)
   assert.equal(typeof guard({ agent: { id: 'synthetic-model' }, name: 'browser_list_tabs' }), 'string')
   if (reportKind === 'layout') {

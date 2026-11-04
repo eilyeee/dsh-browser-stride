@@ -181,6 +181,8 @@ export interface BridgeCaps {
   visualViewport?: boolean
   /** Read-only DOM box and computed-spacing observations. */
   layoutMetrics?: boolean
+  /** Bounded, explicitly labelled native design-zoom select and readback. */
+  designViewZoom?: boolean
 }
 
 /** Frames sent by the extension to the bridge plugin. */
@@ -370,6 +372,7 @@ function isCaps(value: unknown): value is BridgeCaps {
     && (caps.taskTargetLoss === undefined || typeof caps.taskTargetLoss === 'boolean')
     && (caps.visualViewport === undefined || typeof caps.visualViewport === 'boolean')
     && (caps.layoutMetrics === undefined || typeof caps.layoutMetrics === 'boolean')
+    && (caps.designViewZoom === undefined || typeof caps.designViewZoom === 'boolean')
 }
 
 function isToolError(value: unknown): value is ToolError {

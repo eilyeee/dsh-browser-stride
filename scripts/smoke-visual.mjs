@@ -14,9 +14,14 @@ import { startVisualSite } from './fixtures/visual-site.mjs'
 
 const repoRoot = resolve(import.meta.dirname, '..'), require = createRequire(join(repoRoot, 'package.json'))
 const cli = join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'lib/bin.js')
+const realModel = process.env.STRIDE_REAL_MODEL === '1'
+const autoZoom = process.env.STRIDE_AUTO_ZOOM === '1'
+const autoZoomFallback = process.env.STRIDE_AUTO_ZOOM_FALLBACK === '1'
+if (autoZoom && !realModel) throw new Error('Automatic zoom acceptance requires STRIDE_REAL_MODEL=1')
+if (autoZoomFallback && !autoZoom) throw new Error('Zoom fallback acceptance requires STRIDE_AUTO_ZOOM=1')
+const resultName = autoZoom ? autoZoomFallback ? 'auto-zoom-fallback.json' : 'auto-zoom.json' : realModel ? 'real-model.json' : 'result.json'
 const root = await mkdtemp(join(tmpdir(), 'stride-visual-')), home = join(root, 'home')
 const trigger = join(root, 'command.json'), result = join(root, 'result.json')
-const realModel = process.env.STRIDE_REAL_MODEL === '1'
 const artifacts = join(repoRoot, '.stride-private/validation/visual')
 const env = { ...process.env, DSH_HOME: home, DSH_TELEMETRY_DISABLED: '1' }
 for (const key of ['DSH_EXT_TOKEN','DSH_BRIDGE_ADMIN_TOKEN','DSH_BROWSER_SESSION_WORKSPACE']) delete env[key]
@@ -199,30 +204,56 @@ try {
   if (realModel) {
     phase = 'real-model'
     await browser.worker.evaluate(id => chrome.tabs.setZoom(id, 1), targetId)
-    await browser.target.goto(site.url); site.reset()
+    await browser.target.goto(autoZoomFallback ? site.noZoomControlUrl : autoZoom ? site.smallUrl : site.url); site.reset()
+    if (autoZoom) assert.equal(await browser.target.locator('#zoom-status').textContent(), '27%')
     await mkdir(join(root, 'model'))
     modelSessionId = (await host.client.rpc('session.create', { cwd: join(root, 'model') })).sessionId
     await browser.bindSession(modelSessionId)
     const id = ++sequence
-    await writeFile(trigger, JSON.stringify({ sequence: id, mode: 'model', sessionId: modelSessionId, layer: site.layer, color: site.color, expected: site.designs.a }), { mode: 0o600 })
+    await writeFile(trigger, JSON.stringify({ sequence: id, mode: 'model', autoZoom, sessionId: modelSessionId, layer: site.layer, color: site.color, expected: site.designs.a }), { mode: 0o600 })
     await wait(async () => (await readJson(result))?.sequence === id, 'model guard')
     assert.equal((await readJson(result)).modelReady, true)
-    await host.client.rpc('session.prompt', { sessionId: modelSessionId, mode: 'queue', content: [{ type: 'text', text: '当前对话已绑定合成画布，不要列出或跟随标签页。画布上有一个蓝色按钮，请用截图确定它的位置，分别选择按钮的背景留白和文字，每次点击都重新截图，每层选中后都用 browser_read_design_styles 回读属性。这个合成站点的属性面板选择器为 #properties。最后只返回 JSON：background 包含 layer、width、height、fill、radius；text 包含 layer、width、height、fontSize、fontWeight、color、lineHeight。尺寸单位为 px，字重以面板显式值为准。不要修改设计属性或访问其他页面，完成后停止。' }], clientTimeZone: 'Asia/Shanghai' })
+    await host.client.rpc('session.prompt', { sessionId: modelSessionId, mode: 'queue', content: [{ type: 'text', text: (autoZoom ? '当前设计稿缩得很小，请按浏览器工具指导处理可读性后继续。' : '') + '当前对话已绑定合成画布，不要列出或跟随标签页。画布上有一个蓝色按钮，请用截图确定它的位置，分别选择按钮的背景留白和文字，每次点击都重新截图，每层选中后都用 browser_read_design_styles 回读属性。这个合成站点的属性面板选择器为 #properties。最后只返回 JSON：background 包含 layer、width、height、fill、radius；text 包含 layer、width、height、fontSize、fontWeight、color、lineHeight。' + (autoZoom ? '另加 viewZoom 字段，原样报告最后读到的设计视图百分比字符串。' : '') + '尺寸单位为 px，字重以面板显式值为准。不要修改设计属性或访问其他页面，完成后停止。' }], clientTimeZone: 'Asia/Shanghai' })
     await wait(async () => (await readJson(`${result}.model`))?.terminal === true, 'default-model visual turn', 360000)
     modelEvidence = await readJson(`${result}.model`)
     assert.equal(modelEvidence.reason, 'completed')
     assert.deepEqual(modelEvidence.blocked, [])
-    assert.ok(modelEvidence.results.some(row => row.name === 'browser_screenshot' && row.ok && row.imageBlocks === 1))
-    assert.ok(modelEvidence.results.some(row => row.name === 'browser_click_at' && row.ok))
-    assert.ok(modelEvidence.results.filter(row => row.name === 'browser_read_design_styles' && row.ok).length >= 2,
-      'Model must use structured inspector reads for both selected layers')
-    assert.equal(modelEvidence.finalLayerReported, true); assert.equal(modelEvidence.finalColorReported, true)
-    assert.equal(modelEvidence.finalStyleReportCorrect, true, 'Model must distinguish exact container and text metrics')
-    assert.ok(site.history().some(row => row.layer === site.layer))
-    assert.ok(site.history().some(row => row.layer === site.textLayer))
-    assert.ok(site.state().clicks >= 2)
+    if (autoZoomFallback) {
+      assert.equal(modelEvidence.finalManualZoomRequested, true)
+      assert.equal(modelEvidence.browserCalls.includes('browser_set_design_zoom'), true)
+      assert.equal(modelEvidence.results.some(row => row.name === 'browser_set_design_zoom' && row.ok), false)
+      assert.equal(modelEvidence.results.some(row => ['browser_select', 'browser_click', 'browser_click_at'].includes(row.name) && row.ok), false,
+        'Unsupported zoom must not admit a successful fallback page action')
+      assert.equal(await browser.target.evaluate(() => window.syntheticCanvasPoints), 0,
+        'Failed zoom preparation must not continue canvas point selection')
+      assert.equal(await browser.target.evaluate(() => window.syntheticDesignSwitches), 0)
+      assert.equal(await browser.target.locator('#zoom-status').textContent(), '27%')
+      assert.deepEqual(site.zoomHistory(), [])
+      assert.equal(site.state().clicks, 0)
+    } else {
+      assert.ok(modelEvidence.results.some(row => row.name === 'browser_screenshot' && row.ok && row.imageBlocks === 1))
+      assert.ok(modelEvidence.results.some(row => row.name === 'browser_click_at' && row.ok))
+      assert.ok(modelEvidence.results.filter(row => row.name === 'browser_read_design_styles' && row.ok).length >= 2,
+        'Model must use structured inspector reads for both selected layers')
+      assert.equal(modelEvidence.finalLayerReported, true); assert.equal(modelEvidence.finalColorReported, true)
+      assert.equal(modelEvidence.finalStyleReportCorrect, true, 'Model must distinguish exact container and text metrics')
+      if (autoZoom) {
+        const zoom = Number(await browser.target.locator('#design-zoom').inputValue())
+        assert.ok(zoom >= 100 && zoom <= 200)
+        assert.equal(modelEvidence.finalZoom, zoom, 'The final report must match independent zoom readback')
+        assert.ok(site.zoomHistory().includes(zoom), 'The page must observe a real design zoom change')
+        const results = modelEvidence.results
+        const selected = results.findIndex(row => row.name === 'browser_set_design_zoom' && row.ok)
+        const fresh = results.findIndex((row, index) => index > selected && row.name === 'browser_screenshot' && row.ok && row.imageBlocks === 1)
+        const point = results.findIndex(row => row.name === 'browser_click_at')
+        assert.ok(selected >= 0 && fresh > selected && point > fresh, 'Enlargement and a fresh screenshot must precede layer point clicks')
+      }
+      assert.ok(site.history().some(row => row.layer === site.layer))
+      assert.ok(site.history().some(row => row.layer === site.textLayer))
+      assert.ok(site.state().clicks >= 2)
+    }
   }
-  const summary = { passed: true, realHost: true, isolatedChrome: true, realModel,
+  const summary = { passed: true, realHost: true, isolatedChrome: true, realModel, autoZoom, autoZoomFallback,
     storedImageBlock: true, controlledPagePixelsVerified: true, imageBytesExcludedFromText: true,
     canvasLayerSelected: true, exactDomPropertiesRead: true, separateBackgroundAndTextRead: true,
     structuredInspectorStyles: true, structuredStyleReadRevoked: true, switchedDesignStylesFresh: true,
@@ -231,7 +262,7 @@ try {
     workerRestartDetachedVisualControl: true, workerRestartRefDenied: true, workerRestartFreshCapture: true,
     invalidRefSkippedApproval: true, validPointApprovedNatively: true,
     humanTabUntouched: true, directProbeHistoryReadable: true, ...(modelEvidence === undefined ? {} : { modelEvidence }) }
-  await writeFile(join(artifacts, realModel ? 'real-model.json' : 'result.json'), JSON.stringify(summary, null, 2), { mode: 0o600 })
+  await writeFile(join(artifacts, resultName), JSON.stringify(summary, null, 2), { mode: 0o600 })
   console.log(JSON.stringify(summary))
 } catch (error) {
   await mkdir(artifacts, { recursive: true })
@@ -239,7 +270,10 @@ try {
     connected: !!document.querySelector('.connection .dot.connected'),
     approvalVisible: document.body.innerText.includes('仅允许这一次'),
   })).catch(() => undefined)
-  await writeFile(join(artifacts, realModel ? 'real-model.json' : 'result.json'), JSON.stringify({ passed: false, realModel, phase, errorName: error.name }), { mode: 0o600 })
+  const modelEvidence = await readJson(`${result}.model`)
+  const modelFinalReport = autoZoom ? await readFile(`${result}.final`, 'utf8').catch(() => undefined) : undefined
+  await writeFile(join(artifacts, resultName), JSON.stringify({ passed: false, realModel, autoZoom, autoZoomFallback, phase, errorName: error.name,
+    ...(modelEvidence ? { modelEvidence } : {}), ...(modelFinalReport ? { modelFinalReport } : {}) }), { mode: 0o600 })
   console.error(JSON.stringify({ phase, diagnostics }))
   throw error
 } finally {

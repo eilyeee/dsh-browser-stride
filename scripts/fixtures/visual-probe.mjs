@@ -26,11 +26,19 @@ export function matchesLayoutReport(text) {
       && report.after?.marginTop === '50px'
   } catch { return false }
 }
+export function reportedDesignZoom(text) {
+  try {
+    const report = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] ?? '')
+    const zoom = typeof report.viewZoom === 'string' && /^\d{3}%$/.test(report.viewZoom) ? Number.parseInt(report.viewZoom) : NaN
+    return zoom >= 100 && zoom <= 200 ? zoom : null
+  } catch { return null }
+}
 export const name = 'stride-visual-probe'
 export const inject = ['tools', 'agents', 'attachments']
 export const MODEL_BROWSER_TOOLS = ['browser_screenshot','browser_snapshot','browser_click_at','browser_get_text','browser_read_design_styles','browser_wait','browser_scroll']
 const LAYOUT_MODEL_TOOLS = ['browser_snapshot', 'browser_measure_layout', 'browser_navigate', 'browser_wait']
-const modelTools = model => model.reportKind === 'layout' ? LAYOUT_MODEL_TOOLS : MODEL_BROWSER_TOOLS
+const modelTools = model => model.reportKind === 'layout' ? LAYOUT_MODEL_TOOLS
+  : model.autoZoom === true ? [...MODEL_BROWSER_TOOLS, 'browser_set_design_zoom'] : MODEL_BROWSER_TOOLS
 export function apply(ctx, config) {
   let sequence = -1, pending = false, model, releaseModelTools, writes = Promise.resolve()
   const controller = new AbortController()
@@ -50,7 +58,7 @@ export function apply(ctx, config) {
     }
   }))
   ctx.on('agent/request', async (payload, next) => {
-    if (belongs(payload.agent)) { if (++evidence.modelRequests > 10) throw new Error('synthetic-visual-model-budget'); await save() }
+    if (belongs(payload.agent)) { if (++evidence.modelRequests > (model.autoZoom === true ? 14 : 10)) throw new Error('synthetic-visual-model-budget'); await save() }
     return next()
   })
   ctx.on('tools/execute', async (exec, next) => {
@@ -76,6 +84,13 @@ export function apply(ctx, config) {
       else {
         evidence.finalLayerReported = text.includes(model.layer); evidence.finalColorReported = text.toLowerCase().includes(model.color.toLowerCase())
         evidence.finalStyleReportCorrect = matchesLayerReport(text, model.expected)
+        if (model.autoZoom === true) {
+          evidence.finalZoom = reportedDesignZoom(text)
+          evidence.finalManualZoomRequested = /放大|enlarge|zoom/i.test(text)
+            && /请|手动|需要你|需要您|could you|please|manually|can you/i.test(text)
+          // Synthetic-only diagnostic; retain privately if an assertion fails.
+          writes = writes.then(() => writeFile(`${config.result}.final`, text.slice(0, 4000), { mode: 0o600 })).catch(() => {})
+        }
       }
     }
     if (event.type === 'turn/end') { evidence.terminal = true; evidence.reason = event.data.reason.kind }

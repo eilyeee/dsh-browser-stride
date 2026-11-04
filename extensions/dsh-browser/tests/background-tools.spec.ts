@@ -700,6 +700,21 @@ describe('dispatchToolCall', () => {
     expect(output).toContain('UNTRUSTED_PAGE_CONTENT')
   })
 
+  it('requires action approval and refuses delivery after revocation during design zoom confirmation', async () => {
+    const chromeMock = mockChrome({ tab: { id: 24, url: 'https://app.example/' } })
+    let current = true
+    const authorize = vi.fn(async prompt => {
+      expect(prompt).toMatchObject({ kind: 'action', action: 'browser_set_design_zoom', origins: ['https://app.example'] })
+      current = false
+      return 'approved' as const
+    })
+    const answer = await dispatchToolCall({ id: 'zoom-revoked', name: 'browser_set_design_zoom', args: { percent: 150 } }, 'auto', undefined, authorize,
+      undefined, { id: 24, url: 'https://app.example/' }, () => current)
+    expect(answer.ok).toBe(false)
+    expect(authorize).toHaveBeenCalledOnce()
+    expect(chromeMock.sendMessage).not.toHaveBeenCalled()
+  })
+
   it('refuses an oversized layout observation instead of reporting truncated JSON as success', async () => {
     mockChrome({ tab: { id: 24, url: 'https://app.example/' }, responses: [{ ok: true, result: { text: JSON.stringify({ observation: 'x'.repeat(1000) }) } }] })
     const answer = await dispatchToolCall({ id: 'layout-small-budget', name: 'browser_measure_layout', args: { selector: '.card' } }, 'auto', { maxItems: 10, maxChars: 500 })

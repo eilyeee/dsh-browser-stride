@@ -16,6 +16,7 @@ import type { SnapshotBudget } from './snapshot.ts'
 import { buildSnapshot, renderSnapshotDetails } from './snapshot.ts'
 import { visualViewportState } from './visual.ts'
 import { measureLayout } from './layout.ts'
+import { changeDesignZoom } from './design-zoom.ts'
 import type { VisualObservation } from '@eilyeee/dsh-browser-stride/src/visual.ts'
 
 /** A settled action result. */
@@ -233,6 +234,17 @@ export async function runAction(action: string, args: Record<string, unknown>, c
     case 'browser_measure_layout':
       try { return { text: JSON.stringify(measureLayout(args)) } }
       catch (error) { throw new ActionError('action-failed', error instanceof Error ? error.message : 'Layout could not be measured.') }
+    case 'browser_set_design_zoom':
+      try {
+        const readback = changeDesignZoom(args.percent)
+        const settled = await waitForPageSettled(ACTION_SETTLE)
+        const result = readback()
+        return withPageDelta('Design zoom control readback: ' + result.before + '% → ' + result.percent + '%. '
+          + (result.changed ? 'Changed once. ' : 'Already at this scale. ')
+          + 'Take a fresh screenshot; control readback alone is not proof of canvas rendering.', ctx, settled)
+      } catch (error) {
+        throw new ActionError('action-failed', error instanceof Error ? error.message : 'Design zoom could not be confirmed.')
+      }
     case 'browser_wait':
       return waitAction(args, ctx)
     default:

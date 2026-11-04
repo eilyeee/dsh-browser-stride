@@ -54,6 +54,7 @@ export interface ContentBudget {
 
 const CONTENT_SCRIPT_FILE = 'content.js'
 const ACTION_DELTA_TOOLS = new Set([
+  'browser_set_design_zoom',
   'browser_click',
   'browser_click_at',
   'browser_type',
@@ -84,6 +85,7 @@ const TAB_NATIVE_TOOLS = new Set([
   'browser_reload',
 ])
 const STATE_CHANGING_PAGE_TOOLS = new Set([
+  'browser_set_design_zoom',
   'browser_click',
   'browser_click_at',
   'browser_type',

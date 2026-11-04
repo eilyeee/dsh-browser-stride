@@ -115,6 +115,19 @@ describe('registerBrowserTools', () => {
     expect(h.requestTool).toHaveBeenCalledExactlyOnceWith('browser_measure_layout', { selector: '.card', referenceSelector: '.hero', frame: 2 }, exec.signal, 1000, 'layout-session')
   })
 
+  it('validates bounded design zoom and forwards only the original session and frame', async () => {
+    const h = makeHarness()
+    registerBrowserTools(h.ctx, h.bridge, { toolTimeoutMs: 1000, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
+    const execute = h.registered.find(item => item.name === 'browser_set_design_zoom')!.definition.execute as (a: unknown, e: unknown) => Promise<unknown>
+    const exec = { agent: { id: 'zoom-session' }, signal: new AbortController().signal }
+    for (const percent of [undefined, NaN, 99, 201, '150']) {
+      await expect(execute({ percent }, exec)).rejects.toThrow()
+    }
+    expect(h.requestTool).not.toHaveBeenCalled()
+    await execute({ percent: 150, frame: 2, sessionId: 'forged', javascript: 'forged' }, exec)
+    expect(h.requestTool).toHaveBeenCalledExactlyOnceWith('browser_set_design_zoom', { percent: 150, frame: 2 }, exec.signal, 1000, 'zoom-session')
+  })
+
   it('can parse bounded page text without inventing an inspector selector', async () => {
     const h = makeHarness()
     registerBrowserTools(h.ctx, h.bridge, { toolTimeoutMs: 1000, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
@@ -287,7 +300,7 @@ describe('registerBrowserTools', () => {
     const { ctx, bridge, registered } = makeHarness()
     registerBrowserTools(ctx, bridge, { toolTimeoutMs: 5_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
     const descriptionChars = registered.reduce((sum, { definition }) => sum + String(definition.description).length, 0)
-    expect(descriptionChars).toBeLessThan(2_000)
+    expect(descriptionChars).toBeLessThan(2_100)
   })
 
   it('exposes optional frame routing on frame-local tools only', () => {

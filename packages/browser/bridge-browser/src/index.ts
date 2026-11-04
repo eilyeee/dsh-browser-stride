@@ -295,6 +295,7 @@ function mountBridge(
       textOnly: true,
       visualViewport: true,
       layoutMetrics: true,
+      designViewZoom: true,
       snapshotMaxChars: resolved.snapshotMaxChars,
       maxInteractiveItems: resolved.maxInteractiveItems,
     },

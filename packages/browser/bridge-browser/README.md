@@ -23,6 +23,10 @@ Read background and text separately. This does not recover hidden layers, infer 
 
 Structured styles do not prove layout fidelity. Check selector matches and actual rendered margins, padding and gaps when editing a generated page. Unmeasured spacing remains unknown and existing values should be preserved, not reset to zero; `:first-of-type` counts element types rather than class matches.
 
+## Preparing small design views
+
+`browser_set_design_zoom` accepts `percent` (100–200) and optional `frame`. It supports exactly one visible, explicitly labelled native HTML zoom select and one matching available percentage option. It changes once through existing page/action approval, checks readback and requires a fresh screenshot. Unsupported/custom controls, ambiguity, disabled options or unconfirmed readback fail; the Host blocks that Agent's remaining browser calls for this turn and concurrent calls while preparation is pending. A new user turn resets the gate; other Agents are unaffected. This is a bounded control operation, not a canvas-rendering or fidelity verdict. Both peers must negotiate optional wire-v4 `designViewZoom`. Lanhu's current custom menu is unsupported and requires manual enlargement. See [instructions and synthetic checks](../../../extensions/dsh-browser/README.md#canvas-and-design-pages).
+
 ## Measuring rendered layout
 
 `browser_measure_layout` reads a unique rendered DOM element and an optional unique reference in the selected frame:

@@ -1444,6 +1444,9 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
     if (call.name === 'browser_measure_layout' && caps?.layoutMetrics !== true) {
       return { ok: false, error: { code: 'content-unavailable', message: 'Layout measurement requires an updated extension and Host Bridge.' } }
     }
+    if (call.name === 'browser_set_design_zoom' && caps?.designViewZoom !== true) {
+      return { ok: false, error: { code: 'content-unavailable', message: 'Design zoom requires an updated extension and Host Bridge.' } }
+    }
     if (call.execution.kind === 'run') {
       if (isRunTabMutation(call.name)) return { ok: false, error: { code: 'execution-denied',
         message: 'Run-bound tab creation, follow and close are unavailable. Pause the task and use its selected-page continuation control.' } }

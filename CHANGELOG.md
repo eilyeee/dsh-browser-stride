@@ -9,6 +9,14 @@ no release version has been assigned yet.
 
 ### Added
 
+- `browser_set_design_zoom` adds a bounded native
+  zoom-select operation with explicit labels, percentage bounds and readback.
+  Optional wire-v4 `designViewZoom` requires both updated peers. Host calls for
+  that Agent are fenced during preparation and after failure until a new user
+  turn; other Agents remain available. This prevents fallback browser dispatch
+  after an unsupported control or unconfirmed zoom. Custom menus, including the
+  current Lanhu menu, still require manual enlargement. Benchmark suite 13
+  records the model-facing tool, guidance and controlled fixtures.
 - “Skip action confirmations on authorized pages” is enabled by default for new
   settings or records without this preference. Saved false/true choices remain
   unchanged. Native page grants and target/revocation checks still apply; the
