@@ -46,6 +46,18 @@ async function measure(sessionId, selector, referenceSelector) {
 async function actualGap() {
   return browser.target.evaluate(() => document.querySelector('.customer-card').getBoundingClientRect().top - document.querySelector('.hero').getBoundingClientRect().bottom)
 }
+async function updateSettings(settings) {
+  await browser.panel.evaluate(settings => new Promise((resolve, reject) => {
+    const port = window.__dshBenchmarkPort, id = crypto.randomUUID()
+    const timer = setTimeout(() => { port.onMessage.removeListener(receive); reject(new Error('Test settings timed out')) }, 5000)
+    function receive(message) {
+      if (message.type !== 'settings.result' || message.id !== id) return
+      clearTimeout(timer); port.onMessage.removeListener(receive)
+      message.ok ? resolve() : reject(new Error('Test settings failed'))
+    }
+    port.onMessage.addListener(receive); port.postMessage({ type: 'settings', id, settings })
+  }), settings)
+}
 try {
   await mkdir(home); await mkdir(artifacts, { recursive: true })
   const install = spawn(process.execPath, [cli, 'plugin', '--profile', 'web', 'add', '-w', `@eilyeee/dsh-browser-stride@link:${join(repoRoot, 'packages/browser/bridge-browser')}`], { cwd: repoRoot, env, stdio: 'ignore' })
@@ -64,8 +76,20 @@ try {
   browser = await startExtensionBrowser({ repoRoot, benchmarkRoot: join(repoRoot, 'benchmark'), bridgeUrl: `ws://127.0.0.1:${port}/ext/bridge`, pairingCode: await host.issuePairingCode(), trustedOrigin: site.origin,
     chromiumArgs: ['--no-proxy-server', '--host-resolver-rules=MAP stride-layout.test 127.0.0.1'] })
   await browser.prepare(site.url)
+  await browser.panel.getByRole('button', { name: '打开设置', exact: true }).click()
+  assert.equal(await browser.panel.getByRole('checkbox', { name: '已授权页面内免确认操作', exact: false }).isChecked(), true)
+  // Inspect the panel default without saving its pre-fixture connection form.
+  await browser.panel.getByRole('button', { name: '返回对话', exact: true }).click()
   const sessionId = (await host.client.rpc('session.create', { cwd: root })).sessionId
   await browser.bindSession(sessionId)
+  assert.equal(await browser.worker.evaluate(async () => (await chrome.storage.local.get('dshSettings')).dshSettings.unrestrictedBrowserAccess), true)
+  // Remove origin trust so this checks the default, rather than a trusted-domain exception.
+  await updateSettings({ trustedActionOrigins: [] })
+  phase = 'default-confirmation-bypass'
+  const initialAction = await command(sessionId, 'browser_press', { key: 'Escape' })
+  assert.equal(initialAction.ok, true, initialAction.text)
+  assert.equal(await browser.target.evaluate(() => window.syntheticKeydowns), 1)
+  assert.equal(await browser.panel.getByRole('button', { name: '仅允许这一次', exact: true }).count(), 0)
   const human = await browser.context.newPage(); await human.goto(`${site.origin}/personal`); await human.bringToFront()
   phase = 'rendered-layout'
   const broken = await measure(sessionId, '.customer-card', '.hero')
@@ -94,6 +118,7 @@ try {
   phase = 'revocation'
   await browser.panel.getByRole('button', { name: '停止控制此页', exact: true }).click()
   assert.equal((await command(sessionId, 'browser_measure_layout', { selector: '.customer-card' })).ok, false)
+  assert.equal((await command(sessionId, 'browser_press', { key: 'Escape' })).ok, false)
   let modelEvidence
   if (realModel) {
     phase = 'real-model'
@@ -116,11 +141,24 @@ try {
     assert.equal(await browser.target.evaluate(() => window.syntheticWrites), 0)
     assert.ok(await host.client.rpc('session.history', { sessionId: modelSessionId }))
   }
+  phase = 'saved-confirmation-preference'
+  await updateSettings({ unrestrictedBrowserAccess: false })
+  Object.assign(browser, await browser.restartWorker())
+  await browser.panel.locator('.connection .dot.connected').waitFor({ state: 'visible', timeout: 30000 })
+  await browser.bindSession(sessionId)
+  assert.equal(await browser.worker.evaluate(async () => (await chrome.storage.local.get('dshSettings')).dshSettings.unrestrictedBrowserAccess), false)
+  const [confirmed] = await Promise.all([
+    command(sessionId, 'browser_press', { key: 'Escape' }),
+    browser.panel.getByRole('button', { name: '仅允许这一次', exact: true }).click(),
+  ])
+  assert.equal(confirmed.ok, true, confirmed.text)
   const summary = { passed: true, realHost: true, isolatedChrome: true, realModel,
     brokenActualGap: 0, fixedActualGap: 50, nextCardGap: 24, borderInset: 20,
     invalidAndAmbiguousSelectorsDenied: true, hiddenBoxDenied: true, unalignedGapNull: true,
     viewportResizeVerified: true, inputValuesExcluded: true, nativeRevocationDenied: true,
-    humanTabUntouched: true, historyReadable: true, ...(modelEvidence ? { modelEvidence } : {}) }
+    humanTabUntouched: true, historyReadable: true, defaultActionBypass: true,
+    revokedActionDenied: true, savedFalseRetainsConfirmationAfterRestart: true,
+    ...(modelEvidence ? { modelEvidence } : {}) }
   await writeFile(join(artifacts, realModel ? 'real-model.json' : 'result.json'), JSON.stringify(summary, null, 2), { mode: 0o600 })
   console.log(JSON.stringify(summary))
 } catch (error) {

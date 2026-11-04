@@ -82,7 +82,7 @@ function mockChrome(sharePageContent: 'auto' | 'off' = 'auto') {
     sidePanel: { open: vi.fn(async () => {}), setPanelBehavior: vi.fn(async () => {}) },
     storage: {
       local: {
-        get: vi.fn(async () => ({ dshSettings: { sharePageContent } })),
+        get: vi.fn(async () => ({ dshSettings: { sharePageContent, unrestrictedBrowserAccess: false } })),
         set: vi.fn(async () => {}),
       },
       session: {

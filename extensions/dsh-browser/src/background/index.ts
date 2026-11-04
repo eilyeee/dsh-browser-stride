@@ -125,7 +125,7 @@ const SETTINGS_DEFAULTS: Settings = {
   bridgeUrl: '',
   token: '',
   sharePageContent: 'auto',
-  unrestrictedBrowserAccess: false,
+  unrestrictedBrowserAccess: true,
   autoControlNewTabs: false,
   trustedActionOrigins: [],
   approvalNotifications: true,
@@ -412,7 +412,8 @@ function normalizeSettings(candidate: Settings): Settings {
   return {
     ...candidate,
     sharePageContent,
-    unrestrictedBrowserAccess: candidate.unrestrictedBrowserAccess === true,
+    unrestrictedBrowserAccess: candidate.unrestrictedBrowserAccess === undefined
+      ? SETTINGS_DEFAULTS.unrestrictedBrowserAccess : candidate.unrestrictedBrowserAccess === true,
     autoControlNewTabs: import.meta.env.EXT_TARGET !== 'firefox' && candidate.autoControlNewTabs === true,
     trustedActionOrigins: trusted,
     approvalNotifications: candidate.approvalNotifications !== false,

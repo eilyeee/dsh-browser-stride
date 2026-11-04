@@ -50,6 +50,8 @@ The Host's administrator token is stored at `$DSH_HOME/ext-bridge-token`, or `~/
 
 The token file uses restrictive permissions where supported; protect the DSH home with appropriate operating-system access controls. These do not stop malicious processes running as the same user, and the current design does not claim isolation from a compromised local account. Use only one Host process per pairing profile.
 
+**Skip action confirmations on authorized pages** is enabled by default for new settings and records missing this preference. Saved choices, including an explicit off setting, are preserved. While enabled, authorized page content is shared automatically. Turn it off in settings and save to restore the saved page-sharing policy and normal action-confirmation rules. Page authorization and revocation still apply; the setting cannot authorize other pages.
+
 ## What exists today
 
 - Chrome viewport image attachments and screenshot-bound coordinate clicks for canvas/image pages; text snapshots, observation-bound DOM control references, page navigation, tab management and selected-text quoting. A new observation invalidates earlier references in that frame.

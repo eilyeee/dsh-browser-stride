@@ -653,6 +653,8 @@ try {
   await card.getByText('已停止', { exact: true }).waitFor()
   await browser.panel.getByRole('button', { name: '打开设置', exact: true }).click()
   const automaticToggle = browser.panel.getByRole('checkbox', { name: '自动控制 DSH 新建页面', exact: false })
+  // This branch deliberately checks action confirmation, independently of its default.
+  await browser.panel.getByRole('checkbox', { name: '已授权页面内免确认操作', exact: false }).uncheck()
   assert.equal(await automaticToggle.isChecked(), false, 'upgrades do not silently enable debugger control')
   await automaticToggle.evaluate(input => input.click())
   assert.equal(await automaticToggle.isChecked(), false, 'synthetic clicks cannot enable automatic control')

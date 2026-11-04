@@ -46,7 +46,7 @@ async function setActionTrust(origins) {
       message.ok ? resolve() : reject(new Error('Synthetic action trust settings failed'))
     }
     port.onMessage.addListener(receive)
-    port.postMessage({ type: 'settings', id, settings: { trustedActionOrigins: origins } })
+    port.postMessage({ type: 'settings', id, settings: { trustedActionOrigins: origins, unrestrictedBrowserAccess: false } })
   }), origins)
 }
 async function imagePixel(image, point = [.26, .31], rgb = [37, 99, 235]) {
@@ -81,6 +81,9 @@ try {
   await browser.prepare(site.url)
   const sessionId = (await host.client.rpc('session.create', { cwd: root })).sessionId
   await browser.bindSession(sessionId)
+  // Changing bypass invalidates old visual observations. Select the explicit
+  // approval policy before capturing, not between capture and point delivery.
+  await setActionTrust([site.origin])
   const targetId = await browser.worker.evaluate(async url => (await chrome.tabs.query({ url }))[0].id, site.url)
   const human = await browser.context.newPage(); await human.goto(`${site.origin}/personal`); await human.bringToFront()
   phase = 'real-image'

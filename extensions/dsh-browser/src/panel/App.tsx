@@ -770,7 +770,7 @@ export function App(): React.JSX.Element {
         bridgeUrl: raw?.bridgeUrl ?? '',
         token: '',
         sharePageContent: raw?.sharePageContent ?? 'auto',
-        unrestrictedBrowserAccess: raw?.unrestrictedBrowserAccess ?? false,
+        unrestrictedBrowserAccess: raw?.unrestrictedBrowserAccess === undefined || raw.unrestrictedBrowserAccess === true,
         autoControlNewTabs: raw?.autoControlNewTabs ?? false,
         trustedActionOrigins: raw?.trustedActionOrigins ?? [],
         approvalNotifications: raw?.approvalNotifications ?? true,
@@ -1974,8 +1974,8 @@ export function App(): React.JSX.Element {
             <span>{copy.settings.pageSharing}</span>
             <small>{copy.settings.pageSharingHelp}</small>
             <select
-              value={settings?.sharePageContent ?? 'auto'}
-              disabled={settings?.unrestrictedBrowserAccess ?? false}
+              value={settings?.unrestrictedBrowserAccess ? 'auto' : settings?.sharePageContent ?? 'auto'}
+              disabled={settings?.unrestrictedBrowserAccess ?? true}
               onChange={(e) => setSettings((prev) => prev === null ? prev : { ...prev, sharePageContent: e.target.value as PanelSettings['sharePageContent'] })}
             >
               <option value="auto">{copy.settings.sharingAuto}</option>
@@ -2006,7 +2006,7 @@ export function App(): React.JSX.Element {
             <input
               className="setting-toggle-input"
               type="checkbox"
-              checked={settings?.unrestrictedBrowserAccess ?? false}
+              checked={settings?.unrestrictedBrowserAccess ?? true}
               onChange={(event) => setSettings((current) => current === null
                 ? current
                 : { ...current, unrestrictedBrowserAccess: event.target.checked })}

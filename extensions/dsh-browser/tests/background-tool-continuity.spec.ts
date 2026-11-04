@@ -128,6 +128,7 @@ describe('tool-driven session checkpoints', () => {
             dshSettings: {
               bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge',
               sharePageContent: 'auto',
+              unrestrictedBrowserAccess: false,
               trustedActionOrigins: ['https://example.com'],
             },
           })),

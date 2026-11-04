@@ -9,6 +9,13 @@ no release version has been assigned yet.
 
 ### Added
 
+- “Skip action confirmations on authorized pages” is enabled by default for new
+  settings or records without this preference. Saved false/true choices remain
+  unchanged. Native page grants and target/revocation checks still apply; the
+  setting grants no access to other pages. The panel and worker use the same
+  default. The sharing selector shows the effective Auto policy while enabled,
+  retaining the saved sharing choice for when bypass is turned off. Benchmark
+  suite 12 records this default-policy change separately from layout-tool suite 11.
 - `browser_measure_layout` reads unique rendered DOM boxes, computed CSS spacing,
   aligned edge gaps and contained-box insets without changing page state or
   reading field values. Missing/ambiguous/unrendered selectors fail; unmeasured

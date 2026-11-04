@@ -218,9 +218,9 @@ describe('background bridge lifecycle', () => {
     panel.onDisconnect.emit(); socket.close()
   })
 
-  it('requires native page authorization even with confirmation bypass enabled; panel messages cannot grant it', async () => {
+  it.each([undefined, true])('requires native page authorization with confirmation bypass=%s; panel messages cannot grant it', async saved => {
     const h = mockChrome({ authorizedPages: false,
-      localGet: async () => ({ dshSettings: { bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge', unrestrictedBrowserAccess: true } }),
+      localGet: async () => ({ dshSettings: { bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge', ...(saved === undefined ? {} : { unrestrictedBrowserAccess: saved }) } }),
       tabSendMessage: async (_tabId, message) => (message as { type?: string }).type === 'DSH_ACTION'
         ? { ok: true, result: { text: 'Synthetic authorized snapshot' } } : undefined,
     })
@@ -247,6 +247,9 @@ describe('background bridge lifecycle', () => {
       await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'page-access', activeGranted: true })))
       socket.receive({ t: 'tool.call', id: 'approved-snapshot', name: 'browser_snapshot', args: {}, expiresAt: Date.now() + 10000 })
       await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'approved-snapshot', ok: true })))
+      socket.receive({ t: 'tool.call', id: 'approved-action', name: 'browser_press', args: { key: 'Escape' }, expiresAt: Date.now() + 10000 })
+      await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'approved-action', ok: true })))
+      expect(panel.postMessage.mock.calls.some(([value]) => value.type === 'approval.request')).toBe(false)
       panel.onMessage.emit({ type: 'page-access.revoke', id: 'stop-page', tabId: 1 })
       await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith({ type: 'page-access.revoke.result', id: 'stop-page', ok: true }))
       socket.receive({ t: 'tool.call', id: 'revoked-snapshot', name: 'browser_snapshot', args: {}, expiresAt: Date.now() + 10000 })
@@ -737,7 +740,7 @@ describe('background bridge lifecycle', () => {
   it('reports a settings persistence failure to the requesting panel', async () => {
     let settingsWrites = 0
     const chromeMock = mockChrome({
-      localGet: async () => ({ dshSettings: { bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge' } }),
+      localGet: async () => ({ dshSettings: { bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge', unrestrictedBrowserAccess: false } }),
       localSet: async () => {
         settingsWrites += 1
         if (settingsWrites === 1) throw new Error('Storage is unavailable')

@@ -11,7 +11,7 @@ export async function startLayoutSite() {
 .hero{height:80px;background:#ddd}.card{padding:20px;background:#eef}.card+.card{margin-top:24px}
 ${req.url === '/fixed' ? '.hero+.card' : '.card:first-of-type'}{margin-top:50px}#hidden{display:none}</style>
 <main><section class="hero">Synthetic introduction</section><section class="card customer-card"><h2>Customer details</h2><input value="synthetic-private-value"></section><section class="card next-card">Other details</section><div id="hidden">Hidden</div></main>
-<script>window.syntheticWrites=0;addEventListener('input',()=>syntheticWrites++);addEventListener('pointerdown',()=>syntheticWrites++)</script>`)
+<script>window.syntheticWrites=0;window.syntheticKeydowns=0;addEventListener('input',()=>syntheticWrites++);addEventListener('pointerdown',()=>syntheticWrites++);addEventListener('keydown',()=>syntheticKeydowns++)</script>`)
   })
   await new Promise(done => server.listen(0, '127.0.0.1', done))
   const origin = `http://stride-layout.test:${server.address().port}`

@@ -41,6 +41,8 @@ If the Host confirms that **Bind and start** or selected-page continuation was r
 
 Continuing a task clears its previous outcome message while preserving cumulative limits and saved evidence. A late verifier from an earlier activity cannot make the running continuation display “Needs verification; automatic actions have stopped” or “Result independently verified”. The current activity is verified separately.
 
+“Skip action confirmations on authorized pages” defaults to on when no choice has been saved. Saved false/true preferences survive updates and worker restarts. While enabled, authorized page content is shared automatically; the disabled sharing selector displays Auto, retaining the previous choice for when this setting is turned off. Turn it off and save to restore that sharing policy and normal action-confirmation rules, including trusted-domain exceptions. This does not grant page access or bypass target/revocation checks.
+
 ## Authorizing one page
 
 For an existing page, open it and click the **DSH Stride toolbar icon**, then select the task and its authorized group page and choose **Bind and start** in the side panel. Opening the sidebar through the browser menu, clicking a sidebar button or sending model instructions cannot authorize an existing page. Same-site sibling tabs require their own toolbar click. Newly created Chrome pages have the separate opt-in flow below.
