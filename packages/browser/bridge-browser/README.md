@@ -23,6 +23,22 @@ Read background and text separately. This does not recover hidden layers, infer 
 
 Structured styles do not prove layout fidelity. Check selector matches and actual rendered margins, padding and gaps when editing a generated page. Unmeasured spacing remains unknown and existing values should be preserved, not reset to zero; `:first-of-type` counts element types rather than class matches.
 
+## Measuring rendered layout
+
+`browser_measure_layout` reads a unique rendered DOM element and an optional unique reference in the selected frame:
+
+```json
+{ "selector": ".customer-card", "referenceSelector": ".hero" }
+```
+
+The report separates viewport bounding boxes from computed CSS margins, padding, border widths and gaps. `comparison.verticalGap` measures the edge distance only when boxes overlap horizontally and are vertically separated or touching; `horizontalGap` is analogous. Overlapping or unaligned boxes return `null` for that gap, never an invented zero. Contained-box insets include the reference border and are not automatically padding. For example, `.card:first-of-type` may match nothing when a preceding `.hero` is also a `section`; this tool refuses that selector instead of claiming a measurement. Measuring `.customer-card` against `.hero` can then show the actual zero gap despite the stylesheet declaring a 50px rule for the wrong selector.
+
+Each selector must match exactly one element (up to 500 characters). Missing, ambiguous, invalid or unrendered selections fail. `visibility:hidden` and opacity-zero elements still have measurable layout boxes and are identified in the report. Coordinates use CSS pixels in the current frame viewport; scroll offsets, device pixel ratio, transforms and fragment count are supplied for interpretation. This does not scroll, focus, change styles, read input values, pierce shadow roots or recover layers inside canvas images. Inline fragments, transforms, overlapping elements and dynamic layout require care; an observation is not a layout lock or a visual-fidelity verdict.
+
+Both peers must negotiate optional wire-v4 `layoutMetrics`; restart the updated Host and reload the extension. An older peer remains compatible with existing tools but layout measurement returns update guidance. Existing page grants, selected-frame sharing, read approval, session/document/control fences and cancellation still apply. The JSON is enclosed in the untrusted page-content boundary. If the sharing budget is too small, the tool fails instead of returning partial JSON.
+
+Build first, then run `pnpm run test:smoke-layout` for the isolated Host/Chrome synthetic fixture. Optional `STRIDE_REAL_MODEL=1` uses the existing default model, with the same private model patch/credential inputs as the visual smoke. Test homes and ports are isolated from the regular Host; results stay in ignored private storage. This does not test automatic design zoom or hidden Lanhu layer measurements.
+
 ## Configuration
 
 For first connection, click **Connect to local DSH** in extension settings, then confirm the matching code in the signed-in DSH **Settings → General → Browser pairing** section. Up to eight requests stay in memory for five minutes; only a Connection-authenticated owner can approve them. Request proofs and installation credentials never enter Host pages or URLs. Credentials can be claimed once; lost responses, restart or storage failure require a fresh confirmation. Manual pairing codes remain supported. Normal source upgrades preserve pairing when the original extension installation and Host data remain; see the repository README for update steps.

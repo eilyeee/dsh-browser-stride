@@ -101,6 +101,20 @@ describe('registerBrowserTools', () => {
     expect(report.properties.fontWeight).toBeUndefined()
   })
 
+  it('measures one frame through the original session and rejects invalid selectors before dispatch', async () => {
+    const h = makeHarness()
+    registerBrowserTools(h.ctx, h.bridge, { toolTimeoutMs: 1000, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
+    const tool = h.registered.find(item => item.name === 'browser_measure_layout')!.definition
+    const execute = tool.execute as (a: unknown, e: unknown) => Promise<unknown>
+    const exec = { agent: { id: 'layout-session' }, signal: new AbortController().signal }
+    for (const args of [{}, { selector: ' ' }, { selector: 'x'.repeat(501) }, { selector: '.card', referenceSelector: 1 }]) {
+      await expect(execute(args, exec)).rejects.toThrow()
+    }
+    expect(h.requestTool).not.toHaveBeenCalled()
+    await execute({ selector: ' .card ', referenceSelector: ' .hero ', frame: 2, sessionId: 'forged', javascript: 'forged' }, exec)
+    expect(h.requestTool).toHaveBeenCalledExactlyOnceWith('browser_measure_layout', { selector: '.card', referenceSelector: '.hero', frame: 2 }, exec.signal, 1000, 'layout-session')
+  })
+
   it('can parse bounded page text without inventing an inspector selector', async () => {
     const h = makeHarness()
     registerBrowserTools(h.ctx, h.bridge, { toolTimeoutMs: 1000, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
@@ -273,7 +287,7 @@ describe('registerBrowserTools', () => {
     const { ctx, bridge, registered } = makeHarness()
     registerBrowserTools(ctx, bridge, { toolTimeoutMs: 5_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
     const descriptionChars = registered.reduce((sum, { definition }) => sum + String(definition.description).length, 0)
-    expect(descriptionChars).toBeLessThan(1_900)
+    expect(descriptionChars).toBeLessThan(2_000)
   })
 
   it('exposes optional frame routing on frame-local tools only', () => {

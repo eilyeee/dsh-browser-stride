@@ -4,7 +4,7 @@ import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
-import { apply, MODEL_BROWSER_TOOLS, matchesLayerReport } from '../fixtures/visual-probe.mjs'
+import { apply, MODEL_BROWSER_TOOLS, matchesLayerReport, matchesLayoutReport } from '../fixtures/visual-probe.mjs'
 
 const expected = { layer: 'background', textLayer: 'text-Medium', color: '#2563eb', width: 320, height: 144, radius: 14,
   text: { width: 126, height: 24, fontSize: 18, fontWeight: 400, lineHeight: 24, color: '#ffffff' } }
@@ -19,7 +19,17 @@ test('visual acceptance requires separate exact background and text metrics', ()
   assert.equal(matchesLayerReport('Cannot inspect the page.', expected), false)
 })
 
-test('visual model tools are restricted only in the test Agent scope before arming', async t => {
+test('layout acceptance requires measured before/after gaps without coercing missing values to zero', () => {
+  const value = { before: { verticalGap: 0, marginTop: '0px', oldSelectorMatched: false }, after: { verticalGap: 50, marginTop: '50px' } }
+  assert.equal(matchesLayoutReport(JSON.stringify(value)), true)
+  for (const verticalGap of [null, false, '', '0', undefined]) {
+    assert.equal(matchesLayoutReport(JSON.stringify({ ...value, before: { ...value.before, verticalGap } })), false)
+  }
+  assert.equal(matchesLayoutReport(JSON.stringify({ ...value, after: { verticalGap: 0, marginTop: '50px' } })), false)
+  assert.equal(matchesLayoutReport('No measurement'), false)
+})
+
+for (const reportKind of ['styles', 'layout']) test(`${reportKind} model tools are restricted only in the test Agent scope before arming`, async t => {
   const root = await mkdtemp(join(tmpdir(), 'stride-visual-scope-'))
   const trigger = join(root, 'trigger.json'), result = join(root, 'result.json'), stops = []
   let restriction, released = false, guard
@@ -30,7 +40,7 @@ test('visual model tools are restricted only in the test Agent scope before armi
     on() {}, effect(fn) { stops.push(fn()) },
   }
   t.after(async () => { for (const stop of stops.reverse()) await stop(); await rm(root, { recursive: true, force: true }) })
-  await writeFile(trigger, JSON.stringify({ sequence: 1, mode: 'model', sessionId: 'synthetic-model' }))
+  await writeFile(trigger, JSON.stringify({ sequence: 1, mode: 'model', sessionId: 'synthetic-model', reportKind, allowedUrls: ['http://stride-layout.test/fixed'] }))
   apply(ctx, { trigger, result })
   let ready
   for (let i = 0; i < 200; i++) {
@@ -38,9 +48,14 @@ test('visual model tools are restricted only in the test Agent scope before armi
     await delay(10)
   }
   assert.equal(ready?.modelReady, true)
-  assert.deepEqual(restriction, { allow: MODEL_BROWSER_TOOLS })
+  assert.deepEqual(restriction, { allow: reportKind === 'layout' ? ['browser_snapshot', 'browser_measure_layout', 'browser_navigate', 'browser_wait'] : MODEL_BROWSER_TOOLS })
   assert.equal(guard({ agent: { id: 'other' }, name: 'bash' }), undefined)
   assert.equal(typeof guard({ agent: { id: 'synthetic-model' }, name: 'browser_list_tabs' }), 'string')
+  if (reportKind === 'layout') {
+    assert.equal(guard({ agent: { id: 'synthetic-model' }, name: 'browser_navigate', arguments: { url: 'http://stride-layout.test/fixed' } }), undefined)
+    assert.equal(typeof guard({ agent: { id: 'synthetic-model' }, name: 'browser_navigate', arguments: { url: 'https://example.com/' } }), 'string')
+    assert.equal(typeof guard({ agent: { id: 'synthetic-model' }, name: 'browser_navigate', arguments: {} }), 'string')
+  }
   for (const stop of stops.splice(0).reverse()) await stop()
   assert.equal(released, true)
 })

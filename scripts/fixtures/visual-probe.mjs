@@ -17,9 +17,20 @@ export function matchesLayerReport(text, expected) {
       && /^(?:\d+(?:\.\d+)?)$/.test(String(report.text.fontWeight)) && Number(report.text.fontWeight) === expected.text.fontWeight
   } catch { return false }
 }
+export function matchesLayoutReport(text) {
+  try {
+    const report = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] ?? '')
+    // In particular, never coerce null/false/empty string into a measured zero.
+    return report.before?.verticalGap === 0 && report.before?.marginTop === '0px'
+      && report.before?.oldSelectorMatched === false && report.after?.verticalGap === 50
+      && report.after?.marginTop === '50px'
+  } catch { return false }
+}
 export const name = 'stride-visual-probe'
 export const inject = ['tools', 'agents', 'attachments']
 export const MODEL_BROWSER_TOOLS = ['browser_screenshot','browser_snapshot','browser_click_at','browser_get_text','browser_read_design_styles','browser_wait','browser_scroll']
+const LAYOUT_MODEL_TOOLS = ['browser_snapshot', 'browser_measure_layout', 'browser_navigate', 'browser_wait']
+const modelTools = model => model.reportKind === 'layout' ? LAYOUT_MODEL_TOOLS : MODEL_BROWSER_TOOLS
 export function apply(ctx, config) {
   let sequence = -1, pending = false, model, releaseModelTools, writes = Promise.resolve()
   const controller = new AbortController()
@@ -31,8 +42,11 @@ export function apply(ctx, config) {
   }
   ctx.effect(() => ctx.tools.guard(exec => {
     if (!belongs(exec.agent)) return
-    if (exec.name !== 'run_code' && !MODEL_BROWSER_TOOLS.includes(exec.name)) {
-      evidence.blocked.push(exec.name); void save(); return 'This check permits only the synthetic canvas and browser tools.'
+    if (exec.name !== 'run_code' && !modelTools(model).includes(exec.name)) {
+      evidence.blocked.push(exec.name); void save(); return 'This check permits only the synthetic fixture and its browser tools.'
+    }
+    if (model.reportKind === 'layout' && exec.name === 'browser_navigate' && !model.allowedUrls.includes(exec.arguments?.url)) {
+      evidence.blocked.push(exec.name); void save(); return 'Navigation is limited to the two controlled layout fixture URLs.'
     }
   }))
   ctx.on('agent/request', async (payload, next) => {
@@ -50,7 +64,7 @@ export function apply(ctx, config) {
     if (!belongs(exec.agent)) return
     const text = result.content?.filter(block => block.type === 'text').map(block => block.text).join('\n') ?? ''
     evidence.results.push({ name: exec.name, ok: !result.isError, imageBlocks: result.content?.filter(block => block.type === 'image').length ?? 0,
-      selectedLayerReported: text.includes(model.layer), exactColorReported: text.toLowerCase().includes(model.color.toLowerCase()) })
+      ...(model.reportKind === 'layout' ? {} : { selectedLayerReported: text.includes(model.layer), exactColorReported: text.toLowerCase().includes(model.color.toLowerCase()) }) })
     void save()
   })
   ctx.on('session/event', (session, event) => {
@@ -58,8 +72,11 @@ export function apply(ctx, config) {
     if (event.type === 'assistant/message' && event.data?.message?.source?.kind === 'model') {
       const message = event.data.message, text = message.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
       evidence.model = { provider: message.source.provider, model: message.source.model }
-      evidence.finalLayerReported = text.includes(model.layer); evidence.finalColorReported = text.toLowerCase().includes(model.color.toLowerCase())
-      evidence.finalStyleReportCorrect = matchesLayerReport(text, model.expected)
+      if (model.reportKind === 'layout') evidence.finalLayoutReportCorrect = matchesLayoutReport(text)
+      else {
+        evidence.finalLayerReported = text.includes(model.layer); evidence.finalColorReported = text.toLowerCase().includes(model.color.toLowerCase())
+        evidence.finalStyleReportCorrect = matchesLayerReport(text, model.expected)
+      }
     }
     if (event.type === 'turn/end') { evidence.terminal = true; evidence.reason = event.data.reason.kind }
     void save()
@@ -76,7 +93,7 @@ export function apply(ctx, config) {
           const agent = ctx.agents.get(command.sessionId)
           if (agent === undefined) throw new Error('Synthetic model probe agent unavailable')
           releaseModelTools?.()
-          releaseModelTools = agent.ctx.tools.restrict({ allow: MODEL_BROWSER_TOOLS })
+          releaseModelTools = agent.ctx.tools.restrict({ allow: modelTools(command) })
           model = command; await save()
           await writeFile(config.result, JSON.stringify({ sequence, ok: true, modelReady: true }), { mode: 0o600 }); return
         }

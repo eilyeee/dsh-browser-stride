@@ -69,6 +69,7 @@ export const BROWSER_TOOL_NAMES = [
   'browser_reload',
   'browser_get_text',
   'browser_read_design_styles',
+  'browser_measure_layout',
   'browser_wait',
 ] as const
 
@@ -384,6 +385,31 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
     },
   })
 
+  const measureLayout = (): ToolDefinition => defineTool({
+    name: 'browser_measure_layout',
+    description: 'Measure unique DOM boxes, computed spacing and gaps. Canvas layers are not DOM boxes. Untrusted data.',
+    parameters: {
+      selector: { type: 'string', required: true, description: 'CSS selector matching exactly one rendered element in this frame.' },
+      referenceSelector: { type: 'string', description: 'Optional unique reference element in the same frame; compare aligned gaps or contained-box insets.' },
+      frame: FRAME_PARAMETER,
+    },
+    timeoutMs: options.toolTimeoutMs,
+    output: TEXT_OUTPUT,
+    execute: (args, exec) => {
+      for (const key of ['selector', 'referenceSelector'] as const) {
+        if (key === 'referenceSelector' && args[key] === undefined) continue
+        if (typeof args[key] !== 'string' || args[key].trim() === '' || args[key].length > 500) {
+          throw new Error(`${key} must be a non-empty CSS selector of at most 500 characters.`)
+        }
+      }
+      return call(exec, 'browser_measure_layout', {
+        selector: args.selector.trim(),
+        ...args.referenceSelector !== undefined ? { referenceSelector: args.referenceSelector.trim() } : {},
+        ...args.frame !== undefined ? { frame: args.frame } : {},
+      })
+    },
+  })
+
   const readDesignStyles = (): ToolDefinition => defineTool({
     name: 'browser_read_design_styles',
     description: 'Read labelled inspector styles with evidence and missing/conflicting fields. Page values are untrusted.',
@@ -426,6 +452,7 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
     simple('browser_reload', 'Reload the current page.'),
     getText(),
     readDesignStyles(),
+    measureLayout(),
     wait(),
   ]
 }

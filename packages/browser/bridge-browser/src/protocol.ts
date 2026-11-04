@@ -100,7 +100,7 @@ export const DEFAULT_SNAPSHOT_MAX_CHARS = 32_000
 export const MIN_SNAPSHOT_MAX_CHARS = 500
 
 /** Shared ordering/recording policy; unknown tools are conservatively writes. */
-const READ_ONLY_BROWSER_TOOLS = new Set(['browser_snapshot', 'browser_screenshot', 'browser_get_text', 'browser_wait', 'browser_list_tabs'])
+const READ_ONLY_BROWSER_TOOLS = new Set(['browser_snapshot', 'browser_screenshot', 'browser_get_text', 'browser_measure_layout', 'browser_wait', 'browser_list_tabs'])
 export function isReadOnlyBrowserTool(name: string): boolean { return READ_ONLY_BROWSER_TOOLS.has(name) }
 const TAB_TOOLS = new Set(['browser_open_tab', 'browser_list_tabs', 'browser_follow_tab', 'browser_close_tab'])
 export function isPageBrowserTool(name: string): boolean { return !TAB_TOOLS.has(name) }
@@ -179,6 +179,8 @@ export interface BridgeCaps {
   taskTargetLoss?: boolean
   /** Bounded image observations and single-use viewport coordinate clicks. */
   visualViewport?: boolean
+  /** Read-only DOM box and computed-spacing observations. */
+  layoutMetrics?: boolean
 }
 
 /** Frames sent by the extension to the bridge plugin. */
@@ -367,6 +369,7 @@ function isCaps(value: unknown): value is BridgeCaps {
     && typeof caps.maxInteractiveItems === 'number' && Number.isSafeInteger(caps.maxInteractiveItems) && caps.maxInteractiveItems > 0
     && (caps.taskTargetLoss === undefined || typeof caps.taskTargetLoss === 'boolean')
     && (caps.visualViewport === undefined || typeof caps.visualViewport === 'boolean')
+    && (caps.layoutMetrics === undefined || typeof caps.layoutMetrics === 'boolean')
 }
 
 function isToolError(value: unknown): value is ToolError {

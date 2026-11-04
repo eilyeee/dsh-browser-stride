@@ -21,7 +21,8 @@
     "stride:baseline:json": "node scripts/stride-baseline.mjs --json --no-write",
     "test:smoke-task": "node scripts/smoke-browser-task.mjs",
     "test:smoke-auto-tab-model": "node scripts/smoke-auto-tab-model.mjs",
-    "test:smoke-page-access": "node scripts/smoke-page-access.mjs"
+    "test:smoke-page-access": "node scripts/smoke-page-access.mjs",
+    "test:smoke-layout": "node scripts/smoke-layout.mjs"
   },
   "dependencies": {
     "@deepseek-ai/cordis-plugin-group": "1.0.5",

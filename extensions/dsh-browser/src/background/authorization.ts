@@ -5,7 +5,7 @@ import type { TabFrame } from './frames.ts'
 import type { ApprovalPrompt } from '../security/approval.ts'
 import { getUiLocale, type UiLocale } from '../i18n.ts'
 
-const PAGE_READS = new Set(['browser_snapshot', 'browser_get_text', 'browser_screenshot'])
+const PAGE_READS = new Set(['browser_snapshot', 'browser_get_text', 'browser_screenshot', 'browser_measure_layout'])
 const STATE_CHANGING_ACTIONS = new Set([
   'browser_click',
   'browser_click_at',
@@ -36,6 +36,7 @@ export function approvalPromptForCall(
       action: call.name,
       summary: call.name === 'browser_screenshot' ? localized(locale, 'Capture the selected group page’s visible viewport as an image', '截取分组内选定页面的可见区域图片') : call.name === 'browser_snapshot'
         ? localized(locale, 'Read the current page and accessible iframes', '读取当前页面及可访问 iframe')
+        : call.name === 'browser_measure_layout' ? localized(locale, 'Measure DOM element boxes and rendered spacing in the selected frame', '测量指定框架内网页元素的位置和实际间距')
         : localized(locale, 'Read text from the specified area of the current page', '读取当前页面的指定文本区域'),
       origins: uniqueOrigins(targetFrames, frames),
       canTrust: false,

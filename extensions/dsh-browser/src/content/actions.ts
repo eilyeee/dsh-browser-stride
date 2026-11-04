@@ -15,6 +15,7 @@ import { SELECT_OPTION_LIMIT, type ElementIds } from './ids.ts'
 import type { SnapshotBudget } from './snapshot.ts'
 import { buildSnapshot, renderSnapshotDetails } from './snapshot.ts'
 import { visualViewportState } from './visual.ts'
+import { measureLayout } from './layout.ts'
 import type { VisualObservation } from '@eilyeee/dsh-browser-stride/src/visual.ts'
 
 /** A settled action result. */
@@ -229,6 +230,9 @@ export async function runAction(action: string, args: Record<string, unknown>, c
       return reloadAction(ctx)
     case 'browser_get_text':
       return getTextAction(args)
+    case 'browser_measure_layout':
+      try { return { text: JSON.stringify(measureLayout(args)) } }
+      catch (error) { throw new ActionError('action-failed', error instanceof Error ? error.message : 'Layout could not be measured.') }
     case 'browser_wait':
       return waitAction(args, ctx)
     default:

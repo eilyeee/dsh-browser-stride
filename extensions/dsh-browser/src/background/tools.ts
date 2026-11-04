@@ -573,7 +573,12 @@ async function dispatchOnce(
   } else {
     navigationWait?.cancel()
   }
-  if (call.name === 'browser_get_text') {
+  if (call.name === 'browser_get_text' || call.name === 'browser_measure_layout') {
+    // A partial JSON measurement can silently lose its comparison or nulls.
+    // Keep this observation atomic rather than returning a clipped success.
+    if (call.name === 'browser_measure_layout' && text.length > untrustedContentBudget(budget.maxChars)) {
+      return unavailable('Layout observation exceeds the text sharing budget. Increase the budget and measure again.')
+    }
     return { ok: true, result: { text: wrapUntrustedContent(text, budget.maxChars) } }
   }
   const candidatePageContent = requestPageDelta ? answerPageContent(response) : undefined
@@ -776,7 +781,7 @@ export async function dispatchToolCall(
   // Privacy boundary: with sharing off, no page content may leave the page.
   if (!tabManagement.unrestrictedAccess
     && sharePageContent === 'off'
-    && (call.name === 'browser_snapshot' || call.name === 'browser_get_text' || call.name === 'browser_screenshot')) {
+    && (call.name === 'browser_snapshot' || call.name === 'browser_get_text' || call.name === 'browser_screenshot' || call.name === 'browser_measure_layout')) {
     return { ok: false, error: { code: 'action-failed', message: 'Page content sharing is disabled in Settings > Page content sharing.' } }
   }
   const tab = targetTab ?? (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]

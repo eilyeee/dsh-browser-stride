@@ -294,6 +294,7 @@ function mountBridge(
     caps: {
       textOnly: true,
       visualViewport: true,
+      layoutMetrics: true,
       snapshotMaxChars: resolved.snapshotMaxChars,
       maxInteractiveItems: resolved.maxInteractiveItems,
     },

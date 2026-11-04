@@ -440,6 +440,25 @@ describe('dispatchToolCall', () => {
     expect(chromeMock.query).not.toHaveBeenCalled()
   })
 
+  it('blocks layout reads before tab access when page sharing is off', async () => {
+    const chromeMock = mockChrome({ tab: { id: 7, url: 'https://example.com' } })
+    const answer = await dispatchToolCall({ id: 'layout-off', name: 'browser_measure_layout', args: { selector: '.card' } }, 'off')
+    expect(answer).toMatchObject({ ok: false, error: { code: 'action-failed' } })
+    expect(chromeMock.query).not.toHaveBeenCalled()
+    expect(chromeMock.sendMessage).not.toHaveBeenCalled()
+  })
+
+  it('requests layout read approval without offering action trust, and honors revocation during approval', async () => {
+    const chromeMock = mockChrome({ tab: { id: 7, url: 'https://example.com' } })
+    let allowed = true
+    const authorize = vi.fn(async () => { allowed = false; return 'approved' as const })
+    const answer = await dispatchToolCall({ id: 'layout-ask', name: 'browser_measure_layout', args: { selector: '.card' } },
+      'ask', undefined, authorize, undefined, { id: 7, url: 'https://example.com' }, () => allowed)
+    expect(authorize).toHaveBeenCalledWith(expect.objectContaining({ kind: 'read', action: 'browser_measure_layout', canTrust: false }))
+    expect(answer.ok).toBe(false)
+    expect(chromeMock.sendMessage).not.toHaveBeenCalled()
+  })
+
   it('dispatches to an explicitly bound background tab without querying the active tab', async () => {
     const chromeMock = mockChrome({
       tab: { id: 7, url: 'https://active.example/' },
@@ -670,6 +689,21 @@ describe('dispatchToolCall', () => {
     expect(text).toContain('page text')
     expect(text).toContain('UNTRUSTED_PAGE_CONTENT')
     expect(text.length).toBeLessThanOrEqual(1_000)
+  })
+
+  it('keeps layout data inside the read boundary without truncating it to an action-status line', async () => {
+    const text = JSON.stringify({ target: { selector: '.card', css: { padding: { top: '20px' } } }, observation: 'synthetic '.repeat(50) })
+    mockChrome({ tab: { id: 24, url: 'https://app.example/' }, responses: [{ ok: true, result: { text } }] })
+    const answer = await dispatchToolCall({ id: 'layout-text', name: 'browser_measure_layout', args: { selector: '.card' } }, 'auto', { maxItems: 10, maxChars: 2000 })
+    const output = (answer.result as { text: string }).text
+    expect(output).toContain(text)
+    expect(output).toContain('UNTRUSTED_PAGE_CONTENT')
+  })
+
+  it('refuses an oversized layout observation instead of reporting truncated JSON as success', async () => {
+    mockChrome({ tab: { id: 24, url: 'https://app.example/' }, responses: [{ ok: true, result: { text: JSON.stringify({ observation: 'x'.repeat(1000) }) } }] })
+    const answer = await dispatchToolCall({ id: 'layout-small-budget', name: 'browser_measure_layout', args: { selector: '.card' } }, 'auto', { maxItems: 10, maxChars: 500 })
+    expect(answer).toMatchObject({ ok: false, error: { code: 'content-unavailable', message: expect.stringContaining('text sharing budget') } })
   })
 
   it('returns the explicit user denial before reading', async () => {

@@ -9,6 +9,17 @@ no release version has been assigned yet.
 
 ### Added
 
+- `browser_measure_layout` reads unique rendered DOM boxes, computed CSS spacing,
+  aligned edge gaps and contained-box insets without changing page state or
+  reading field values. Missing/ambiguous/unrendered selectors fail; unmeasured
+  gaps remain null. Both peers negotiate optional wire-v4 `layoutMetrics`;
+  older peers receive update guidance. Read approval, sharing and execution
+  fences remain in place, and an insufficient text budget cannot produce
+  successful partial JSON. `test:smoke-layout` exercises the selector/spacing
+  regression on synthetic pages in an isolated Host and Chrome, with an optional
+  existing-default-model check. Both checks passed the actual 0px/50px before/after
+  gaps, with independent browser readback; this does not measure hidden canvas
+  layers or certify full-page fidelity. Benchmark suite 11 records the new tool and guidance.
 - `browser_read_design_styles` reads explicitly labelled inspector properties
   through the existing authorized text tool. Reports retain source evidence,
   missing fields and conflicts; background/text layers are not merged and
