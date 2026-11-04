@@ -181,7 +181,7 @@ export interface BridgeCaps {
   visualViewport?: boolean
   /** Read-only DOM box and computed-spacing observations. */
   layoutMetrics?: boolean
-  /** Bounded, explicitly labelled native design-zoom select and readback. */
+  /** Bounded supported design-view zoom control and readback. */
   designViewZoom?: boolean
 }
 

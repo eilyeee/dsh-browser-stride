@@ -11,6 +11,7 @@ import {
 
 const CALL: ToolCall = { id: 'tool-1', name: 'browser_snapshot', args: {} }
 const OK: ToolAnswer = { ok: true, result: { text: 'page' } }
+const ZOOM_STEP = { ticket: 'zoom_00000000-0000-4000-8000-000000000001', before: 27, percent: 150 }
 
 function managedTab(tabId: number, overrides: Partial<chrome.tabs.Tab> = {}): chrome.tabs.Tab {
   return {
@@ -713,6 +714,32 @@ describe('dispatchToolCall', () => {
     expect(answer.ok).toBe(false)
     expect(authorize).toHaveBeenCalledOnce()
     expect(chromeMock.sendMessage).not.toHaveBeenCalled()
+  })
+
+  it.each(['success', 'revoked', 'cancelled', 'invalid', 'receiver-lost', 'repeated'] as const)('keeps staged design zoom on its original scope, %s', async mode => {
+    const controller = new AbortController(), phases: string[] = [], rollback = vi.fn()
+    let current = true
+    const h = mockChrome({ tab: { id: 24, url: 'https://app.example/' }, respond: message => {
+      const m = message as { action?: string; args?: { phase?: string } }
+      if (m.action !== 'browser_set_design_zoom') return OK
+      phases.push(m.args!.phase!)
+      if (m.args!.phase === 'prepare') {
+        if (mode === 'revoked') current = false
+        if (mode === 'cancelled') controller.abort()
+        return { ok: true, result: { text: 'prepared', designZoomStep: { ...ZOOM_STEP, ...(mode === 'invalid' ? { percent: 201 } : {}) } } }
+      }
+      if (mode === 'receiver-lost') return new Error('Receiving end does not exist')
+      if (mode === 'repeated') return { ok: true, result: { text: 'prepared again', designZoomStep: ZOOM_STEP } }
+      return OK
+    } })
+    const answer = await dispatchToolCall({ id: 'zoom-staged', name: 'browser_set_design_zoom', args: { percent: 150, phase: 'forged', ticket: 'forged' } },
+      'auto', undefined, async () => 'approved', controller.signal, { id: 24, url: 'https://app.example/' }, () => current,
+      { unrestrictedAccess: false, rollbackActionCommit: rollback })
+    expect(answer.ok).toBe(mode === 'success')
+    expect(phases).toEqual(mode === 'success' || mode === 'receiver-lost' || mode === 'repeated' ? ['prepare', 'commit'] : ['prepare'])
+    expect(JSON.stringify(answer)).not.toContain(ZOOM_STEP.ticket)
+    expect(h.executeScript).not.toHaveBeenCalled()
+    expect(rollback).not.toHaveBeenCalled()
   })
 
   it('refuses an oversized layout observation instead of reporting truncated JSON as success', async () => {

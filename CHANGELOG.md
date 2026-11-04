@@ -9,14 +9,20 @@ no release version has been assigned yet.
 
 ### Added
 
-- `browser_set_design_zoom` adds a bounded native
-  zoom-select operation with explicit labels, percentage bounds and readback.
-  Optional wire-v4 `designViewZoom` requires both updated peers. Host calls for
-  that Agent are fenced during preparation and after failure until a new user
-  turn; other Agents remain available. This prevents fallback browser dispatch
-  after an unsupported control or unconfirmed zoom. Custom menus, including the
-  current Lanhu menu, still require manual enlargement. Benchmark suite 13
-  records the model-facing tool, guidance and controlled fixtures.
+- `browser_set_design_zoom` supports labelled native selects and the observed
+  Lanhu detailDetach zoom menu, with exact bounded percentages and readback.
+  The menu uses two extension-private steps under one tool call; selection
+  repeats the original authority/document checks and consumes an expiring DOM
+  pin. Cancellation after opening blocks the remaining selection, and a missing
+  selection receiver cannot replay the first step. Lanhu requires a foreground
+  page and a visible popup; background pages receive a specific error before
+  menu effects. Host failure fencing remains
+  Agent-local until a new user turn. The existing optional wire-v4 capability
+  remains compatible. Suite 13 introduced the native tool; suite 14 records the
+  menu adapter and controlled fixture/guidance changes. The default model also
+  changed a real Lanhu toolbar from 27% to 150% in a separate controlled test
+  tab in regular Chrome, with independent percentage readback and the original
+  tab unchanged. This does not certify canvas rendering or full-page fidelity.
 - “Skip action confirmations on authorized pages” is enabled by default for new
   settings or records without this preference. Saved false/true choices remain
   unchanged. Native page grants and target/revocation checks still apply; the

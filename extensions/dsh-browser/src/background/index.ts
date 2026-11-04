@@ -251,6 +251,8 @@ interface ActiveToolCall {
   controller: AbortController
   unrestrictedAccess: boolean
   committed: boolean
+  /** A committed menu opening must not permit its undispatched selection after cancellation. */
+  staged: boolean
   revocationRequested: boolean
   settled: Promise<void>
   settle: () => void
@@ -1317,6 +1319,7 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
     controller,
     unrestrictedAccess,
     committed: false,
+    staged: call.name === 'browser_set_design_zoom',
     revocationRequested: false,
     settled: new Promise<void>((resolve) => { settle = resolve }),
     settle: () => { settle() },
@@ -1542,8 +1545,8 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
 function cancelToolCall(id: string): void {
   const call = activeToolCalls.get(id)
   if (call !== undefined) {
-    if (!call.committed || call.managed) call.executionFence?.revoke()
-    if (!call.committed) call.controller.abort()
+    if (!call.committed || call.managed || call.staged) call.executionFence?.revoke()
+    if (!call.committed || call.staged) call.controller.abort()
   }
 }
 
@@ -1552,7 +1555,7 @@ async function revokeUnrestrictedAccess(): Promise<void> {
   const refreshes = [...activeTargetRefreshes.values()].filter((refresh) => refresh.unrestrictedAccess)
   for (const call of calls) {
     call.revocationRequested = true
-    if (!call.committed) call.controller.abort()
+    if (!call.committed || call.staged) call.controller.abort()
   }
   for (const refresh of refreshes) refresh.controller.abort()
   await Promise.allSettled([

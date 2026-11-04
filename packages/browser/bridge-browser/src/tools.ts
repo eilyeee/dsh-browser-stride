@@ -413,9 +413,9 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
 
   const setDesignZoom = (): ToolDefinition => defineTool({
     name: 'browser_set_design_zoom',
-    description: 'Set a uniquely labelled native design-zoom select and read it back. Failure stops browser calls this turn.',
+    description: 'Set design zoom with readback: labelled native select or Lanhu menu (100/150/200). Failure pauses this turn.',
     parameters: {
-      percent: { type: 'number', required: true, description: 'Design view percentage, 100 to 200; the control must offer exactly this option.' },
+      percent: { type: 'number', required: true, description: 'Percentage 100 to 200, exactly offered by the control. Lanhu presets: 100, 150 or 200.' },
       frame: FRAME_PARAMETER,
     },
     timeoutMs: options.toolTimeoutMs,

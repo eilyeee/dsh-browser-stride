@@ -170,6 +170,34 @@ afterEach(() => {
 })
 
 describe('background bridge lifecycle', () => {
+  it('cancels a staged zoom after menu dispatch without admitting its selection', async () => {
+    const phases: string[] = []
+    let finish!: (value: unknown) => void
+    const pending = new Promise(resolve => { finish = resolve })
+    const h = mockChrome({
+      localGet: async () => ({ dshSettings: { bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge', unrestrictedBrowserAccess: true } }),
+      tabSendMessage: async (_tabId, message) => {
+        const m = message as { action?: string; args?: { phase?: string } }
+        if (m.action !== 'browser_set_design_zoom') return { ok: true, result: { text: 'synthetic' } }
+        phases.push(m.args!.phase!)
+        return m.args!.phase === 'prepare' ? pending : { ok: true, result: { text: 'selected' } }
+      },
+    })
+    vi.stubGlobal('WebSocket', FakeWebSocket); await import('../src/background/index.ts')
+    const panel = panelPort(); h.onConnect.emit(panel.port)
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const socket = FakeWebSocket.instances[0]!
+    socket.open(); await Promise.resolve()
+    socket.receive({ t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      caps: { textOnly: true, snapshotMaxChars: 32000, maxInteractiveItems: 60, designViewZoom: true } })
+    socket.receive({ t: 'tool.call', id: 'zoom-cancelled', name: 'browser_set_design_zoom', args: { percent: 150 }, expiresAt: Date.now() + 10000 })
+    await vi.waitFor(() => expect(phases).toEqual(['prepare']))
+    socket.receive({ t: 'tool.cancel', id: 'zoom-cancelled' })
+    finish({ ok: true, result: { text: 'prepared', designZoomStep: { ticket: 'zoom_00000000-0000-4000-8000-000000000001', before: 27, percent: 150 } } })
+    await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'zoom-cancelled', ok: false })))
+    expect(phases).toEqual(['prepare'])
+    panel.onDisconnect.emit(); socket.close()
+  })
   it.each(['confirmed', 'rejected', 'superseded'] as const)('notifies the original task pin on page revocation with %s confirmation', async confirmation => {
     const h = mockChrome({ localGet: async () => ({ dshSettings: { bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge' } }) })
     vi.stubGlobal('WebSocket', FakeWebSocket)

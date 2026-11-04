@@ -7,7 +7,7 @@ const PRODUCT_ROOTS = ['Atlas', 'Birch', 'Cedar', 'Delta', 'Ember', 'Flint', 'Gr
 export const TASK_IDS = taskCatalog.map((task) => task.id)
 export const TASK_CATALOG = taskCatalog
 // Bump whenever prompts, model-facing tools, generated data, or validation semantics change.
-export const BENCHMARK_SUITE_VERSION = 13
+export const BENCHMARK_SUITE_VERSION = 14
 
 function hashString(value) {
   let hash = 2166136261

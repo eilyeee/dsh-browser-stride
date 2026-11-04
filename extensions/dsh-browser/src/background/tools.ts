@@ -19,6 +19,7 @@ import {
   type TabFrame,
 } from './frames.ts'
 import { untrustedContentBudget, wrapUntrustedContent } from '../security/untrusted.ts'
+import { isDesignZoomStep } from '../design-zoom-step.ts'
 import { approvalPromptForCall, originFromUrl } from './authorization.ts'
 import { waitForNextDocumentReady } from './navigation.ts'
 import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
@@ -531,19 +532,35 @@ async function dispatchOnce(
     ? waitForNextDocumentReady(tabId, frameId, frame.documentId, signal)
     : undefined
   let response: unknown
+  let preparedMenu = false
   const stateChanging = STATE_CHANGING_PAGE_TOOLS.has(call.name)
   try {
     response = await sendAction(
       tabId,
-      call,
+      call.name === 'browser_set_design_zoom' ? { ...call, args: { percent: call.args.percent, phase: 'prepare' } } : call,
       frame,
       requestPageDelta ? { ...budget, maxChars: deltaChars } : undefined,
       requestPageDelta,
       { current: requestCurrent, ...(stateChanging ? { commit: commitAction } : {}) },
     )
+    if (call.name === 'browser_set_design_zoom' && isToolAnswer(response) && response.ok) {
+      const step = (response.result as { designZoomStep?: unknown } | undefined)?.designZoomStep
+      if (step !== undefined) {
+        preparedMenu = true
+        if (!isDesignZoomStep(step) || step.percent !== call.args.percent) return unavailable('The design zoom preparation returned invalid metadata.')
+        if (!requestCurrent()) return targetChanged()
+        response = await sendAction(tabId, { ...call, args: { percent: step.percent, phase: 'commit', ticket: step.ticket } },
+          frame, requestPageDelta ? { ...budget, maxChars: deltaChars } : undefined, requestPageDelta,
+          { current: requestCurrent, ...(stateChanging ? { commit: commitAction } : {}) })
+        if (isToolAnswer(response) && response.ok && (response.result as { designZoomStep?: unknown } | undefined)?.designZoomStep !== undefined) {
+          return unavailable('The design zoom selection did not provide a final readback.')
+        }
+      }
+    }
   } catch (error: unknown) {
-    if (stateChanging && contentScriptReceiverMissing(error)) rollbackActionCommit?.()
+    if (stateChanging && !preparedMenu && contentScriptReceiverMissing(error)) rollbackActionCommit?.()
     navigationWait?.cancel()
+    if (preparedMenu && contentScriptReceiverMissing(error)) return unavailable('The prepared design zoom selection could not be delivered. Do not replay the operation.')
     throw error
   }
   if (isCancelled(call, signal)) {

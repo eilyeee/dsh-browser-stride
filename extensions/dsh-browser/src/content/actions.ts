@@ -16,12 +16,15 @@ import type { SnapshotBudget } from './snapshot.ts'
 import { buildSnapshot, renderSnapshotDetails } from './snapshot.ts'
 import { visualViewportState } from './visual.ts'
 import { measureLayout } from './layout.ts'
-import { changeDesignZoom } from './design-zoom.ts'
+import { changeDesignZoom, nativeDesignZoomControls } from './design-zoom.ts'
+import { clearLanhuZoom, commitLanhuZoom, prepareLanhuZoom } from './lanhu-zoom.ts'
+import type { DesignZoomStep } from '../design-zoom-step.ts'
 import type { VisualObservation } from '@eilyeee/dsh-browser-stride/src/visual.ts'
 
 /** A settled action result. */
 export interface ActionResult {
   text: string
+  designZoomStep?: DesignZoomStep
   /** Packaged controller metadata, never constructed by page-world scripts. */
   visual?: VisualObservation
   /** Page-authored snapshot delta; the background must wrap it as untrusted. */
@@ -236,7 +239,11 @@ export async function runAction(action: string, args: Record<string, unknown>, c
       catch (error) { throw new ActionError('action-failed', error instanceof Error ? error.message : 'Layout could not be measured.') }
     case 'browser_set_design_zoom':
       try {
-        const readback = changeDesignZoom(args.percent)
+        if (args.phase === 'prepare' && nativeDesignZoomControls().length === 0) {
+          const step = await prepareLanhuZoom(args.percent)
+          if (step !== undefined) return { text: 'Lanhu zoom menu prepared; selection needs a fresh authority check.', designZoomStep: step }
+        }
+        const readback = args.phase === 'commit' ? commitLanhuZoom(args.ticket, args.percent) : changeDesignZoom(args.percent)
         const settled = await waitForPageSettled(ACTION_SETTLE)
         const result = readback()
         return withPageDelta('Design zoom control readback: ' + result.before + '% → ' + result.percent + '%. '
@@ -270,6 +277,7 @@ const snapshotByRegistry = new WeakMap<ElementIds, ReturnType<typeof buildSnapsh
 
 /** Invalidate delta state after navigation (new document). */
 export function resetDeltaState(ids: ElementIds): void {
+  clearLanhuZoom()
   snapshotByRegistry.delete(ids)
   ids.clearObservation()
 }

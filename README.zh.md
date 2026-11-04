@@ -68,7 +68,7 @@ Host 管理员令牌默认保存在 `$DSH_HOME/ext-bridge-token`，未设置 `DS
 
 `browser_measure_layout` 可读取唯一 DOM 元素的位置、计算后的 CSS 间距以及对齐元素间的实际距离，检查生成页面时能区分“没有测到”和 0px。它不测量画布隐藏图层，也不判断整页还原度。两端均需支持新增的可选能力，见[参数与限制](packages/browser/bridge-browser/README.zh.md#测量页面实际布局)。
 
-`browser_set_design_zoom` 可调整唯一、明确标注的原生缩放下拉框并读回比例；准备失败后，该 Agent 的浏览器调用会暂停到新用户回合。蓝湖当前的自定义菜单等暂不支持，见[支持控件和验收说明](packages/browser/bridge-browser/README.zh.md#准备较小的设计视图)。
+`browser_set_design_zoom` 可调整唯一、明确标注的原生缩放下拉框或支持的蓝湖设计菜单，并读回比例；准备失败后，该 Agent 的浏览器调用会暂停到新用户回合，见[支持控件和验收说明](packages/browser/bridge-browser/README.zh.md#准备较小的设计视图)。
 
 Bridge 和扩展需要从同一次检出构建：点击、输入和单选现在要求最近一次观察给出的 `elementRef`，与旧版裸编号接口不兼容。增量快照只提供本次展示控件的引用；目标未出现时需重新获取完整快照。目前引用还没有绑定任务运行、账号或租户。
 

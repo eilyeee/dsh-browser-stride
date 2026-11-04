@@ -9,13 +9,16 @@ function controlName(control: HTMLSelectElement): string {
   }).join(' ').replace(/\s+/gu, ' ').trim()
 }
 
-/** Only an explicitly named native select is supported. No CSS or browser zoom. */
+export function nativeDesignZoomControls(): HTMLSelectElement[] {
+  return [...document.querySelectorAll('select')].filter(element =>
+    isVisible(element) && /^(?:design\s+zoom|canvas\s+zoom|view\s+zoom|zoom|(?:设计|画布|视图)缩放|缩放)$/iu.test(controlName(element)))
+}
+/** Only an explicitly named native select is supported here. No CSS or browser zoom. */
 export function changeDesignZoom(percent: unknown) {
   if (typeof percent !== 'number' || !Number.isFinite(percent) || percent < 100 || percent > 200) {
     throw new Error('Design zoom must be a percentage between 100 and 200.')
   }
-  const candidates = [...document.querySelectorAll('select')].filter(element =>
-    isVisible(element) && /^(?:design\s+zoom|canvas\s+zoom|view\s+zoom|zoom|(?:设计|画布|视图)缩放|缩放)$/iu.test(controlName(element)))
+  const candidates = nativeDesignZoomControls()
   if (candidates.length !== 1) throw new Error('No unique supported design zoom control. Ask the user to enlarge the design view manually.')
   const control = candidates[0]!
   if (control.multiple || control.matches(':disabled')) throw new Error('The design zoom control is unavailable.')

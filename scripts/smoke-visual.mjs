@@ -17,9 +17,10 @@ const cli = join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'lib
 const realModel = process.env.STRIDE_REAL_MODEL === '1'
 const autoZoom = process.env.STRIDE_AUTO_ZOOM === '1'
 const autoZoomFallback = process.env.STRIDE_AUTO_ZOOM_FALLBACK === '1'
+const lanhuZoomMenu = process.env.STRIDE_LANHU_ZOOM_MENU === '1'
 if (autoZoom && !realModel) throw new Error('Automatic zoom acceptance requires STRIDE_REAL_MODEL=1')
 if (autoZoomFallback && !autoZoom) throw new Error('Zoom fallback acceptance requires STRIDE_AUTO_ZOOM=1')
-const resultName = autoZoom ? autoZoomFallback ? 'auto-zoom-fallback.json' : 'auto-zoom.json' : realModel ? 'real-model.json' : 'result.json'
+const resultName = lanhuZoomMenu ? autoZoomFallback ? 'lanhu-zoom-fallback.json' : 'lanhu-zoom.json' : autoZoom ? autoZoomFallback ? 'auto-zoom-fallback.json' : 'auto-zoom.json' : realModel ? 'real-model.json' : 'result.json'
 const root = await mkdtemp(join(tmpdir(), 'stride-visual-')), home = join(root, 'home')
 const trigger = join(root, 'command.json'), result = join(root, 'result.json')
 const artifacts = join(repoRoot, '.stride-private/validation/visual')
@@ -76,20 +77,20 @@ try {
   }
   const extraPatch = !realModel || process.env.STRIDE_MODEL_PATCH === undefined ? undefined : await readFile(process.env.STRIDE_MODEL_PATCH, 'utf8')
   process.env.DSH_HOME = home
-  site = await startVisualSite()
+  site = await startVisualSite({ lanhuZoomMenu })
   const listener = createServer(); await new Promise(done => listener.listen(0, '127.0.0.1', done))
   const port = listener.address().port; await new Promise(done => listener.close(done))
   host = await startDshBackend({ backend: 'extension', port, repoRoot, benchmarkRoot: join(repoRoot, 'benchmark'), runtimeRoot: join(root, 'runtime'), startUrl: site.url,
     toolProbe: { plugin: join(repoRoot, 'scripts/fixtures/visual-probe.mjs'), trigger, result }, extraPatch })
   browser = await startExtensionBrowser({ repoRoot, benchmarkRoot: join(repoRoot, 'benchmark'), bridgeUrl: `ws://127.0.0.1:${port}/ext/bridge`, pairingCode: await host.issuePairingCode(), trustedOrigin: site.origin,
-    chromiumArgs: ['--no-proxy-server', '--host-resolver-rules=MAP stride-visual.test 127.0.0.1'] })
+    chromiumArgs: ['--no-proxy-server', '--host-resolver-rules=MAP stride-visual.test 127.0.0.1, MAP lanhuapp.com 127.0.0.1'] })
   await browser.prepare(site.url)
   const sessionId = (await host.client.rpc('session.create', { cwd: root })).sessionId
   await browser.bindSession(sessionId)
   // Changing bypass invalidates old visual observations. Select the explicit
   // approval policy before capturing, not between capture and point delivery.
   await setActionTrust([site.origin])
-  const targetId = await browser.worker.evaluate(async url => (await chrome.tabs.query({ url }))[0].id, site.url)
+  const targetId = await browser.worker.evaluate(async url => { const tab = (await chrome.tabs.query({})).find(item => item.url === url); if (!tab) throw new Error('Exact synthetic target tab unavailable'); return tab.id }, browser.target.url())
   const human = await browser.context.newPage(); await human.goto(`${site.origin}/personal`); await human.bringToFront()
   phase = 'real-image'
   const textOnly = await command(sessionId, 'browser_snapshot')
@@ -200,6 +201,50 @@ try {
   assert.equal(await browser.worker.evaluate(id => chrome.debugger.sendCommand({ tabId: id }, 'Page.getFrameTree').then(() => true, () => false), targetId), false)
   assert.equal(await human.evaluate(() => window.syntheticClicks), 0)
   assert.ok(await host.client.rpc('session.history', { sessionId }), 'Direct preparation must leave a readable test Session')
+  let stagedMenuRevocationDenied = false
+  if (lanhuZoomMenu) {
+    phase = 'menu-stage-revocation'
+    await browser.target.goto(site.smallUrl)
+    await browser.bindSession(sessionId)
+    await browser.target.bringToFront()
+    await browser.worker.evaluate(() => {
+      const original = chrome.tabs.sendMessage.bind(chrome.tabs)
+      globalThis.__strideZoomSendOriginal = original
+      globalThis.__strideZoomCommitCount = 0
+      chrome.tabs.sendMessage = async (...args) => {
+        if (args[1]?.action === 'browser_set_design_zoom' && args[1]?.args?.phase === 'commit') globalThis.__strideZoomCommitCount++
+        const answer = await original(...args)
+        if (args[1]?.action === 'browser_set_design_zoom' && args[1]?.args?.phase === 'prepare') {
+          globalThis.__strideZoomPrepared = true
+          await new Promise(resolve => { globalThis.__strideZoomRelease = resolve })
+        }
+        return answer
+      }
+    })
+    try {
+      const pending = command(sessionId, 'browser_set_design_zoom', { percent: 150 })
+      await wait(() => browser.worker.evaluate(() => globalThis.__strideZoomPrepared === true), 'prepared menu hold')
+      assert.equal(await browser.target.evaluate(() => window.syntheticZoomChoices), 0)
+      await browser.panel.getByRole('button', { name: '停止控制此页', exact: true }).click()
+      await wait(() => browser.worker.evaluate(async () => !(await chrome.storage.session.get('dshPageAccess')).dshPageAccess?.grants?.length), 'menu control revoked')
+      await browser.worker.evaluate(() => globalThis.__strideZoomRelease())
+      const revoked = await pending
+      assert.equal(revoked.ok, false)
+      assert.equal(await browser.worker.evaluate(() => globalThis.__strideZoomCommitCount), 0)
+      assert.equal(await browser.target.evaluate(() => window.syntheticZoomChoices), 0)
+      assert.equal(await browser.target.locator('#zoom-status').textContent(), '27%')
+      stagedMenuRevocationDenied = true
+    } finally {
+      await browser.worker.evaluate(() => {
+        globalThis.__strideZoomRelease?.()
+        chrome.tabs.sendMessage = globalThis.__strideZoomSendOriginal
+        delete globalThis.__strideZoomSendOriginal
+        delete globalThis.__strideZoomRelease
+        delete globalThis.__strideZoomPrepared
+        delete globalThis.__strideZoomCommitCount
+      }).catch(() => {})
+    }
+  }
   let modelEvidence
   if (realModel) {
     phase = 'real-model'
@@ -209,6 +254,7 @@ try {
     await mkdir(join(root, 'model'))
     modelSessionId = (await host.client.rpc('session.create', { cwd: join(root, 'model') })).sessionId
     await browser.bindSession(modelSessionId)
+    if (lanhuZoomMenu) await browser.target.bringToFront()
     const id = ++sequence
     await writeFile(trigger, JSON.stringify({ sequence: id, mode: 'model', autoZoom, sessionId: modelSessionId, layer: site.layer, color: site.color, expected: site.designs.a }), { mode: 0o600 })
     await wait(async () => (await readJson(result))?.sequence === id, 'model guard')
@@ -238,10 +284,14 @@ try {
       assert.equal(modelEvidence.finalLayerReported, true); assert.equal(modelEvidence.finalColorReported, true)
       assert.equal(modelEvidence.finalStyleReportCorrect, true, 'Model must distinguish exact container and text metrics')
       if (autoZoom) {
-        const zoom = Number(await browser.target.locator('#design-zoom').inputValue())
+        const zoom = Number.parseInt(await browser.target.locator('#zoom-status').textContent())
         assert.ok(zoom >= 100 && zoom <= 200)
         assert.equal(modelEvidence.finalZoom, zoom, 'The final report must match independent zoom readback')
         assert.ok(site.zoomHistory().includes(zoom), 'The page must observe a real design zoom change')
+        if (lanhuZoomMenu) {
+          assert.equal(await browser.target.evaluate(() => window.syntheticZoomEntries), 1)
+          assert.equal(await browser.target.evaluate(() => window.syntheticZoomChoices), 1)
+        }
         const results = modelEvidence.results
         const selected = results.findIndex(row => row.name === 'browser_set_design_zoom' && row.ok)
         const fresh = results.findIndex((row, index) => index > selected && row.name === 'browser_screenshot' && row.ok && row.imageBlocks === 1)
@@ -253,8 +303,8 @@ try {
       assert.ok(site.state().clicks >= 2)
     }
   }
-  const summary = { passed: true, realHost: true, isolatedChrome: true, realModel, autoZoom, autoZoomFallback,
-    storedImageBlock: true, controlledPagePixelsVerified: true, imageBytesExcludedFromText: true,
+  const summary = { passed: true, realHost: true, isolatedChrome: true, realModel, autoZoom, autoZoomFallback, lanhuZoomMenu,
+    stagedMenuRevocationDenied, storedImageBlock: true, controlledPagePixelsVerified: true, imageBytesExcludedFromText: true,
     canvasLayerSelected: true, exactDomPropertiesRead: true, separateBackgroundAndTextRead: true,
     structuredInspectorStyles: true, structuredStyleReadRevoked: true, switchedDesignStylesFresh: true,
     oldDesignRefRejected: true, newDesignPixelsAndPropertiesVerified: true, crossSessionRefDenied: true, repeatedPointDenied: true,
@@ -272,7 +322,7 @@ try {
   })).catch(() => undefined)
   const modelEvidence = await readJson(`${result}.model`)
   const modelFinalReport = autoZoom ? await readFile(`${result}.final`, 'utf8').catch(() => undefined) : undefined
-  await writeFile(join(artifacts, resultName), JSON.stringify({ passed: false, realModel, autoZoom, autoZoomFallback, phase, errorName: error.name,
+  await writeFile(join(artifacts, resultName), JSON.stringify({ passed: false, realModel, autoZoom, autoZoomFallback, lanhuZoomMenu, phase, errorName: error.name,
     ...(modelEvidence ? { modelEvidence } : {}), ...(modelFinalReport ? { modelFinalReport } : {}) }), { mode: 0o600 })
   console.error(JSON.stringify({ phase, diagnostics }))
   throw error
