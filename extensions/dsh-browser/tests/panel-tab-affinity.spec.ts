@@ -2,10 +2,19 @@
 import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import { describe, expect, it, vi } from 'vitest'
-import { ControlGroupStatus } from '../src/panel/App.tsx'
+import { ControlGroupStatus, pageAccessNotice } from '../src/panel/App.tsx'
 import { PANEL_COPY } from '../src/panel/strings.ts'
 
 describe('control group UI', () => {
+  it.each(['zh', 'en'] as const)('distinguishes page selection from missing authorization in %s', locale => {
+    const copy = PANEL_COPY[locale]
+    const empty = { activeGranted: false, controlledGranted: false, controlledTabId: null, revocableTabId: null }
+    const page = { tabId: 1, windowId: 1, title: 'Synthetic group page', url: 'https://example.test/' }
+    expect(pageAccessNotice(empty, copy)).toBe(copy.pageAccess.required)
+    expect(pageAccessNotice({ ...empty, pages: [page] }, copy)).toBe(copy.pageAccess.selectExisting)
+    expect(pageAccessNotice({ ...empty, activeGranted: true, pages: [page] }, copy)).toBe(copy.pageAccess.selectExisting)
+    expect(pageAccessNotice({ ...empty, controlledGranted: true, controlledTabId: 1, pages: [page] }, copy)).toBe(copy.pageAccess.granted)
+  })
   it('offers only authorized group pages and has no human follow controls', async () => {
     Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
     const container = document.createElement('div'); document.body.append(container)

@@ -1,12 +1,14 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { BridgeServer } from '../src/server.ts'
+import { BridgeToolError } from '../src/server.ts'
 import { BROWSER_TOOL_NAMES, registerBrowserTools } from '../src/tools.ts'
 
 describe('registerBrowserTools', () => {
   function makeHarness() {
     const registered: { name: string; definition: Record<string, unknown> }[] = []
     const ctx = {
+      on: vi.fn(() => () => {}),
       tools: {
         register: vi.fn((definition: { name: string }) => {
           registered.push({ name: definition.name, definition: definition as Record<string, unknown> })
@@ -20,6 +22,26 @@ describe('registerBrowserTools', () => {
     const bridge = { requestTool } as unknown as BridgeServer
     return { ctx, bridge, requestTool, registered }
   }
+
+  it('blocks approval retries across browser tools until a new turn, without affecting another Agent', async () => {
+    const h = makeHarness()
+    const agent = { id: 'approval-session' }, other = { id: 'other-session' }
+    Object.assign(h.ctx, { agents: { get: () => agent }, get: () => ({ saveImage: vi.fn() }) })
+    h.requestTool.mockRejectedValueOnce(new BridgeToolError('timeout', 'The browser approval request for "browser_list_tabs" timed out before the user responded.'))
+    registerBrowserTools(h.ctx, h.bridge, { toolTimeoutMs: 1000, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
+    const tool = (name: string) => h.registered.find(item => item.name === name)!.definition.execute as (a: unknown, e: unknown) => Promise<unknown>
+    const signal = new AbortController().signal
+    await expect(tool('browser_list_tabs')({}, { agent, signal })).rejects.toThrow('Stop browser calls')
+    await expect(tool('browser_list_tabs')({}, { agent, signal })).rejects.toThrow('paused for this turn')
+    await expect(tool('browser_screenshot')({}, { agent, signal })).rejects.toThrow('paused for this turn')
+    expect(h.requestTool).toHaveBeenCalledTimes(1)
+    await expect(tool('browser_snapshot')({}, { agent: other, signal })).resolves.toEqual({ text: 'ok' })
+    const on = h.ctx.on as ReturnType<typeof vi.fn>
+    const event = on.mock.calls.find(([name]) => name === 'session/event')![1]
+    event({ id: agent.id }, { type: 'turn/start' })
+    await expect(tool('browser_snapshot')({}, { agent, signal })).resolves.toEqual({ text: 'ok' })
+    expect(h.requestTool).toHaveBeenCalledTimes(3)
+  })
 
   it('admits screenshot bytes through Host storage and renders a real image block, including inside run_code', async () => {
     const h = makeHarness()

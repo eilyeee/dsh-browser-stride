@@ -12,6 +12,7 @@ import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-attachment'
 import { isBrowserScreenshot, MAX_SCREENSHOT_BYTES } from './visual.ts'
 import { BROWSER_PRESS_DESCRIPTION } from './browser-policy.ts'
+import { BrowserApprovalGate } from './browser-approval.ts'
 
 /** Options resolved from plugin config before tool registration. */
 export interface BrowserToolsOptions {
@@ -86,19 +87,29 @@ export function registerBrowserTools(
   options: BrowserToolsOptions,
 ): Map<string, () => void> {
   const disposers = new Map<string, () => void>()
-  const call = async (exec: Pick<ToolRunContext, 'agent' | 'signal'>, name: string, args: Record<string, unknown>): Promise<TextResult> => {
+  const approvals = new BrowserApprovalGate()
+  const request = (exec: Pick<ToolRunContext, 'agent' | 'signal'>, name: string, args: Record<string, unknown>): Promise<unknown> => approvals.request(exec.agent, () => {
     const sessionId = exec.agent === undefined ? undefined : String(exec.agent.id)
-    const result = sessionId === undefined
-      ? await bridge.requestTool(name, args, exec.signal, options.toolTimeoutMs)
-      : await bridge.requestTool(name, args, exec.signal, options.toolTimeoutMs, sessionId)
+    return sessionId === undefined
+      ? bridge.requestTool(name, args, exec.signal, options.toolTimeoutMs)
+      : bridge.requestTool(name, args, exec.signal, options.toolTimeoutMs, sessionId)
+  })
+  const stopTurnListener = ctx.on('session/event', (session, event) => {
+    if (event.type !== 'turn/start') return
+    const agent = ctx.agents.get(session.id)
+    if (agent !== undefined) approvals.reset(agent)
+  })
+  const call = async (exec: Pick<ToolRunContext, 'agent' | 'signal'>, name: string, args: Record<string, unknown>): Promise<TextResult> => {
+    const result = await request(exec, name, args)
     return normalizeTextResult(result, name)
   }
 
   for (const tool of defineTools(call, options)) {
     disposers.set(tool.name, ctx.tools.register(tool))
   }
-  const screenshot = defineScreenshotTool(ctx, bridge, options)
-  disposers.set(screenshot.name, ctx.tools.register(screenshot))
+  const screenshot = defineScreenshotTool(ctx, request, options)
+  const stopScreenshot = ctx.tools.register(screenshot)
+  disposers.set(screenshot.name, () => { stopScreenshot(); stopTurnListener() })
   return disposers
 }
 
@@ -108,7 +119,7 @@ interface ScreenshotResult extends TextResult {
 }
 
 /** Images use the Host attachment service, never base64 text or filesystem paths. */
-function defineScreenshotTool(ctx: Context, bridge: BridgeServer, options: BrowserToolsOptions): ToolDefinition {
+function defineScreenshotTool(ctx: Context, request: (exec: Pick<ToolRunContext, 'agent' | 'signal'>, name: string, args: Record<string, unknown>) => Promise<unknown>, options: BrowserToolsOptions): ToolDefinition {
   return defineTool({
     name: 'browser_screenshot',
     description: 'See the authorized Chrome viewport, including canvas/images. Returns an image and single-use screenshotRef for browser_click_at.',
@@ -134,10 +145,7 @@ function defineScreenshotTool(ctx: Context, bridge: BridgeServer, options: Brows
     execute: async (_args, exec) => {
       const attachments = ctx.get('attachments')
       if (attachments === undefined) throw new Error('Browser screenshots require the Host image attachment service.')
-      const sessionId = exec.agent === undefined ? undefined : String(exec.agent.id)
-      const result = sessionId === undefined
-        ? await bridge.requestTool('browser_screenshot', {}, exec.signal, options.toolTimeoutMs)
-        : await bridge.requestTool('browser_screenshot', {}, exec.signal, options.toolTimeoutMs, sessionId)
+      const result = await request(exec, 'browser_screenshot', {})
       if (exec.signal.aborted) throw new Error('Screenshot was cancelled before image admission.')
       if (!isBrowserScreenshot(result)) throw new Error('The extension returned an invalid or oversized screenshot.')
       const data = Buffer.from(result.data, 'base64')

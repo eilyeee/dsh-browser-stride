@@ -1,16 +1,37 @@
 // Disposable Host probe: real tool/attachment pipeline, optional bounded default-model check.
-import { readFile, writeFile } from 'node:fs/promises'
+import { readFile, writeFile, rename } from 'node:fs/promises'
+async function saveJson(path, value) {
+  await writeFile(`${path}.tmp`, JSON.stringify(value), { mode: 0o600 })
+  await rename(`${path}.tmp`, path)
+}
+
+export function matchesLayerReport(text, expected) {
+  try {
+    const report = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] ?? '')
+    const number = value => typeof value === 'number' ? value
+      : typeof value === 'string' && /^\d+(?:\.\d+)?(?:px)?$/.test(value.trim()) ? Number.parseFloat(value) : NaN
+    return report.background?.layer === expected.layer && report.background?.fill?.toLowerCase() === expected.color
+      && ['width', 'height', 'radius'].every(key => number(report.background[key]) === expected[key])
+      && report.text?.layer === expected.textLayer && report.text?.color?.toLowerCase() === expected.text.color
+      && ['width', 'height', 'fontSize', 'lineHeight'].every(key => number(report.text[key]) === expected.text[key])
+      && /^(?:\d+(?:\.\d+)?)$/.test(String(report.text.fontWeight)) && Number(report.text.fontWeight) === expected.text.fontWeight
+  } catch { return false }
+}
 export const name = 'stride-visual-probe'
 export const inject = ['tools', 'agents', 'attachments']
+export const MODEL_BROWSER_TOOLS = ['browser_screenshot','browser_snapshot','browser_click_at','browser_get_text','browser_wait','browser_scroll']
 export function apply(ctx, config) {
-  let sequence = -1, pending = false, model, probeCall, probeResult, writes = Promise.resolve()
+  let sequence = -1, pending = false, model, probeCall, probeResult, releaseModelTools, writes = Promise.resolve()
   const controller = new AbortController()
   const evidence = { modelRequests: 0, browserCalls: [], results: [], blocked: [], terminal: false }
   const belongs = agent => model !== undefined && String(agent?.id) === model.sessionId
-  const save = () => (writes = writes.then(() => writeFile(`${config.result}.model`, JSON.stringify(evidence), { mode: 0o600 })).catch(() => {}))
+  const save = () => {
+    const value = structuredClone(evidence)
+    return writes = writes.then(() => saveJson(`${config.result}.model`, value)).catch(() => {})
+  }
   ctx.effect(() => ctx.tools.guard(exec => {
     if (!belongs(exec.agent)) return
-    if (!['run_code','browser_screenshot','browser_snapshot','browser_click_at','browser_get_text','browser_wait','browser_scroll'].includes(exec.name)) {
+    if (exec.name !== 'run_code' && !MODEL_BROWSER_TOOLS.includes(exec.name)) {
       evidence.blocked.push(exec.name); void save(); return 'This check permits only the synthetic canvas and browser tools.'
     }
   }))
@@ -39,6 +60,7 @@ export function apply(ctx, config) {
       const message = event.data.message, text = message.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
       evidence.model = { provider: message.source.provider, model: message.source.model }
       evidence.finalLayerReported = text.includes(model.layer); evidence.finalColorReported = text.toLowerCase().includes(model.color.toLowerCase())
+      evidence.finalStyleReportCorrect = matchesLayerReport(text, model.expected)
     }
     if (event.type === 'turn/end') { evidence.terminal = true; evidence.reason = event.data.reason.kind }
     void save()
@@ -52,6 +74,10 @@ export function apply(ctx, config) {
         if (!Number.isSafeInteger(command.sequence) || command.sequence <= sequence) return
         sequence = command.sequence
         if (command.mode === 'model') {
+          const agent = ctx.agents.get(command.sessionId)
+          if (agent === undefined) throw new Error('Synthetic model probe agent unavailable')
+          releaseModelTools?.()
+          releaseModelTools = agent.ctx.tools.restrict({ allow: MODEL_BROWSER_TOOLS })
           model = command; await save()
           await writeFile(config.result, JSON.stringify({ sequence, ok: true, modelReady: true }), { mode: 0o600 }); return
         }
@@ -80,6 +106,6 @@ export function apply(ctx, config) {
         if (sequence >= 0) await writeFile(config.result, JSON.stringify({ sequence, ok: false, probeError: true }), { mode: 0o600 }).catch(() => {})
       }).finally(() => { pending = false })
     }, 50)
-    return async () => { clearInterval(timer); controller.abort(); await writes }
+    return async () => { clearInterval(timer); controller.abort(); releaseModelTools?.(); await writes }
   })
 }

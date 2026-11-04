@@ -9,6 +9,15 @@ no release version has been assigned yet.
 
 ### Fixed
 
+- Approval timeouts and unavailable panels stop further browser requests from
+  that Agent until a new turn, without affecting other conversations or treating
+  ordinary page/transport timeouts as approval failures. Shared model guidance
+  asks the user to return to the extension; benchmark suite 7 records the change.
+- When authorized group pages exist without a selected conversation target, the
+  panel asks for page selection instead of repeating authorization instructions.
+  The synthetic visual check now separates background and text properties and
+  checks same-page design switching, old-point rejection and fresh image readback.
+
 - Design-page guidance separates background-layer dimensions, fill and radius
   from text-layer font metrics, and uses explicit inspector values for font
   weight. Benchmark suite 6 records the shared model-prompt change.

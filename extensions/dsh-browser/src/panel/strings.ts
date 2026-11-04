@@ -29,7 +29,7 @@ export interface PanelCopy {
     labels: Record<string, string>
     overflow: (shown: string[], total: number) => string
   }
-  pageAccess: { required: string; granted: string; revoke: string; failed: string }
+  pageAccess: { required: string; selectExisting: string; granted: string; revoke: string; failed: string }
   controlGroup: {
     title: string
     body: string
@@ -272,7 +272,7 @@ const EN: PanelCopy = {
     },
     overflow: (shown, total) => `${shown.join(' → ')} → ${total - shown.length} more`,
   },
-  pageAccess: { required: 'Click the DSH Stride toolbar icon on an unpinned page to authorize it and add it to the DSH control group.', granted: 'The target page is authorized. Moving other tabs into the DSH 控制 group does not authorize them.', revoke: 'Stop controlling this page', failed: 'Stopping page control was not confirmed. Reload the extension and check page access.' },
+  pageAccess: { required: 'Click the DSH Stride toolbar icon on an unpinned page to authorize it and add it to the DSH control group.', selectExisting: 'Select an already authorized page below for this conversation. You do not need to authorize it again.', granted: 'The target page is authorized. Moving other tabs into the DSH 控制 group does not authorize them.', revoke: 'Stop controlling this page', failed: 'Stopping page control was not confirmed. Reload the extension and check page access.' },
   controlGroup: {
     title: 'DSH control group',
     body: 'DSH uses authorized pages in its group. Switching your tabs does not change its target.',
@@ -526,7 +526,7 @@ const ZH: PanelCopy = {
     },
     overflow: (shown, total) => `${shown.join(' → ')} 等${total}个工具`,
   },
-  pageAccess: { required: '请在未固定的目标页面点击工具栏上的 DSH Stride 图标，将它授权并加入「DSH 控制」分组。', granted: '目标页面已授权。手动拖入「DSH 控制」分组不会自动授权其他页面。', revoke: '停止控制此页', failed: '停止控制的结果尚未确认，请重新加载扩展后核对页面授权。' },
+  pageAccess: { required: '请在未固定的目标页面点击工具栏上的 DSH Stride 图标，将它授权并加入「DSH 控制」分组。', selectExisting: '请在下方为当前对话选择一个已授权的分组页面，无需重复授权。', granted: '目标页面已授权。手动拖入「DSH 控制」分组不会自动授权其他页面。', revoke: '停止控制此页', failed: '停止控制的结果尚未确认，请重新加载扩展后核对页面授权。' },
   controlGroup: {
     title: 'DSH 控制分组',
     body: 'DSH 只操作分组内已授权的页面。你切换标签页时，控制目标保持不变。',

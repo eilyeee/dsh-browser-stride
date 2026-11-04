@@ -29,8 +29,9 @@ async function wait(check, label, timeout = 30000) {
 }
 async function command(sessionId, name, args = {}) {
   const id = ++sequence
+  console.log(JSON.stringify({ phase, sequence: id, tool: name }))
   await writeFile(trigger, JSON.stringify({ sequence: id, sessionId, name, args }), { mode: 0o600 })
-  await wait(async () => (await readJson(result))?.sequence === id, name)
+  await wait(async () => (await readJson(result))?.sequence === id, name, 105_000)
   const answer = await readJson(result)
   assert.equal(answer.probeError, undefined, 'Host visual probe failed')
   return answer
@@ -48,17 +49,17 @@ async function setActionTrust(origins) {
     port.postMessage({ type: 'settings', id, settings: { trustedActionOrigins: origins } })
   }), origins)
 }
-async function bluePixel(image) {
-  return browser.worker.evaluate(async image => {
+async function imagePixel(image, point = [.26, .31], rgb = [37, 99, 235]) {
+  return browser.worker.evaluate(async ({ image, point, rgb }) => {
     const data = Uint8Array.from(atob(image.data), char => char.charCodeAt(0))
     const bitmap = await createImageBitmap(new Blob([data], { type: image.mediaType }))
     try {
       const canvas = new OffscreenCanvas(bitmap.width, bitmap.height), context = canvas.getContext('2d')
       context.drawImage(bitmap, 0, 0)
-      const pixel = [...context.getImageData(Math.floor(bitmap.width * .26), Math.floor(bitmap.height * .31), 1, 1).data]
-      return pixel.slice(0, 3).every((value, index) => Math.abs(value - [37, 99, 235][index]) < 18)
+      const pixel = [...context.getImageData(Math.floor(bitmap.width * point[0]), Math.floor(bitmap.height * point[1]), 1, 1).data]
+      return pixel.slice(0, 3).every((value, index) => Math.abs(value - rgb[index]) < 18)
     } finally { bitmap.close() }
-  }, image)
+  }, { image, point, rgb })
 }
 try {
   await mkdir(home); await mkdir(artifacts, { recursive: true })
@@ -88,7 +89,7 @@ try {
   const shot = await command(sessionId, 'browser_screenshot')
   assert.equal(shot.ok, true, shot.text); assert.equal(shot.imageBlocks, 1)
   assert.ok(shot.image.width > 0 && shot.image.height > 0)
-  assert.equal(await bluePixel(shot.image), true, 'Stored attachment must depict the controlled canvas, not the orange human tab')
+  assert.equal(await imagePixel(shot.image), true, 'Stored attachment must depict the controlled canvas, not the orange human tab')
   assert.equal(shot.text.includes('/9j/'), false, 'Image bytes must not become model text')
   assert.equal(await human.evaluate(() => window.syntheticClicks), 0)
   // A second legitimate conversation on the same granted page cannot reuse the first ref.
@@ -97,46 +98,70 @@ try {
   await browser.panel.evaluate(sessionId => window.__dshBenchmarkPort.postMessage({ type: 'session.active', sessionId, isNew: true }), other)
   await wait(() => browser.worker.evaluate(async sessionId => !!(await chrome.storage.session.get('dshTabAffinity')).dshTabAffinity?.sessionTabs?.[sessionId], other), 'second conversation binding')
   await setActionTrust([])
-  assert.equal((await command(other, 'browser_click_at', { screenshotRef: shot.screenshotRef, x: .38, y: .37 })).ok, false)
+  assert.equal((await command(other, 'browser_click_at', { screenshotRef: shot.screenshotRef, x: .26, y: .31 })).ok, false)
   assert.equal(await browser.panel.getByRole('button', { name: '仅允许这一次', exact: true }).count(), 0, 'A foreign screenshot must not ask for action confirmation')
   assert.deepEqual(site.state(), { selection: null, clicks: 0 })
   const [clicked] = await Promise.all([
-    command(sessionId, 'browser_click_at', { screenshotRef: shot.screenshotRef, x: .38, y: .37 }),
+    command(sessionId, 'browser_click_at', { screenshotRef: shot.screenshotRef, x: .26, y: .31 }),
     browser.panel.getByRole('button', { name: '仅允许这一次', exact: true }).click(),
   ])
   assert.equal(clicked.ok, true, clicked.text)
   await wait(() => site.state().clicks === 1, 'canvas point selection')
   const selected = await command(sessionId, 'browser_snapshot')
   assert.equal(selected.ok, true); assert.ok(selected.text.includes(site.layer)); assert.ok(selected.text.includes(site.color)); assert.ok(selected.text.includes('14px'))
-  assert.equal((await command(sessionId, 'browser_click_at', { screenshotRef: shot.screenshotRef, x: .38, y: .37 })).ok, false)
+  assert.equal((await command(sessionId, 'browser_click_at', { screenshotRef: shot.screenshotRef, x: .26, y: .31 })).ok, false)
   assert.equal(await browser.panel.getByRole('button', { name: '仅允许这一次', exact: true }).count(), 0, 'A consumed screenshot must not ask for action confirmation')
   assert.equal(site.state().clicks, 1)
   await setActionTrust([site.origin])
   phase = 'scroll-and-zoom'
   const beforeScroll = await command(sessionId, 'browser_screenshot'); assert.equal(beforeScroll.ok, true, beforeScroll.text)
   assert.equal((await command(sessionId, 'browser_scroll', { direction: 'down', amount: 100 })).ok, true)
-  assert.equal((await command(sessionId, 'browser_click_at', { screenshotRef: beforeScroll.screenshotRef, x: .38, y: .37 })).ok, false)
+  assert.equal((await command(sessionId, 'browser_click_at', { screenshotRef: beforeScroll.screenshotRef, x: .26, y: .31 })).ok, false)
   const scrolled = await command(sessionId, 'browser_screenshot'); assert.equal(scrolled.ok, true, scrolled.text)
-  assert.equal(await bluePixel(scrolled.image), true, 'Scrolled screenshot must still cover the complete visible viewport')
+  assert.equal(await imagePixel(scrolled.image), true, 'Scrolled screenshot must still cover the complete visible viewport')
   await browser.worker.evaluate(id => chrome.tabs.setZoom(id, 1.25), targetId)
   await delay(200)
-  assert.equal((await command(sessionId, 'browser_click_at', { screenshotRef: scrolled.screenshotRef, x: .38, y: .37 })).ok, false)
+  assert.equal((await command(sessionId, 'browser_click_at', { screenshotRef: scrolled.screenshotRef, x: .26, y: .31 })).ok, false)
   const zoomed = await command(sessionId, 'browser_screenshot'); assert.equal(zoomed.ok, true, zoomed.text)
-  assert.equal(await bluePixel(zoomed.image), true, 'Browser zoom must preserve full-image point fractions')
+  assert.equal(await imagePixel(zoomed.image), true, 'Browser zoom must preserve full-image point fractions')
   phase = 'worker-recovery'
   Object.assign(browser, await browser.restartWorker())
   await browser.panel.locator('.connection .dot.connected').waitFor({ state: 'visible', timeout: 30000 })
   await wait(() => browser.worker.evaluate(async () => (await chrome.storage.session.get('dshVisualCaptures')).dshVisualCaptures?.length === 0), 'recorded visual connection cleanup')
   assert.equal(await browser.worker.evaluate(id => chrome.debugger.sendCommand({ tabId: id }, 'Page.getFrameTree').then(() => true, () => false), targetId), false)
-  assert.equal((await command(sessionId, 'browser_click_at', { screenshotRef: zoomed.screenshotRef, x: .38, y: .37 })).ok, false)
+  assert.equal((await command(sessionId, 'browser_click_at', { screenshotRef: zoomed.screenshotRef, x: .26, y: .31 })).ok, false)
   assert.equal(site.state().clicks, 1, 'Worker recovery must not replay a canvas selection')
   await browser.bindSession(sessionId)
   const recovered = await command(sessionId, 'browser_screenshot'); assert.equal(recovered.ok, true, recovered.text)
-  assert.equal(await bluePixel(recovered.image), true, 'A fresh screenshot must work after explicit binding in the new worker')
+  assert.equal(await imagePixel(recovered.image), true, 'A fresh screenshot must work after explicit binding in the new worker')
+  phase = 'separate-layers-and-design-switch'
+  assert.equal((await command(sessionId, 'browser_click_at', { screenshotRef: recovered.screenshotRef, x: .26, y: .31 })).ok, true)
+  const background = await command(sessionId, 'browser_get_text', { selector: '#properties' })
+  assert.ok(background.text.includes(site.layer)); assert.ok(background.text.includes('width: 320px'))
+  const textShot = await command(sessionId, 'browser_screenshot'); assert.equal(textShot.ok, true, textShot.text)
+  assert.equal((await command(sessionId, 'browser_click_at', { screenshotRef: textShot.screenshotRef, x: .38, y: .37 })).ok, true)
+  const lettering = await command(sessionId, 'browser_get_text', { selector: '#properties' })
+  for (const value of [site.textLayer, 'font-size: 18px', 'font-weight: 400', 'line-height: 24px', 'width: 126px']) assert.ok(lettering.text.includes(value), value)
+  assert.equal(lettering.text.includes('width: 320px'), false)
+  const beforeSwitch = await command(sessionId, 'browser_screenshot'); assert.equal(beforeSwitch.ok, true, beforeSwitch.text)
+  const clicksBeforeSwitch = site.state().clicks
+  await browser.target.locator('#design-b').click()
+  await browser.target.locator('#current-design').filter({ hasText: 'Design B' }).waitFor()
+  assert.equal((await command(sessionId, 'browser_click_at', { screenshotRef: beforeSwitch.screenshotRef, x: .26, y: .31 })).ok, false)
+  assert.equal(site.state().clicks, clicksBeforeSwitch, 'Old-design coordinates must not dispatch a selection')
+  assert.equal(await browser.target.locator('#properties').textContent(), 'Select a design layer')
+  const newDesign = await command(sessionId, 'browser_screenshot'); assert.equal(newDesign.ok, true, newDesign.text)
+  assert.equal(await imagePixel(newDesign.image, site.designs.b.sample, [22, 163, 74]), true, 'Fresh screenshot must show the new green design at its new position')
+  assert.equal((await command(sessionId, 'browser_click_at', { screenshotRef: newDesign.screenshotRef, x: .53, y: .59 })).ok, true)
+  const newProperties = await command(sessionId, 'browser_get_text', { selector: '#properties' })
+  for (const value of [site.designs.b.layer, site.designs.b.color, '22px', 'width: 260px']) assert.ok(newProperties.text.includes(value), value)
+  await wait(() => site.state().selection === site.designs.b.layer, 'new-design server readback')
+  await browser.target.locator('#design-a').click()
+  await browser.target.locator('#current-design').filter({ hasText: 'Design A' }).waitFor()
   phase = 'native-revocation'
   await browser.panel.getByRole('button', { name: '停止控制此页', exact: true }).click()
   await wait(() => browser.worker.evaluate(async id => !(await chrome.storage.session.get('dshPageAccess')).dshPageAccess?.grants?.some(row => row.tabId === id), targetId), 'native group revocation')
-  assert.equal((await command(sessionId, 'browser_click_at', { screenshotRef: recovered.screenshotRef, x: .38, y: .37 })).ok, false)
+  assert.equal((await command(sessionId, 'browser_click_at', { screenshotRef: recovered.screenshotRef, x: .26, y: .31 })).ok, false)
   assert.equal(await browser.worker.evaluate(id => chrome.debugger.sendCommand({ tabId: id }, 'Page.getFrameTree').then(() => true, () => false), targetId), false)
   assert.equal(await human.evaluate(() => window.syntheticClicks), 0)
   let modelEvidence
@@ -148,10 +173,10 @@ try {
     modelSessionId = (await host.client.rpc('session.create', { cwd: join(root, 'model') })).sessionId
     await browser.bindSession(modelSessionId)
     const id = ++sequence
-    await writeFile(trigger, JSON.stringify({ sequence: id, mode: 'model', sessionId: modelSessionId, layer: site.layer, color: site.color }), { mode: 0o600 })
+    await writeFile(trigger, JSON.stringify({ sequence: id, mode: 'model', sessionId: modelSessionId, layer: site.layer, color: site.color, expected: site.designs.a }), { mode: 0o600 })
     await wait(async () => (await readJson(result))?.sequence === id, 'model guard')
     assert.equal((await readJson(result)).modelReady, true)
-    await host.client.rpc('session.prompt', { sessionId: modelSessionId, mode: 'queue', content: [{ type: 'text', text: '请查看已授权分组页的设计画布。画布上有一个蓝色按钮，请用截图确定它的位置，点击它，然后读取右侧属性面板，报告图层名、填充色和圆角。不要修改设计属性或访问其他页面，完成后停止。' }], clientTimeZone: 'Asia/Shanghai' })
+    await host.client.rpc('session.prompt', { sessionId: modelSessionId, mode: 'queue', content: [{ type: 'text', text: '当前对话已绑定合成画布，不要列出或跟随标签页。画布上有一个蓝色按钮，请用截图确定它的位置，分别选择按钮的背景留白和文字，每次点击都重新截图并回读属性。最后只返回 JSON：background 包含 layer、width、height、fill、radius；text 包含 layer、width、height、fontSize、fontWeight、color、lineHeight。尺寸单位为 px，字重以面板显式值为准。不要修改设计属性或访问其他页面，完成后停止。' }], clientTimeZone: 'Asia/Shanghai' })
     await wait(async () => (await readJson(`${result}.model`))?.terminal === true, 'default-model visual turn', 360000)
     modelEvidence = await readJson(`${result}.model`)
     assert.equal(modelEvidence.reason, 'completed')
@@ -159,12 +184,15 @@ try {
     assert.ok(modelEvidence.results.some(row => row.name === 'browser_screenshot' && row.ok && row.imageBlocks === 1))
     assert.ok(modelEvidence.results.some(row => row.name === 'browser_click_at' && row.ok))
     assert.equal(modelEvidence.finalLayerReported, true); assert.equal(modelEvidence.finalColorReported, true)
-    assert.equal(site.state().selection, site.layer)
-    assert.ok(site.state().clicks >= 1)
+    assert.equal(modelEvidence.finalStyleReportCorrect, true, 'Model must distinguish exact container and text metrics')
+    assert.ok(site.history().some(row => row.layer === site.layer))
+    assert.ok(site.history().some(row => row.layer === site.textLayer))
+    assert.ok(site.state().clicks >= 2)
   }
   const summary = { passed: true, realHost: true, isolatedChrome: true, realModel,
     storedImageBlock: true, controlledPagePixelsVerified: true, imageBytesExcludedFromText: true,
-    canvasLayerSelected: true, exactDomPropertiesRead: true, crossSessionRefDenied: true, repeatedPointDenied: true,
+    canvasLayerSelected: true, exactDomPropertiesRead: true, separateBackgroundAndTextRead: true,
+    oldDesignRefRejected: true, newDesignPixelsAndPropertiesVerified: true, crossSessionRefDenied: true, repeatedPointDenied: true,
     staleScrollAndZoomDenied: true, scrolledAndZoomedPixelsVerified: true, nativeStopDetachedVisualControl: true,
     workerRestartDetachedVisualControl: true, workerRestartRefDenied: true, workerRestartFreshCapture: true,
     invalidRefSkippedApproval: true, validPointApprovedNatively: true,
@@ -173,7 +201,12 @@ try {
   console.log(JSON.stringify(summary))
 } catch (error) {
   await mkdir(artifacts, { recursive: true })
+  const diagnostics = await browser?.panel.evaluate(() => ({
+    connected: !!document.querySelector('.connection .dot.connected'),
+    approvalVisible: document.body.innerText.includes('仅允许这一次'),
+  })).catch(() => undefined)
   await writeFile(join(artifacts, realModel ? 'real-model.json' : 'result.json'), JSON.stringify({ passed: false, realModel, phase, errorName: error.name }), { mode: 0o600 })
+  console.error(JSON.stringify({ phase, diagnostics }))
   throw error
 } finally {
   if (modelSessionId !== undefined) await host?.client.rpc('session.cancel', { sessionId: modelSessionId }).catch(() => {})

@@ -387,6 +387,12 @@ function tabLabel(tab: AffinityTab | null, unknownTab: string): string {
   }
 }
 
+export function pageAccessNotice(access: PageAccessStatus, copy: PanelCopy): string {
+  if (access.controlledGranted) return copy.pageAccess.granted
+  if ((access.pages?.length ?? 0) > 0) return copy.pageAccess.selectExisting
+  return access.activeGranted ? copy.pageAccess.granted : copy.pageAccess.required
+}
+
 export function ControlGroupStatus({ state, pages, copy, onSelect }: {
   state: TabAffinityState | null
   pages: AffinityTab[]
@@ -2208,7 +2214,7 @@ export function App(): React.JSX.Element {
           onReset={() => changeUiScale(DEFAULT_UI_SCALE)} />
       )}
       <section className="page-access-notice" role="status">
-        <p>{pageAccess.controlledGranted || pageAccess.activeGranted ? copy.pageAccess.granted : copy.pageAccess.required}</p>
+        <p>{pageAccessNotice(pageAccess, copy)}</p>
         {typeof pageAccess.revocableTabId === 'number' && <button type="button" className="secondary" onClick={event => {
           if (event.nativeEvent.isTrusted) void api.revokePageAccess(pageAccess.revocableTabId!).catch(() => setError(copy.pageAccess.failed))
         }}>{copy.pageAccess.revoke}</button>}
