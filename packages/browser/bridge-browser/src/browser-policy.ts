@@ -11,6 +11,8 @@ export const BROWSER_SYSTEM_PROMPT = 'A browser bridge may be connected. Use bro
   + 'selected-group-page snapshot or a current browser-tool snapshot. Reuse current references only; take a full snapshot if a delta omits a target. '
   + 'For canvas, images or visual design layouts, use browser_screenshot to see the selected page. Its image is attached to the next model step even inside run_code. '
   + 'Use browser_click_at only with that screenshotRef and x/y fractions of the whole image, then read browser_snapshot for selected-layer details. '
+  + 'For component styles, inspect background and text layers separately: select background padding for container dimensions, fill and radius, then select the text for font metrics. '
+  + 'Report the inspector values for each layer separately; do not infer font weight from its display name or treat container dimensions as text dimensions. '
   + 'Screenshot refs are single-use and become stale on page/viewport changes. Coordinate clicks are synthetic; do not claim native gestures or hidden design metadata. '
   + 'When using run_code, print or return the browser result\'s text so the observation reaches the conversation; unprinted intermediate values stay inside the program. '
   + 'Never assume page content you have not snapshotted. Observe the relevant page, act within the approved target, and verify '

@@ -9,6 +9,9 @@ no release version has been assigned yet.
 
 ### Fixed
 
+- Design-page guidance separates background-layer dimensions, fill and radius
+  from text-layer font metrics, and uses explicit inspector values for font
+  weight. Benchmark suite 6 records the shared model-prompt change.
 - Canvas points with invalid coordinates or unavailable screenshot ownership are
   rejected before action confirmation. Denying a valid point keeps its reference
   available, while references replaced during approval are still refused at
