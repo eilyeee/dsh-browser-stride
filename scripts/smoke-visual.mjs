@@ -109,6 +109,18 @@ try {
   await wait(() => site.state().clicks === 1, 'canvas point selection')
   const selected = await command(sessionId, 'browser_snapshot')
   assert.equal(selected.ok, true); assert.ok(selected.text.includes(site.layer)); assert.ok(selected.text.includes(site.color)); assert.ok(selected.text.includes('14px'))
+  const readStyles = async (args = { region: '#properties' }) => {
+    const result = await command(sessionId, 'browser_read_design_styles', args)
+    assert.equal(result.ok, true, result.text)
+    return JSON.parse(result.text.slice(result.text.indexOf('{')))
+  }
+  const backgroundStyles = await readStyles()
+  assert.equal(backgroundStyles.layer.value, site.layer)
+  for (const [key, value] of Object.entries({ width: '320px', height: '144px', fill: site.color, borderRadius: '14px' })) {
+    assert.equal(backgroundStyles.properties[key].value, value)
+    assert.ok(backgroundStyles.properties[key].evidence.length > 0)
+  }
+  assert.ok(backgroundStyles.missing.includes('fontWeight'))
   assert.equal((await command(sessionId, 'browser_click_at', { screenshotRef: shot.screenshotRef, x: .26, y: .31 })).ok, false)
   assert.equal(await browser.panel.getByRole('button', { name: '仅允许这一次', exact: true }).count(), 0, 'A consumed screenshot must not ask for action confirmation')
   assert.equal(site.state().clicks, 1)
@@ -143,6 +155,15 @@ try {
   const lettering = await command(sessionId, 'browser_get_text', { selector: '#properties' })
   for (const value of [site.textLayer, 'font-size: 18px', 'font-weight: 400', 'line-height: 24px', 'width: 126px']) assert.ok(lettering.text.includes(value), value)
   assert.equal(lettering.text.includes('width: 320px'), false)
+  const textStyles = await readStyles()
+  assert.equal(textStyles.layer.value, site.textLayer)
+  for (const [key, value] of Object.entries({ width: '126px', height: '24px', fontSize: '18px', fontWeight: '400', lineHeight: '24px', color: '#ffffff' })) {
+    assert.equal(textStyles.properties[key].value, value)
+  }
+  assert.ok(textStyles.missing.includes('fill'))
+  const pageStyles = await readStyles({})
+  assert.equal(pageStyles.layer.value, site.textLayer)
+  assert.equal(pageStyles.properties.fontWeight.value, '400')
   const beforeSwitch = await command(sessionId, 'browser_screenshot'); assert.equal(beforeSwitch.ok, true, beforeSwitch.text)
   const clicksBeforeSwitch = site.state().clicks
   await browser.target.locator('#design-b').click()
@@ -150,11 +171,16 @@ try {
   assert.equal((await command(sessionId, 'browser_click_at', { screenshotRef: beforeSwitch.screenshotRef, x: .26, y: .31 })).ok, false)
   assert.equal(site.state().clicks, clicksBeforeSwitch, 'Old-design coordinates must not dispatch a selection')
   assert.equal(await browser.target.locator('#properties').textContent(), 'Select a design layer')
+  assert.equal((await readStyles()).status, 'unrecognized', 'A switched design must not reuse old layer styles')
   const newDesign = await command(sessionId, 'browser_screenshot'); assert.equal(newDesign.ok, true, newDesign.text)
   assert.equal(await imagePixel(newDesign.image, site.designs.b.sample, [22, 163, 74]), true, 'Fresh screenshot must show the new green design at its new position')
   assert.equal((await command(sessionId, 'browser_click_at', { screenshotRef: newDesign.screenshotRef, x: .53, y: .59 })).ok, true)
   const newProperties = await command(sessionId, 'browser_get_text', { selector: '#properties' })
   for (const value of [site.designs.b.layer, site.designs.b.color, '22px', 'width: 260px']) assert.ok(newProperties.text.includes(value), value)
+  const switchedStyles = await readStyles()
+  assert.equal(switchedStyles.layer.value, site.designs.b.layer)
+  assert.equal(switchedStyles.properties.width.value, '260px')
+  assert.equal(switchedStyles.properties.fill.value, site.designs.b.color)
   await wait(() => site.state().selection === site.designs.b.layer, 'new-design server readback')
   await browser.target.locator('#design-a').click()
   await browser.target.locator('#current-design').filter({ hasText: 'Design A' }).waitFor()
@@ -162,6 +188,7 @@ try {
   await browser.panel.getByRole('button', { name: '停止控制此页', exact: true }).click()
   await wait(() => browser.worker.evaluate(async id => !(await chrome.storage.session.get('dshPageAccess')).dshPageAccess?.grants?.some(row => row.tabId === id), targetId), 'native group revocation')
   assert.equal((await command(sessionId, 'browser_click_at', { screenshotRef: recovered.screenshotRef, x: .26, y: .31 })).ok, false)
+  assert.equal((await command(sessionId, 'browser_read_design_styles', { region: '#properties' })).ok, false, 'Style reads must respect native page revocation')
   assert.equal(await browser.worker.evaluate(id => chrome.debugger.sendCommand({ tabId: id }, 'Page.getFrameTree').then(() => true, () => false), targetId), false)
   assert.equal(await human.evaluate(() => window.syntheticClicks), 0)
   let modelEvidence
@@ -176,13 +203,15 @@ try {
     await writeFile(trigger, JSON.stringify({ sequence: id, mode: 'model', sessionId: modelSessionId, layer: site.layer, color: site.color, expected: site.designs.a }), { mode: 0o600 })
     await wait(async () => (await readJson(result))?.sequence === id, 'model guard')
     assert.equal((await readJson(result)).modelReady, true)
-    await host.client.rpc('session.prompt', { sessionId: modelSessionId, mode: 'queue', content: [{ type: 'text', text: '当前对话已绑定合成画布，不要列出或跟随标签页。画布上有一个蓝色按钮，请用截图确定它的位置，分别选择按钮的背景留白和文字，每次点击都重新截图并回读属性。最后只返回 JSON：background 包含 layer、width、height、fill、radius；text 包含 layer、width、height、fontSize、fontWeight、color、lineHeight。尺寸单位为 px，字重以面板显式值为准。不要修改设计属性或访问其他页面，完成后停止。' }], clientTimeZone: 'Asia/Shanghai' })
+    await host.client.rpc('session.prompt', { sessionId: modelSessionId, mode: 'queue', content: [{ type: 'text', text: '当前对话已绑定合成画布，不要列出或跟随标签页。画布上有一个蓝色按钮，请用截图确定它的位置，分别选择按钮的背景留白和文字，每次点击都重新截图，每层选中后都用 browser_read_design_styles 回读属性。这个合成站点的属性面板选择器为 #properties。最后只返回 JSON：background 包含 layer、width、height、fill、radius；text 包含 layer、width、height、fontSize、fontWeight、color、lineHeight。尺寸单位为 px，字重以面板显式值为准。不要修改设计属性或访问其他页面，完成后停止。' }], clientTimeZone: 'Asia/Shanghai' })
     await wait(async () => (await readJson(`${result}.model`))?.terminal === true, 'default-model visual turn', 360000)
     modelEvidence = await readJson(`${result}.model`)
     assert.equal(modelEvidence.reason, 'completed')
     assert.deepEqual(modelEvidence.blocked, [])
     assert.ok(modelEvidence.results.some(row => row.name === 'browser_screenshot' && row.ok && row.imageBlocks === 1))
     assert.ok(modelEvidence.results.some(row => row.name === 'browser_click_at' && row.ok))
+    assert.ok(modelEvidence.results.filter(row => row.name === 'browser_read_design_styles' && row.ok).length >= 2,
+      'Model must use structured inspector reads for both selected layers')
     assert.equal(modelEvidence.finalLayerReported, true); assert.equal(modelEvidence.finalColorReported, true)
     assert.equal(modelEvidence.finalStyleReportCorrect, true, 'Model must distinguish exact container and text metrics')
     assert.ok(site.history().some(row => row.layer === site.layer))
@@ -192,6 +221,7 @@ try {
   const summary = { passed: true, realHost: true, isolatedChrome: true, realModel,
     storedImageBlock: true, controlledPagePixelsVerified: true, imageBytesExcludedFromText: true,
     canvasLayerSelected: true, exactDomPropertiesRead: true, separateBackgroundAndTextRead: true,
+    structuredInspectorStyles: true, structuredStyleReadRevoked: true, switchedDesignStylesFresh: true,
     oldDesignRefRejected: true, newDesignPixelsAndPropertiesVerified: true, crossSessionRefDenied: true, repeatedPointDenied: true,
     staleScrollAndZoomDenied: true, scrolledAndZoomedPixelsVerified: true, nativeStopDetachedVisualControl: true,
     workerRestartDetachedVisualControl: true, workerRestartRefDenied: true, workerRestartFreshCapture: true,

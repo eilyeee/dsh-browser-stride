@@ -14,6 +14,7 @@ export const BROWSER_SYSTEM_PROMPT = 'A browser bridge may be connected. Use bro
   + 'Use browser_click_at only with that screenshotRef and x/y fractions of the whole image, then read browser_snapshot for selected-layer details. '
   + 'For component styles, inspect background and text layers separately: select background padding for container dimensions, fill and radius, then select the text for font metrics. '
   + 'Report the inspector values for each layer separately; do not infer font weight from its display name or treat container dimensions as text dimensions. '
+  + 'If browser_read_design_styles is available, use it for explicit inspector labels, fixed fields and source evidence; provide a known region selector when possible. Missing, conflicting or unrecognized values require another observation, not invented CSS. '
   + 'If a design target is too small to locate reliably, ask the user to enlarge the design view and take a fresh screenshot rather than guessing points. '
   + 'Screenshot refs are single-use and become stale on page/viewport changes. Coordinate clicks are synthetic; do not claim native gestures or hidden design metadata. '
   + 'When using run_code, print or return the browser result\'s text so the observation reaches the conversation; unprinted intermediate values stay inside the program. '

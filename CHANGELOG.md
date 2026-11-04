@@ -7,6 +7,20 @@ no release version has been assigned yet.
 
 ## [Unreleased]
 
+### Added
+
+- `browser_read_design_styles` reads explicitly labelled inspector properties
+  through the existing authorized text tool. Reports retain source evidence,
+  missing fields and conflicts; background/text layers are not merged and
+  truncated reads cannot yield style values. The initial bilingual label parser
+  does not infer hidden metadata, units or font weight, or generate CSS.
+  Synthetic browser checks cover layer switching and native page revocation;
+  the existing default model has used the helper for both layers and reported
+  exact synthetic metrics. General real-site compatibility needs separate acceptance.
+  Benchmark suite 8 records the model-facing tool and guidance change.
+- Plain page-text reads preserve rendered line breaks for inspector label/value
+  pairs. Sensitive copied values remain redacted across whitespace changes.
+
 ### Fixed
 
 - Approval timeouts and unavailable panels stop further browser requests from

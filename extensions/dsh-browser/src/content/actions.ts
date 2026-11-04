@@ -575,7 +575,7 @@ function reloadAction(ctx: ActionContext): ActionResult {
 async function getTextAction(args: Record<string, unknown>): Promise<ActionResult> {
   const selector = typeof args.selector === 'string' && args.selector !== '' ? args.selector : undefined
   const source = selector !== undefined ? document.querySelector(selector) : null
-  const text = source !== null ? pageText(source) : selector !== undefined ? `No element matched selector: ${selector}` : pageText()
+  const text = source !== null ? pageText(source, true) : selector !== undefined ? `No element matched selector: ${selector}` : pageText(undefined, true)
   const truncated = truncate(text, 8_000)
   return { text: truncated.text + (truncated.truncated > 0 ? `\n(Truncated ${truncated.truncated} characters.)` : '') }
 }

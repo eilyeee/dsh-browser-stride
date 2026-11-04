@@ -9,6 +9,28 @@ const budget = { maxItems: 20, maxForms: 10, maxChars: 2_000 }
 afterEach(() => { document.body.replaceChildren() })
 
 describe('basic form readback', () => {
+  it('keeps inspector label/value lines in text reads while snapshots retain their existing format', async () => {
+    document.body.innerHTML = '<aside id="properties"></aside>'
+    const panel = document.querySelector('aside')!
+    // jsdom does not implement rendered innerText; the textContent fallback
+    // exercises the same line-preserving normalization.
+    panel.textContent = 'Layer: Background\r\n  width: 320px\n\tBorder radius: 14px'
+    const result = await runAction('browser_get_text', { selector: '#properties' }, { ids: new ElementIds(), budget })
+    expect(result.text).toBe('Layer: Background\nwidth: 320px\nBorder radius: 14px')
+    const page = await runAction('browser_get_text', {}, { ids: new ElementIds(), budget })
+    expect(page.text).toBe(result.text)
+  })
+
+  it('redacts sensitive copies even when rendered across inspector line breaks', async () => {
+    document.body.innerHTML = '<textarea autocomplete="current-password"></textarea><aside id="properties"></aside>'
+    const field = document.querySelector('textarea')!
+    field.value = 'synthetic.* multi word secret'
+    document.querySelector('aside')!.textContent = 'Layer: Background\nwidth: 320px\nsynthetic.* multi\nword secret\nsyntheticXX multi\nword secret'
+    const result = await runAction('browser_get_text', { selector: '#properties' }, { ids: new ElementIds(), budget })
+    expect(result.text).toBe('Layer: Background\nwidth: 320px\n••••\nsyntheticXX multi\nword secret')
+    expect(result.text).not.toContain('synthetic.*')
+  })
+
   it('reports a reverted password field without revealing the entered value', async () => {
     document.body.innerHTML = '<input type="password" aria-label="Password">'
     const input = document.querySelector('input')!

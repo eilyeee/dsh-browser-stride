@@ -192,10 +192,15 @@ export function mainText(doc: Document): string {
 /**
  * The full text of an element (or the whole document).
  * @param root - element to read; defaults to the document body.
+ * @param preserveLines - keep rendered line boundaries for plain inspector reads.
  * @returns normalized text.
  */
-export function pageText(root?: Element | null): string {
+export function pageText(root?: Element | null, preserveLines = false): string {
   const source = root ?? document.body
   if (source === null || source === undefined) return ''
-  return redactSensitivePageText(source, clean(elementText(source)))
+  const raw = elementText(source)
+  const text = preserveLines
+    ? raw.replace(/\r\n?/g, '\n').replace(/[^\S\n]+/g, ' ').replace(/ *\n */g, '\n').replace(/\n{3,}/g, '\n\n').trim()
+    : clean(raw)
+  return redactSensitivePageText(source, text)
 }

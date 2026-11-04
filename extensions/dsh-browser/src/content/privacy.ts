@@ -107,7 +107,16 @@ export function redactSensitivePageText(root: Element, text: string): string {
   if (fragments.size > 0 && text.length > MAX_REDACTION_TEXT) return '[Sensitive page text withheld: text exceeds the safe redaction limit.]'
   let redacted = text
   // Longer matches first avoid exposing the tail when values overlap.
-  for (const fragment of [...fragments].sort((a, b) => b.length - a.length)) redacted = redacted.replaceAll(fragment, '••••')
+  for (const fragment of [...fragments].sort((a, b) => b.length - a.length)) {
+    redacted = redacted.replaceAll(fragment, '••••')
+    // Plain-text reads can retain rendered line breaks. Match the same
+    // normalized sensitive value across those breaks without flattening the
+    // inspector's label/value structure or interpreting value text as regex.
+    if (fragment.includes(' ') && /\s/.test(redacted)) {
+      const pattern = fragment.split(' ').map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+')
+      redacted = redacted.replace(new RegExp(pattern, 'g'), '••••')
+    }
+  }
   return redacted
 }
 

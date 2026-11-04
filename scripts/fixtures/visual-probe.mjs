@@ -19,7 +19,7 @@ export function matchesLayerReport(text, expected) {
 }
 export const name = 'stride-visual-probe'
 export const inject = ['tools', 'agents', 'attachments']
-export const MODEL_BROWSER_TOOLS = ['browser_screenshot','browser_snapshot','browser_click_at','browser_get_text','browser_wait','browser_scroll']
+export const MODEL_BROWSER_TOOLS = ['browser_screenshot','browser_snapshot','browser_click_at','browser_get_text','browser_read_design_styles','browser_wait','browser_scroll']
 export function apply(ctx, config) {
   let sequence = -1, pending = false, model, probeCall, probeResult, releaseModelTools, writes = Promise.resolve()
   const controller = new AbortController()

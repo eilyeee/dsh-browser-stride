@@ -34,6 +34,7 @@ describe('registerBrowserTools', () => {
     await expect(tool('browser_list_tabs')({}, { agent, signal })).rejects.toThrow('Stop browser calls')
     await expect(tool('browser_list_tabs')({}, { agent, signal })).rejects.toThrow('paused for this turn')
     await expect(tool('browser_screenshot')({}, { agent, signal })).rejects.toThrow('paused for this turn')
+    await expect(tool('browser_read_design_styles')({}, { agent, signal })).rejects.toThrow('paused for this turn')
     expect(h.requestTool).toHaveBeenCalledTimes(1)
     await expect(tool('browser_snapshot')({}, { agent: other, signal })).resolves.toEqual({ text: 'ok' })
     const on = h.ctx.on as ReturnType<typeof vi.fn>
@@ -83,6 +84,45 @@ describe('registerBrowserTools', () => {
     expect(registered.map((r) => r.name).sort()).toEqual([...BROWSER_TOOL_NAMES].sort())
     expect(disposers.size).toBe(BROWSER_TOOL_NAMES.length)
     for (const dispose of disposers.values()) dispose()
+  })
+
+  it('reads inspector fields through the existing authorized text action and original session', async () => {
+    const h = makeHarness()
+    h.requestTool.mockResolvedValueOnce({ text: 'Layer: Background\nwidth: 320px\nheight: 144px\nFill: #2563eb' })
+    registerBrowserTools(h.ctx, h.bridge, { toolTimeoutMs: 1000, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
+    const tool = h.registered.find(item => item.name === 'browser_read_design_styles')!.definition
+    const signal = new AbortController().signal
+    const result = await (tool.execute as (a: unknown, e: unknown) => Promise<{ text: string }>)({ region: ' #properties ', frame: 2, text: 'forged', sessionId: 'forged' }, { agent: { id: 'design-session' }, signal })
+    expect(h.requestTool).toHaveBeenCalledExactlyOnceWith('browser_get_text', { selector: '#properties', frame: 2 }, signal, 1000, 'design-session')
+    expect(result.text).toContain('untrusted data')
+    const report = JSON.parse(result.text.slice(result.text.indexOf('{')))
+    expect(report.properties.width.value).toBe('320px')
+    expect(report.layer.value).toBe('Background')
+    expect(report.properties.fontWeight).toBeUndefined()
+  })
+
+  it('can parse bounded page text without inventing an inspector selector', async () => {
+    const h = makeHarness()
+    registerBrowserTools(h.ctx, h.bridge, { toolTimeoutMs: 1000, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
+    const tool = h.registered.find(item => item.name === 'browser_read_design_styles')!.definition
+    const signal = new AbortController().signal
+    const result = await (tool.execute as (a: unknown, e: unknown) => Promise<{ text: string }>)({}, { signal })
+    expect(h.requestTool).toHaveBeenCalledExactlyOnceWith('browser_get_text', {}, signal, 1000)
+    expect(JSON.parse(result.text.slice(result.text.indexOf('{'))).status).toBe('unrecognized')
+  })
+
+  it('rejects invalid design regions before a browser read and preserves read failures/cancellation', async () => {
+    const h = makeHarness()
+    registerBrowserTools(h.ctx, h.bridge, { toolTimeoutMs: 1000, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
+    const tool = h.registered.find(item => item.name === 'browser_read_design_styles')!.definition
+    const execute = tool.execute as (a: unknown, e: unknown) => Promise<unknown>
+    const controller = new AbortController()
+    for (const region of ['', '  ', 1, 'x'.repeat(501)]) await expect(execute({ region }, { signal: controller.signal })).rejects.toThrow()
+    expect(h.requestTool).not.toHaveBeenCalled()
+    h.requestTool.mockRejectedValueOnce(new Error('selected page lost'))
+    await expect(execute({}, { signal: controller.signal })).rejects.toThrow('selected page lost')
+    h.requestTool.mockImplementationOnce(async () => { controller.abort(); return { text: 'Layer: Old\nwidth: 320px' } })
+    await expect(execute({}, { signal: controller.signal })).rejects.toThrow('cancelled')
   })
 
   it('executes browser_click with mapped args', async () => {
