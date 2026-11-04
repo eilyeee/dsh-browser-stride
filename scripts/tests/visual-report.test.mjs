@@ -4,7 +4,7 @@ import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
-import { apply, MODEL_BROWSER_TOOLS, matchesLayerReport, matchesLayoutReport, reportedDesignZoom } from '../fixtures/visual-probe.mjs'
+import { apply, MODEL_BROWSER_TOOLS, ZOOM_MODEL_TOOLS, WIKI_MODEL_TOOLS, matchesLayerReport, matchesLayoutReport, matchesWikiReport, reportedDesignZoom } from '../fixtures/visual-probe.mjs'
 
 const expected = { layer: 'background', textLayer: 'text-Medium', color: '#2563eb', width: 320, height: 144, radius: 14,
   text: { width: 126, height: 24, fontSize: 18, fontWeight: 400, lineHeight: 24, color: '#ffffff' } }
@@ -37,7 +37,18 @@ test('design zoom acceptance requires an explicit bounded percentage, not a gues
   assert.equal(reportedDesignZoom('No measured zoom'), null)
 })
 
-for (const reportKind of ['styles', 'layout', 'zoom']) test(`${reportKind} model tools are restricted only in the test Agent scope before arming`, async t => {
+test('Wiki acceptance checks exact business facts and excludes the reader theme from product requirements', () => {
+  const expected = { sourceRole: 'requirements', documentKey: 'synthetic', customerTypes: ['个人', '企业'], companyTaxIdRequired: true,
+    endpoint: '/api/customer-drafts', successFields: ['草稿编号', '已保存'], readOnlyCanSubmit: false, visualRequirements: [] }
+  assert.equal(matchesWikiReport(JSON.stringify(expected), expected), true)
+  for (const patch of [{ sourceRole: 'design' }, { documentKey: 'guessed' }, { companyTaxIdRequired: 'true' },
+    { readOnlyCanSubmit: true }, { endpoint: '/api/other' }, { customerTypes: ['个人'] }, { visualRequirements: ['font-size: 19px'] }]) {
+    assert.equal(matchesWikiReport(JSON.stringify({ ...expected, ...patch }), expected), false)
+  }
+  assert.equal(matchesWikiReport('No evidence', expected), false)
+})
+
+for (const reportKind of ['styles', 'layout', 'zoom', 'wiki']) test(`${reportKind} model tools are restricted only in the test Agent scope before arming`, async t => {
   const root = await mkdtemp(join(tmpdir(), 'stride-visual-scope-'))
   const trigger = join(root, 'trigger.json'), result = join(root, 'result.json'), stops = []
   let restriction, released = false, guard
@@ -57,9 +68,9 @@ for (const reportKind of ['styles', 'layout', 'zoom']) test(`${reportKind} model
   }
   assert.equal(ready?.modelReady, true)
   assert.deepEqual(restriction, { allow: reportKind === 'layout' ? ['browser_snapshot', 'browser_measure_layout', 'browser_navigate', 'browser_wait']
-    : reportKind === 'zoom' ? [...MODEL_BROWSER_TOOLS, 'browser_set_design_zoom'] : MODEL_BROWSER_TOOLS })
+    : reportKind === 'zoom' ? ZOOM_MODEL_TOOLS : reportKind === 'wiki' ? WIKI_MODEL_TOOLS : MODEL_BROWSER_TOOLS })
   assert.equal(typeof guard({ agent: { id: 'synthetic-model' }, name: 'bash' }), 'string')
-  if (reportKind !== 'layout') assert.equal(guard({ agent: { id: 'synthetic-model' }, name: 'browser_set_design_zoom' }) === undefined, reportKind === 'zoom')
+  if (reportKind !== 'layout') assert.equal(guard({ agent: { id: 'synthetic-model' }, name: 'browser_set_design_zoom' }) === undefined, ['zoom', 'wiki'].includes(reportKind))
   assert.equal(guard({ agent: { id: 'other' }, name: 'bash' }), undefined)
   assert.equal(typeof guard({ agent: { id: 'synthetic-model' }, name: 'browser_list_tabs' }), 'string')
   if (reportKind === 'layout') {

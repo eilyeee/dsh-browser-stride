@@ -3,6 +3,8 @@ import { createServer } from 'node:http'
 import { randomBytes } from 'node:crypto'
 export async function startVisualSite({ lanhuZoomMenu = false } = {}) {
   const nonce = randomBytes(4).toString('hex')
+  const wikiExpected = { sourceRole: 'requirements', documentKey: nonce, customerTypes: ['个人', '企业'], companyTaxIdRequired: true,
+    endpoint: '/api/customer-drafts', successFields: ['草稿编号', '已保存'], readOnlyCanSubmit: false, visualRequirements: [] }
   const designs = {
     a: { layer: `Synthetic_background_${nonce}`, textLayer: `Synthetic_text_Medium_${nonce}`, color: '#2563eb', radius: 14,
       width: 320, height: 144, text: { width: 126, height: 24, fontSize: 18, fontWeight: 400, lineHeight: 24, color: '#ffffff' },
@@ -30,13 +32,23 @@ export async function startVisualSite({ lanhuZoomMenu = false } = {}) {
       res.end('ok'); return
     }
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    if (req.url === '/requirements') {
+      res.end(`<!doctype html><meta charset="utf-8"><title>客户信息需求 Wiki</title>
+<style>body{background:#ffe4fa;font:19px serif}article{max-width:800px;padding:31px}aside{color:#b0239f}</style>
+<article><h1>客户信息联调需求</h1><p>文档编号：${nonce}</p><ul><li>客户类型必填，可选“个人”和“企业”。</li>
+<li>选择企业时，纳税识别号必填。</li><li>提交接口：POST /api/customer-drafts。</li>
+<li>提交成功后展示“已保存”和返回的“草稿编号”。</li><li>只读模式下不可提交。</li></ul></article>
+<aside id="properties">Wiki 站点主题信息（文档阅读器）<br>Layer: Wiki_shell<br>Fill: #b0239f<br>font-size: 19px<br>width: 800px</aside>
+<script>window.syntheticWrites=0;addEventListener('pointerdown',()=>syntheticWrites++)</script>`)
+      return
+    }
     if (req.url === '/personal') {
       res.end('<!doctype html><title>Uncontrolled synthetic human page</title><body style="background:#d9480f"><h1>Uncontrolled human tab</h1><p>This page must never be captured or clicked.</p><script>window.syntheticClicks=0;addEventListener("pointerdown",()=>syntheticClicks++)</script>')
       return
     }
     res.end(`<!doctype html><meta charset="utf-8"><title>Synthetic canvas design</title>
 <style>body{margin:0;background:#f6f7fb;min-height:180vh}canvas{position:fixed;inset:0}aside{position:fixed;right:16px;top:20px;width:210px;white-space:pre-wrap;font:16px Arial;background:white;padding:12px;border:1px solid #ddd}nav{position:fixed;left:32px;top:90px}#detail_container{position:fixed;left:220px;top:0;width:120px;height:48px;z-index:10}.choose_size_box{height:48px}.choose_size{width:48px;height:48px}mu-button{display:inline-block;width:48px;height:20px;margin-top:14px}.percent-pop{position:fixed;left:220px;top:34px;width:162px;background:white;z-index:20}.choose_item{padding:6px 12px;line-height:26px;cursor:pointer}</style>
-<canvas aria-label="Synthetic design canvas"></canvas><nav><button id="design-a">Design A</button><button id="design-b">Design B</button><span id="current-design">Design A</span>${lanhuZoomMenu || req.url.includes('controls=none') ? '<span>Design zoom</span>' : '<label>Design zoom <select id="design-zoom">' + [27, 72, 100, 120, 150, 200].map(value => `<option value="${value}">${value}%</option>`).join('') + '</select></label>'}<output id="zoom-status"></output></nav><aside id="properties">Select a design layer</aside>${lanhuZoomMenu && !req.url.includes('controls=none') ? '<div id="detail_container"><div class="operation-wrap"><div class="operation-center"><div class="choose_size_box"><div class="choose_size"><mu-button><span class="more_warp"><span class="more"></span></span></mu-button></div></div></div></div></div><div class="mu-popover percent-pop" style="display:none"><div class="choose_dialog"><div class="choose_item">放大</div><div class="choose_item">缩小</div>'+[200,150,100,50,25].map(value=>'<div class="choose_item">'+value+'%</div>').join('')+'</div></div>' : ''}
+<canvas aria-label="Synthetic design canvas"></canvas><nav><button id="design-a">Design A</button><button id="design-b">Design B</button><span id="current-design">Design A</span>${lanhuZoomMenu || req.url.includes('controls=none') ? '<span>Design zoom</span>' : '<label>' + (req.url.includes('controls=alternative') ? 'View size' : 'Design zoom') + ' <select id="design-zoom">' + [27, 72, 100, 120, 150, 200].map(value => `<option value="${value}">${value}%</option>`).join('') + '</select></label>'}<output id="zoom-status"></output></nav><aside id="properties">Select a design layer</aside>${lanhuZoomMenu && !req.url.includes('controls=none') ? '<div id="detail_container"><div class="operation-wrap"><div class="operation-center"><div class="choose_size_box"><div class="choose_size"><mu-button><span class="more_warp"><span class="more"></span></span></mu-button></div></div></div></div></div><div class="mu-popover percent-pop" style="display:none"><div class="choose_dialog"><div class="choose_item">放大</div><div class="choose_item">缩小</div>'+[200,150,100,50,25].map(value=>'<div class="choose_item">'+value+'%</div>').join('')+'</div></div>' : ''}
 <script>
 const designs=${JSON.stringify(designs)},canvas=document.querySelector('canvas'),panel=document.querySelector('aside');let current='a',zoom=${new URL(req.url, 'http://synthetic.test').searchParams.get('zoom') === '27' ? 27 : 100};
 function layout(d){const f=zoom/100;return {x:d.box[0],y:d.box[1],width:d.box[2]*f,height:d.box[3]*f,cx:d.box[0]+d.box[2]*f/2,cy:d.box[1]+d.box[3]*f/2,f}}
@@ -54,7 +66,7 @@ canvas.addEventListener('pointerdown',e=>{window.syntheticCanvasPoints++;const d
   await new Promise(done => server.listen(0, '127.0.0.1', done))
   const origin = `http://${lanhuZoomMenu ? 'lanhuapp.com' : 'stride-visual.test'}:${server.address().port}`
   const route = lanhuZoomMenu ? '/web/' : '/design', hash = lanhuZoomMenu ? '#/item/project/detailDetach' : ''
-  return { origin, url: `${origin}${route}${hash}`, smallUrl: `${origin}${route}?zoom=27${hash}`, noZoomControlUrl: `${origin}${route}?zoom=27&controls=none${hash}`, ...designs.a, designs,
+  return { origin, wikiUrl: `${origin}/requirements`, wikiExpected, url: `${origin}${route}${hash}`, smallUrl: `${origin}${route}?zoom=27${hash}`, noZoomControlUrl: `${origin}${route}?zoom=27&controls=none${hash}`, alternativeZoomUrl: `${origin}${route}?zoom=27&controls=alternative${hash}`, ...designs.a, designs,
     state: () => ({ selection: selection ?? null, clicks }), history: () => [...selections], zoomHistory: () => [...zooms], reset: () => { selection = undefined; clicks = 0; selections = []; zooms = [] },
     close: () => new Promise(done => server.close(done)) }
 }

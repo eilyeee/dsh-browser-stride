@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { changeDesignZoom } from '../src/content/design-zoom.ts'
+import { DesignZoomNotSelectedError } from '../src/content/design-zoom-error.ts'
 
 afterEach(() => { document.body.replaceChildren(); vi.restoreAllMocks() })
 function fixture(html = '<label>Design zoom <select><option>27%</option><option>100%</option><option>150%</option></select></label>') {
@@ -33,12 +34,13 @@ describe('bounded design zoom control', () => {
       '<select aria-label="Zoom"><option>27%</option><option disabled>150%</option></select>',
       '<select aria-label="Zoom"><option>27%</option><option>150%</option><option>150%</option></select>',
       '<select aria-label="Zoom"><option>27%</option><option>150%</option></select><select aria-label="Zoom"><option>27%</option><option>150%</option></select>',
-    ]) { fixture(html); expect(() => changeDesignZoom(150)).toThrow() }
+    ]) { fixture(html); expect(() => changeDesignZoom(150)).toThrow(DesignZoomNotSelectedError) }
   })
   it('refuses ignored or replaced controls instead of retrying the change', () => {
     const control = fixture()
     control.addEventListener('change', () => { control.selectedIndex = 0 })
     expect(() => changeDesignZoom(150)()).toThrow('readback')
+    try { changeDesignZoom(150)() } catch (error) { expect(error).not.toBeInstanceOf(DesignZoomNotSelectedError) }
     fixture(); const readback = changeDesignZoom(150); document.body.replaceChildren()
     expect(readback).toThrow('readback')
   })

@@ -3,6 +3,27 @@ import { BrowserApprovalGate } from '../src/browser-approval.ts'
 import { BridgeToolError } from '../src/server.ts'
 
 describe('browser approval retry boundary', () => {
+  it('releases only an authenticated no-selection failure for new observations or another method', async () => {
+    const gate = new BrowserApprovalGate(), agent = {}, work = vi.fn(async () => 'fresh observation')
+    let reject!: (error: Error) => void
+    const pending = gate.request(agent, () => new Promise((_, no) => { reject = no }), 'browser_set_design_zoom')
+    const outcome = expect(pending).rejects.toMatchObject({ code: 'design-zoom-not-selected', message: expect.stringContaining('fresh observation') })
+    await expect(gate.request(agent, work)).rejects.toThrow('in progress')
+    reject(new BridgeToolError('design-zoom-not-selected', 'No unique control'))
+    await outcome
+    await expect(gate.request(agent, work)).resolves.toBe('fresh observation')
+    await expect(gate.request(agent, async () => 'observed alternative', 'browser_select')).resolves.toBe('observed alternative')
+    expect(work).toHaveBeenCalledOnce()
+  })
+  it('does not release preparation for page-like messages, spoofed codes, transport loss or readback failures', async () => {
+    for (const error of [new Error('No percentage selection was dispatched.'), Object.assign(new Error('fake'), { code: 'design-zoom-not-selected' }),
+      new BridgeToolError('action-failed', 'No percentage selection was dispatched.'), new BridgeToolError('timeout', 'lost reply'),
+      new BridgeToolError('action-failed', 'Design zoom readback failed')]) {
+      const gate = new BrowserApprovalGate(), agent = {}
+      await expect(gate.request(agent, async () => { throw error }, 'browser_set_design_zoom')).rejects.toThrow('Stop browser calls')
+      await expect(gate.request(agent, async () => 'unsafe alternative')).rejects.toThrow('Stop browser calls')
+    }
+  })
   it('fences parallel work during zoom preparation, then stops that Agent on failure until a fresh turn', async () => {
     const gate = new BrowserApprovalGate(), agent = {}, other = {}, work = vi.fn(async () => 'browser')
     let reject!: (error: Error) => void

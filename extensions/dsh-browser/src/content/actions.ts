@@ -17,6 +17,7 @@ import { buildSnapshot, renderSnapshotDetails } from './snapshot.ts'
 import { visualViewportState } from './visual.ts'
 import { measureLayout } from './layout.ts'
 import { changeDesignZoom, nativeDesignZoomControls } from './design-zoom.ts'
+import { DesignZoomNotSelectedError } from './design-zoom-error.ts'
 import { clearLanhuZoom, commitLanhuZoom, prepareLanhuZoom } from './lanhu-zoom.ts'
 import type { DesignZoomStep } from '../design-zoom-step.ts'
 import type { VisualObservation } from '@eilyeee/dsh-browser-stride/src/visual.ts'
@@ -166,7 +167,7 @@ function referenceStillCurrent(args: Record<string, unknown>, ids: ElementIds, i
 /** Error carrying a stable wire code. */
 export class ActionError extends Error {
   constructor(
-    readonly code: 'action-failed' | 'bad-args',
+    readonly code: 'action-failed' | 'bad-args' | 'design-zoom-not-selected',
     message: string,
   ) {
     super(message)
@@ -240,7 +241,11 @@ export async function runAction(action: string, args: Record<string, unknown>, c
     case 'browser_set_design_zoom':
       try {
         if (args.phase === 'prepare' && nativeDesignZoomControls().length === 0) {
-          const step = await prepareLanhuZoom(args.percent)
+          // prepareLanhuZoom can open a menu, but never selects a percentage.
+          // Commit/readback failures below deliberately cannot use this code.
+          let step: DesignZoomStep | undefined
+          try { step = await prepareLanhuZoom(args.percent) }
+          catch (error) { throw new DesignZoomNotSelectedError(error instanceof Error ? error.message : 'Design zoom menu preparation failed.') }
           if (step !== undefined) return { text: 'Lanhu zoom menu prepared; selection needs a fresh authority check.', designZoomStep: step }
         }
         const readback = args.phase === 'commit' ? commitLanhuZoom(args.ticket, args.percent) : changeDesignZoom(args.percent)
@@ -250,7 +255,8 @@ export async function runAction(action: string, args: Record<string, unknown>, c
           + (result.changed ? 'Changed once. ' : 'Already at this scale. ')
           + 'Take a fresh screenshot; control readback alone is not proof of canvas rendering.', ctx, settled)
       } catch (error) {
-        throw new ActionError('action-failed', error instanceof Error ? error.message : 'Design zoom could not be confirmed.')
+        throw new ActionError(error instanceof DesignZoomNotSelectedError ? 'design-zoom-not-selected' : 'action-failed',
+          error instanceof Error ? error.message : 'Design zoom could not be confirmed.')
       }
     case 'browser_wait':
       return waitAction(args, ctx)

@@ -110,6 +110,7 @@ export function isRunTabMutation(name: string): boolean { return TAB_TOOLS.has(n
 export type ToolErrorCode =
   | 'no-active-tab'
   | 'content-unavailable'
+  | 'design-zoom-not-selected'
   | 'action-failed'
   | 'timeout'
   | 'bridge-closed'

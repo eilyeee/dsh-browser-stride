@@ -2,6 +2,8 @@
 // @vitest-environment-options {"url":"https://lanhuapp.com/web/#/item/project/detailDetach"}
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { clearLanhuZoom, commitLanhuZoom, prepareLanhuZoom } from '../src/content/lanhu-zoom.ts'
+import { runAction } from '../src/content/actions.ts'
+import { ElementIds } from '../src/content/ids.ts'
 beforeEach(() => { history.replaceState({}, '', '/web/#/item/project/detailDetach?image=a') })
 afterEach(() => { clearLanhuZoom(); document.body.replaceChildren(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers() })
 function fixture(before = 27) {
@@ -26,6 +28,18 @@ function fixture(before = 27) {
   return { owner, trigger, popup, menu, opened, chosen }
 }
 describe('observed Lanhu menu zoom', () => {
+  it('marks only preparation failures as no-selection, while commit failures remain fenced', async () => {
+    const context = { ids: new ElementIds(), budget: { maxItems: 20, maxForms: 10, maxChars: 2000 } }
+    const first = fixture(); first.menu.children[3]!.textContent = '120%'
+    await expect(runAction('browser_set_design_zoom', { phase: 'prepare', percent: 150 }, context))
+      .rejects.toMatchObject({ code: 'design-zoom-not-selected' })
+    expect(first.chosen).not.toHaveBeenCalled()
+    const next = fixture()
+    await runAction('browser_set_design_zoom', { phase: 'prepare', percent: 150 }, context)
+    await expect(runAction('browser_set_design_zoom', { phase: 'commit', ticket: 'invalid', percent: 150 }, context))
+      .rejects.toMatchObject({ code: 'action-failed' })
+    expect(next.chosen).not.toHaveBeenCalled()
+  })
   it('uses the HTTP-compatible secure nonce generator and rejects detached or misplaced popups', async () => {
     vi.stubGlobal('crypto', { getRandomValues: crypto.getRandomValues.bind(crypto) })
     fixture()

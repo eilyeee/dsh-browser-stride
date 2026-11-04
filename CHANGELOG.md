@@ -9,6 +9,11 @@ no release version has been assigned yet.
 
 ### Added
 
+- Shared guidance distinguishes supplied projects, visual references and Wiki
+  requirements. Document-reader themes are not product visual requirements.
+  Synthetic default-model checks cover material roles and observed-control
+  recovery; they do not establish user-project code editing or integration.
+  Benchmark suite 15 records these guidance/tool/error-semantics changes.
 - `browser_set_design_zoom` supports labelled native selects and the observed
   Lanhu detailDetach zoom menu, with exact bounded percentages and readback.
   The menu uses two extension-private steps under one tool call; selection
@@ -16,8 +21,9 @@ no release version has been assigned yet.
   pin. Cancellation after opening blocks the remaining selection, and a missing
   selection receiver cannot replay the first step. Lanhu requires a foreground
   page and a visible popup; background pages receive a specific error before
-  menu effects. Host failure fencing remains
-  Agent-local until a new user turn. The existing optional wire-v4 capability
+  menu effects. A packaged no-selection error permits fresh observation and
+  another supported method. Unknown-effect failures retain the Agent-local fence until a new user
+  turn; older peers remain conservative. The existing optional wire-v4 capability
   remains compatible. Suite 13 introduced the native tool; suite 14 records the
   menu adapter and controlled fixture/guidance changes. The default model also
   changed a real Lanhu toolbar from 27% to 150% in a separate controlled test

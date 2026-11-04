@@ -1,4 +1,5 @@
 import { accessibleName, isVisible } from './extract.ts'
+import { DesignZoomNotSelectedError } from './design-zoom-error.ts'
 
 function controlName(control: HTMLSelectElement): string {
   if (control.hasAttribute('aria-label') || control.hasAttribute('aria-labelledby')) return accessibleName(control)
@@ -16,21 +17,21 @@ export function nativeDesignZoomControls(): HTMLSelectElement[] {
 /** Only an explicitly named native select is supported here. No CSS or browser zoom. */
 export function changeDesignZoom(percent: unknown) {
   if (typeof percent !== 'number' || !Number.isFinite(percent) || percent < 100 || percent > 200) {
-    throw new Error('Design zoom must be a percentage between 100 and 200.')
+    throw new DesignZoomNotSelectedError('Design zoom must be a percentage between 100 and 200.')
   }
   const candidates = nativeDesignZoomControls()
-  if (candidates.length !== 1) throw new Error('No unique supported design zoom control. Ask the user to enlarge the design view manually.')
+  if (candidates.length !== 1) throw new DesignZoomNotSelectedError('No unique supported design zoom control.')
   const control = candidates[0]!
-  if (control.multiple || control.matches(':disabled')) throw new Error('The design zoom control is unavailable.')
+  if (control.multiple || control.matches(':disabled')) throw new DesignZoomNotSelectedError('The design zoom control is unavailable.')
   const percentage = (option: HTMLOptionElement | undefined) => {
     const match = option?.textContent?.trim().match(/^(\d+(?:\.\d+)?)\s*%$/u)
     return match === undefined || match === null ? undefined : Number(match[1])
   }
   const before = percentage(control.selectedOptions[0])
-  if (before === undefined || !Number.isFinite(before)) throw new Error('The current design zoom cannot be confirmed.')
+  if (before === undefined || !Number.isFinite(before)) throw new DesignZoomNotSelectedError('The current design zoom cannot be confirmed.')
   const choices = [...control.options].filter(option => percentage(option) === percent)
   if (choices.length !== 1 || choices[0]!.disabled || choices[0]!.closest('optgroup')?.disabled) {
-    throw new Error('The requested design zoom is not a unique available option.')
+    throw new DesignZoomNotSelectedError('The requested design zoom is not a unique available option.')
   }
   if (before !== percent) {
     control.selectedIndex = choices[0]!.index

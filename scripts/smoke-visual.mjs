@@ -17,10 +17,12 @@ const cli = join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'lib
 const realModel = process.env.STRIDE_REAL_MODEL === '1'
 const autoZoom = process.env.STRIDE_AUTO_ZOOM === '1'
 const autoZoomFallback = process.env.STRIDE_AUTO_ZOOM_FALLBACK === '1'
+const autoZoomRecovery = process.env.STRIDE_AUTO_ZOOM_RECOVERY === '1'
 const lanhuZoomMenu = process.env.STRIDE_LANHU_ZOOM_MENU === '1'
 if (autoZoom && !realModel) throw new Error('Automatic zoom acceptance requires STRIDE_REAL_MODEL=1')
+if (autoZoomRecovery && (!autoZoom || autoZoomFallback || lanhuZoomMenu)) throw new Error('Zoom recovery requires native auto zoom without fallback/menu flags')
 if (autoZoomFallback && !autoZoom) throw new Error('Zoom fallback acceptance requires STRIDE_AUTO_ZOOM=1')
-const resultName = lanhuZoomMenu ? autoZoomFallback ? 'lanhu-zoom-fallback.json' : 'lanhu-zoom.json' : autoZoom ? autoZoomFallback ? 'auto-zoom-fallback.json' : 'auto-zoom.json' : realModel ? 'real-model.json' : 'result.json'
+const resultName = autoZoomRecovery ? 'auto-zoom-recovery.json' : lanhuZoomMenu ? autoZoomFallback ? 'lanhu-zoom-fallback.json' : 'lanhu-zoom.json' : autoZoom ? autoZoomFallback ? 'auto-zoom-fallback.json' : 'auto-zoom.json' : realModel ? 'real-model.json' : 'result.json'
 const root = await mkdtemp(join(tmpdir(), 'stride-visual-')), home = join(root, 'home')
 const trigger = join(root, 'command.json'), result = join(root, 'result.json')
 const artifacts = join(repoRoot, '.stride-private/validation/visual')
@@ -249,7 +251,7 @@ try {
   if (realModel) {
     phase = 'real-model'
     await browser.worker.evaluate(id => chrome.tabs.setZoom(id, 1), targetId)
-    await browser.target.goto(autoZoomFallback ? site.noZoomControlUrl : autoZoom ? site.smallUrl : site.url); site.reset()
+    await browser.target.goto(autoZoomRecovery ? site.alternativeZoomUrl : autoZoomFallback ? site.noZoomControlUrl : autoZoom ? site.smallUrl : site.url); site.reset()
     if (autoZoom) assert.equal(await browser.target.locator('#zoom-status').textContent(), '27%')
     await mkdir(join(root, 'model'))
     modelSessionId = (await host.client.rpc('session.create', { cwd: join(root, 'model') })).sessionId
@@ -283,6 +285,14 @@ try {
         'Model must use structured inspector reads for both selected layers')
       assert.equal(modelEvidence.finalLayerReported, true); assert.equal(modelEvidence.finalColorReported, true)
       assert.equal(modelEvidence.finalStyleReportCorrect, true, 'Model must distinguish exact container and text metrics')
+      if (autoZoomRecovery) {
+        assert.ok(modelEvidence.results.some(row => row.name === 'browser_set_design_zoom' && !row.ok))
+        assert.ok(modelEvidence.results.some(row => row.name === 'browser_select' && row.ok))
+        const failed = modelEvidence.browserCalls.indexOf('browser_set_design_zoom')
+        const selected = modelEvidence.browserCalls.indexOf('browser_select')
+        assert.ok(failed >= 0 && selected > failed)
+        assert.ok(modelEvidence.browserCalls.slice(failed + 1, selected).includes('browser_snapshot'), 'Recovery needs a fresh observation')
+      }
       if (autoZoom) {
         const zoom = Number.parseInt(await browser.target.locator('#zoom-status').textContent())
         assert.ok(zoom >= 100 && zoom <= 200)
@@ -293,7 +303,7 @@ try {
           assert.equal(await browser.target.evaluate(() => window.syntheticZoomChoices), 1)
         }
         const results = modelEvidence.results
-        const selected = results.findIndex(row => row.name === 'browser_set_design_zoom' && row.ok)
+        const selected = results.findIndex(row => row.name === (autoZoomRecovery ? 'browser_select' : 'browser_set_design_zoom') && row.ok)
         const fresh = results.findIndex((row, index) => index > selected && row.name === 'browser_screenshot' && row.ok && row.imageBlocks === 1)
         const point = results.findIndex(row => row.name === 'browser_click_at')
         assert.ok(selected >= 0 && fresh > selected && point > fresh, 'Enlargement and a fresh screenshot must precede layer point clicks')
@@ -303,7 +313,7 @@ try {
       assert.ok(site.state().clicks >= 2)
     }
   }
-  const summary = { passed: true, realHost: true, isolatedChrome: true, realModel, autoZoom, autoZoomFallback, lanhuZoomMenu,
+  const summary = { passed: true, realHost: true, isolatedChrome: true, realModel, autoZoom, autoZoomFallback, autoZoomRecovery, lanhuZoomMenu,
     stagedMenuRevocationDenied, storedImageBlock: true, controlledPagePixelsVerified: true, imageBytesExcludedFromText: true,
     canvasLayerSelected: true, exactDomPropertiesRead: true, separateBackgroundAndTextRead: true,
     structuredInspectorStyles: true, structuredStyleReadRevoked: true, switchedDesignStylesFresh: true,
@@ -322,7 +332,7 @@ try {
   })).catch(() => undefined)
   const modelEvidence = await readJson(`${result}.model`)
   const modelFinalReport = autoZoom ? await readFile(`${result}.final`, 'utf8').catch(() => undefined) : undefined
-  await writeFile(join(artifacts, resultName), JSON.stringify({ passed: false, realModel, autoZoom, autoZoomFallback, lanhuZoomMenu, phase, errorName: error.name,
+  await writeFile(join(artifacts, resultName), JSON.stringify({ passed: false, realModel, autoZoom, autoZoomFallback, autoZoomRecovery, lanhuZoomMenu, phase, errorName: error.name,
     ...(modelEvidence ? { modelEvidence } : {}), ...(modelFinalReport ? { modelFinalReport } : {}) }), { mode: 0o600 })
   console.error(JSON.stringify({ phase, diagnostics }))
   throw error

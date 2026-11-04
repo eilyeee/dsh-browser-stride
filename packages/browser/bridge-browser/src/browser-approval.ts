@@ -2,8 +2,9 @@ import { BridgeToolError } from './server.ts'
 
 export const APPROVAL_RETRY_GUIDANCE = 'Browser approvals are paused for this turn. Stop browser calls and tell the user to return to the DSH Stride extension, then send a new message to retry and confirm the new request. Do not retry automatically or use another access method.'
 export const DESIGN_VIEW_RETRY_GUIDANCE = 'Design-view preparation failed for this turn. Stop browser calls and ask the user to enlarge the design view manually, then send a new message before continuing. Do not guess canvas points or retry via other tools.'
+export const DESIGN_VIEW_RECOVERY_GUIDANCE = 'No percentage selection was dispatched. A menu may remain open. Take a fresh observation and choose another supported method within the existing page grant, or ask for the missing view/control. Do not guess canvas points, change CSS/browser zoom or bypass authorization. Verify the actual scale before continuing.'
 
-/** Agent-local retry fences; approval timeouts and failed view preparation require a fresh user turn. */
+/** Agent-local fences; only a trusted no-selection failure releases view preparation. */
 export class BrowserApprovalGate {
   private readonly states = new WeakMap<object, { blocked: boolean; designView?: 'pending' | 'failed' }>()
 
@@ -26,7 +27,11 @@ export class BrowserApprovalGate {
       if (preparesDesign && state !== undefined) delete state.designView
       return result
     } catch (error) {
-      if (preparesDesign && state !== undefined) state.designView = 'failed'
+      const recoverable = preparesDesign && error instanceof BridgeToolError && error.code === 'design-zoom-not-selected'
+      if (preparesDesign && state !== undefined) {
+        if (recoverable) delete state.designView
+        else state.designView = 'failed'
+      }
       // Existing wire-v4 peers already distinguish approval failures in these
       // fixed errors. Do not confuse a page wait/transport timeout with one.
       if (error instanceof BridgeToolError && (
@@ -37,7 +42,8 @@ export class BrowserApprovalGate {
         throw new BridgeToolError(error.code, `${error.message} ${APPROVAL_RETRY_GUIDANCE}`)
       }
       if (preparesDesign) throw new BridgeToolError(error instanceof BridgeToolError ? error.code : 'content-unavailable',
-        (error instanceof Error ? error.message : 'Design zoom could not be confirmed.') + ' ' + DESIGN_VIEW_RETRY_GUIDANCE)
+        (error instanceof Error ? error.message : 'Design zoom could not be confirmed.') + ' '
+        + (recoverable ? DESIGN_VIEW_RECOVERY_GUIDANCE : DESIGN_VIEW_RETRY_GUIDANCE))
       throw error
     }
   }

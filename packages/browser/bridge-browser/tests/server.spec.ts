@@ -974,6 +974,18 @@ describe('BridgeServer', () => {
     }
     ws.close()
   })
+  it('preserves the authenticated no-selection error code across wire-v4', async () => {
+    const h = await startBridge({ caps: { ...CAPS, designViewZoom: true } }); harnesses.push(h)
+    const { ws, frames } = await connect(h.url)
+    send(ws, { t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: TOKEN, caps: { ...CAPS, designViewZoom: true } })
+    await waitFor(() => frames.some(frame => frame.t === 'hello.ok'))
+    const pending = h.bridge.requestTool('browser_set_design_zoom', { percent: 150 }, new AbortController().signal)
+    const outcome = expect(pending).rejects.toMatchObject({ code: 'design-zoom-not-selected', message: 'No unique control' })
+    await waitFor(() => frames.some(frame => frame.t === 'tool.call'))
+    const call = frames.find((frame): frame is Extract<BridgeFrame, { t: 'tool.call' }> => frame.t === 'tool.call')!
+    send(ws, { t: 'tool.result', id: call.id, action: call.action, ok: false, error: { code: 'design-zoom-not-selected', message: 'No unique control' } })
+    await outcome; ws.close()
+  })
   it.each([false, true])('requires both peers to negotiate viewport tools, offered=%s', async offered => {
     const h = await startBridge({ caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60, visualViewport: true } })
     harnesses.push(h)

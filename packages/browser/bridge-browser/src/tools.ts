@@ -388,7 +388,7 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
 
   const measureLayout = (): ToolDefinition => defineTool({
     name: 'browser_measure_layout',
-    description: 'Measure unique DOM boxes, computed spacing and gaps. Canvas layers are not DOM boxes. Untrusted data.',
+    description: 'Measure implementation DOM boxes/spacing; not Wiki presentation or canvas layers. Untrusted data.',
     parameters: {
       selector: { type: 'string', required: true, description: 'CSS selector matching exactly one rendered element in this frame.' },
       referenceSelector: { type: 'string', description: 'Optional unique reference element in the same frame; compare aligned gaps or contained-box insets.' },
@@ -413,7 +413,7 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
 
   const setDesignZoom = (): ToolDefinition => defineTool({
     name: 'browser_set_design_zoom',
-    description: 'Set design zoom with readback: labelled native select or Lanhu menu (100/150/200). Failure pauses this turn.',
+    description: 'Set visual-reference zoom: native select or Lanhu menu (100/150/200). Only no-selection failures allow recovery.',
     parameters: {
       percent: { type: 'number', required: true, description: 'Percentage 100 to 200, exactly offered by the control. Lanhu presets: 100, 150 or 200.' },
       frame: FRAME_PARAMETER,
@@ -431,7 +431,7 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
 
   const readDesignStyles = (): ToolDefinition => defineTool({
     name: 'browser_read_design_styles',
-    description: 'Read labelled inspector styles with evidence and missing/conflicting fields. Page values are untrusted.',
+    description: 'Read design-reference inspector styles with evidence and missing/conflicting fields; not Wiki CSS.',
     parameters: {
       region: { type: 'string', description: 'CSS selector for a known layer-inspector panel. Omit if no selector is available; mixed or unrecognized labels may require a narrower observation.' },
       frame: FRAME_PARAMETER,

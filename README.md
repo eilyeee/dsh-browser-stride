@@ -62,13 +62,15 @@ The token file uses restrictive permissions where supported; protect the DSH hom
 
 Native CDP input, webpage uploads/downloads, reliable run recovery and a shared Desktop/side-panel task model are not currently supported. A successful click or model response is not independent proof that a business task completed.
 
+Material roles follow the user goal: the supplied project is the implementation target, design references provide visual evidence, and Wiki/requirements documents provide business rules, interactions, data and acceptance conditions. A requirements website’s CSS is not automatically a product design requirement. Inspect the existing project and components before editing; a read-only requirements task does not authorize code changes. This is model guidance, not URL-based authorization. See [synthetic material-role acceptance](extensions/dsh-browser/README.md#canvas-and-design-pages).
+
 For canvas design pages, `browser_screenshot` attaches the selected group page’s visible image to DSH; `browser_click_at` selects a point from that screenshot, then `browser_snapshot` can read the page’s layer inspector. These clicks are synthetic and do not expose hidden layer metadata. See the [visual-tools instructions](extensions/dsh-browser/README.md#canvas-and-design-pages). Firefox keeps its existing text path.
 
 `browser_read_design_styles` organizes explicitly labelled properties with source evidence, missing fields and conflicts. The default model has passed separate background/text reads on local synthetic pages and the inspected Lanhu interface in regular Chrome after enlarging its view; other layouts need separate acceptance. See [supported formats and limits](packages/browser/bridge-browser/README.md#reading-design-style-fields).
 
 `browser_measure_layout` reads unique DOM boxes, computed spacing and actual aligned gaps, so generated-page checks can distinguish a missing measurement from 0px. It does not measure hidden canvas layers or judge full-page fidelity. Both peers need the optional layout capability; see [parameters and limits](packages/browser/bridge-browser/README.md#measuring-rendered-layout).
 
-`browser_set_design_zoom` can adjust a clearly labelled native zoom select or the supported Lanhu design menu and read back its percentage. Failed preparation pauses that Agent's browser calls until a new user turn; see [supported controls and checks](packages/browser/bridge-browser/README.md#preparing-small-design-views).
+`browser_set_design_zoom` can adjust a clearly labelled native zoom select or the supported Lanhu design menu and read back its percentage. A packaged no-selection failure permits fresh observation and another supported method; unknown-effect failures still pause that Agent until a new user turn; see [supported controls and checks](packages/browser/bridge-browser/README.md#preparing-small-design-views).
 
 Build the Bridge and extension from the same checkout: click, type and select now require an `elementRef` from the latest observation. Earlier bare-index clients are incompatible. A delta only provides references for controls it shows; take a full snapshot when a target is missing. References do not yet bind a task run, account or tenant.
 

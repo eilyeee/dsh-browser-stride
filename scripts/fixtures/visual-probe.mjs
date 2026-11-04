@@ -33,12 +33,20 @@ export function reportedDesignZoom(text) {
     return zoom >= 100 && zoom <= 200 ? zoom : null
   } catch { return null }
 }
+export function matchesWikiReport(text, expected) {
+  try {
+    const report = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] ?? '')
+    return Object.keys(expected).every(key => JSON.stringify(report[key]) === JSON.stringify(expected[key]))
+  } catch { return false }
+}
 export const name = 'stride-visual-probe'
 export const inject = ['tools', 'agents', 'attachments']
 export const MODEL_BROWSER_TOOLS = ['browser_screenshot','browser_snapshot','browser_click_at','browser_get_text','browser_read_design_styles','browser_wait','browser_scroll']
+export const ZOOM_MODEL_TOOLS = [...MODEL_BROWSER_TOOLS, 'browser_set_design_zoom', 'browser_select']
+export const WIKI_MODEL_TOOLS = [...ZOOM_MODEL_TOOLS, 'browser_measure_layout', 'browser_click', 'browser_press']
 const LAYOUT_MODEL_TOOLS = ['browser_snapshot', 'browser_measure_layout', 'browser_navigate', 'browser_wait']
-const modelTools = model => model.reportKind === 'layout' ? LAYOUT_MODEL_TOOLS
-  : model.autoZoom === true ? [...MODEL_BROWSER_TOOLS, 'browser_set_design_zoom'] : MODEL_BROWSER_TOOLS
+const modelTools = model => model.reportKind === 'wiki' ? WIKI_MODEL_TOOLS : model.reportKind === 'layout' ? LAYOUT_MODEL_TOOLS
+  : model.autoZoom === true ? ZOOM_MODEL_TOOLS : MODEL_BROWSER_TOOLS
 export function apply(ctx, config) {
   let sequence = -1, pending = false, model, releaseModelTools, writes = Promise.resolve()
   const controller = new AbortController()
@@ -72,7 +80,7 @@ export function apply(ctx, config) {
     if (!belongs(exec.agent)) return
     const text = result.content?.filter(block => block.type === 'text').map(block => block.text).join('\n') ?? ''
     evidence.results.push({ name: exec.name, ok: !result.isError, imageBlocks: result.content?.filter(block => block.type === 'image').length ?? 0,
-      ...(model.reportKind === 'layout' ? {} : { selectedLayerReported: text.includes(model.layer), exactColorReported: text.toLowerCase().includes(model.color.toLowerCase()) }) })
+      ...(model.reportKind === 'layout' || model.reportKind === 'wiki' ? {} : { selectedLayerReported: text.includes(model.layer), exactColorReported: text.toLowerCase().includes(model.color.toLowerCase()) }) })
     void save()
   })
   ctx.on('session/event', (session, event) => {
@@ -80,7 +88,8 @@ export function apply(ctx, config) {
     if (event.type === 'assistant/message' && event.data?.message?.source?.kind === 'model') {
       const message = event.data.message, text = message.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
       evidence.model = { provider: message.source.provider, model: message.source.model }
-      if (model.reportKind === 'layout') evidence.finalLayoutReportCorrect = matchesLayoutReport(text)
+      if (model.reportKind === 'wiki') evidence.finalWikiReportCorrect = matchesWikiReport(text, model.expected)
+      else if (model.reportKind === 'layout') evidence.finalLayoutReportCorrect = matchesLayoutReport(text)
       else {
         evidence.finalLayerReported = text.includes(model.layer); evidence.finalColorReported = text.toLowerCase().includes(model.color.toLowerCase())
         evidence.finalStyleReportCorrect = matchesLayerReport(text, model.expected)
