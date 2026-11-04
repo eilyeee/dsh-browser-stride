@@ -21,7 +21,7 @@ export const name = 'stride-visual-probe'
 export const inject = ['tools', 'agents', 'attachments']
 export const MODEL_BROWSER_TOOLS = ['browser_screenshot','browser_snapshot','browser_click_at','browser_get_text','browser_read_design_styles','browser_wait','browser_scroll']
 export function apply(ctx, config) {
-  let sequence = -1, pending = false, model, probeCall, probeResult, releaseModelTools, writes = Promise.resolve()
+  let sequence = -1, pending = false, model, releaseModelTools, writes = Promise.resolve()
   const controller = new AbortController()
   const evidence = { modelRequests: 0, browserCalls: [], results: [], blocked: [], terminal: false }
   const belongs = agent => model !== undefined && String(agent?.id) === model.sessionId
@@ -47,7 +47,6 @@ export function apply(ctx, config) {
     return next()
   })
   ctx.on('tools/result', (exec, result) => {
-    if (probeCall !== undefined && String(exec.callId) === `${probeCall}:ptc:1`) probeResult = result
     if (!belongs(exec.agent)) return
     const text = result.content?.filter(block => block.type === 'text').map(block => block.text).join('\n') ?? ''
     evidence.results.push({ name: exec.name, ok: !result.isError, imageBlocks: result.content?.filter(block => block.type === 'image').length ?? 0,
@@ -84,14 +83,18 @@ export function apply(ctx, config) {
         const agent = ctx.agents.get(command.sessionId)
         if (agent === undefined) throw new Error('Synthetic probe agent unavailable')
         if (!/^browser_[a-z_]+$/.test(command.name)) throw new Error('Synthetic probe requires a browser tool')
-        probeCall = `visual-probe-${sequence}`; probeResult = undefined
-        const ptc = ctx.tools.schemas(agent).some(tool => tool.name === 'run_code')
-        const outer = await ctx.tools.execute({ callId: probeCall, name: ptc ? 'run_code' : command.name, arguments: ptc ? {
-          code: `return await tools.${command.name}(${JSON.stringify(command.args ?? {})})`,
-          description: 'Check the synthetic browser canvas',
-        } : command.args ?? {}, agent, signal: controller.signal })
-        const result = probeResult ?? outer
-        probeCall = undefined; probeResult = undefined
+        if (agent.status === 'running' || belongs(agent)) throw new Error('Direct probe calls require a separate idle test Agent')
+        // These are trusted preparatory calls outside an Agent turn. A PTC
+        // transport would append nested-dispatch events without turn/step
+        // boundaries and make the persisted test Session unreadable. Use a
+        // local native presentation, keeping the real registry/guards and the
+        // original Agent; restore its preset before any actual model turn.
+        const restorePresentation = agent.ctx.tools.presentAs('native')
+        let result
+        try {
+          result = await ctx.tools.execute({ callId: `visual-probe-${sequence}`, name: command.name,
+            arguments: command.args ?? {}, agent, signal: controller.signal })
+        } finally { restorePresentation() }
         const value = result.value
         const reply = { sequence, ok: !result.isError, code: result.error?.code,
           text: result.content?.filter(block => block.type === 'text').map(block => block.text).join('\n'),

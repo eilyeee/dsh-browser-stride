@@ -23,6 +23,15 @@ no release version has been assigned yet.
 
 ### Fixed
 
+- Equivalent HEX/RGB colors and percentage/scalar opacity values share one
+  inspector field while retaining both sources. Decimal alpha conversion avoids
+  division artifacts, and distinct values still conflict. Reads whose recognized
+  fields are all withheld are `partial`, not `unrecognized`. Benchmark suite 10
+  records the model-visible report changes.
+- Direct visual-smoke preparation uses a temporary Agent-scoped native tool
+  presentation instead of recording PTC dispatches outside a turn. Its preset is
+  restored after success or failure; running/model-test Agents cannot be used for
+  preparation. The smoke also checks that the resulting Session history is readable.
 - Inspector style reads recognize plain-color `background`, one-to-four corner
   radii and HEX swatches with alpha percentages. Named-color rows keep their
   original evidence. Inspector `fontFace` and CSS `fontFamily` remain distinct,

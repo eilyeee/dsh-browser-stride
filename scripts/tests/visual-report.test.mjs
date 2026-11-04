@@ -44,3 +44,43 @@ test('visual model tools are restricted only in the test Agent scope before armi
   for (const stop of stops.splice(0).reverse()) await stop()
   assert.equal(released, true)
 })
+
+test('direct visual preparation restores the scoped presentation after success or failure', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'stride-visual-direct-'))
+  const trigger = join(root, 'trigger.json'), result = join(root, 'result.json'), stops = []
+  let mode = 'ptc', restored = 0, throwDispatch = false, calls = 0
+  const agent = { id: 'synthetic-direct', status: 'idle', ctx: { tools: {
+    presentAs(value) { assert.equal(value, 'native'); mode = value; return () => { mode = 'ptc'; restored++ } },
+  } } }
+  const ctx = {
+    agents: { get: id => id === agent.id ? agent : undefined },
+    tools: {
+      guard() { return () => {} },
+      presentAs() { assert.fail('Global presentation must not change') },
+      async execute(exec) {
+        calls++; assert.equal(exec.agent, agent); assert.equal(exec.name, 'browser_get_text'); assert.equal(mode, 'native')
+        if (throwDispatch) throw new Error('Synthetic dispatch failed')
+        return { isError: false, value: { text: 'Synthetic inspector' }, content: [{ type: 'text', text: 'Synthetic inspector' }] }
+      },
+    },
+    on() {}, effect(fn) { stops.push(fn()) },
+  }
+  t.after(async () => { for (const stop of stops.reverse()) await stop(); await rm(root, { recursive: true, force: true }) })
+  apply(ctx, { trigger, result })
+  async function command(sequence) {
+    await writeFile(trigger, JSON.stringify({ sequence, sessionId: agent.id, name: 'browser_get_text', args: {} }))
+    for (let i = 0; i < 200; i++) {
+      try { const value = JSON.parse(await readFile(result, 'utf8')); if (value.sequence === sequence) return value } catch {}
+      await delay(10)
+    }
+    assert.fail('Direct preparation did not settle')
+  }
+  assert.equal((await command(1)).ok, true)
+  assert.equal(mode, 'ptc'); assert.equal(restored, 1)
+  throwDispatch = true
+  assert.equal((await command(2)).probeError, true)
+  assert.equal(mode, 'ptc'); assert.equal(restored, 2)
+  agent.status = 'running'
+  assert.equal((await command(3)).probeError, true)
+  assert.equal(calls, 2); assert.equal(restored, 2)
+})

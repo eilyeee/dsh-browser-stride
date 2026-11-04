@@ -130,4 +130,47 @@ describe('visible design inspector parsing', () => {
       expect(parseDesignInspector(text)).toMatchObject({ status: 'unrecognized', properties: {}, layer: null })
     }
   })
+
+  it.each([
+    ['#fff 100%', '#ffffff'], ['#fff', 'rgb(255, 255, 255)'],
+    ['#1234', '#11223344'], ['#336699 25%', 'rgba(51, 102, 153, 0.25)'],
+    ['#336699 0.07%', 'rgba(51, 102, 153, 0.0007)'],
+    ['#112233ff', 'rgb(17,34,51)'],
+  ])('keeps equivalent colors %s and %s together with both sources', (swatch, css) => {
+    const report = parseDesignInspector(`Layer: Box\n颜色: ${swatch}\ncolor: ${css}`)
+    expect(report.status).toBe('parsed')
+    expect(report.conflicts).toEqual({})
+    expect(report.properties.color?.evidence).toEqual([`颜色: ${swatch}`, `color: ${css}`])
+  })
+
+  it.each([['50%', '0.5'], ['100%', '1'], ['0%', '0'], ['0.07%', '0.0007']])(
+    'compares opacity %s and %s without changing the observed display unit', (percent, scalar) => {
+      const report = parseDesignInspector(`Layer: Box\n不透明度: ${percent}\nopacity: ${scalar}`)
+      expect(report.status).toBe('parsed')
+      expect(report.properties.opacity?.value).toBe(percent)
+      expect(report.properties.opacity?.evidence).toHaveLength(2)
+      expect(report.conflicts).toEqual({})
+    },
+  )
+
+  it('still withholds genuinely different color/alpha values and calls conflicting reads partial', () => {
+    for (const text of ['color: #fff\ncolor: #fffffe', 'color: #fff\ncolor: rgba(255,255,255,0.99)', 'opacity: 0.5\n不透明度: 51%', 'width: 100px\nwidth: 200px']) {
+      const report = parseDesignInspector(`Layer: Box\n${text}`)
+      expect(report.properties).toEqual({})
+      expect(report.status).toBe('partial')
+      expect(Object.keys(report.conflicts)).toHaveLength(1)
+    }
+    expect(parseDesignInspector('Layer: One\nwidth: 100px\nLayer: Two\nheight: 50px').status).toBe('partial')
+  })
+
+  it('rejects out-of-range alpha percentages even when a floating conversion would round to 100', () => {
+    expect(parseDesignInspector('color: #123456 100.000000000000000001%').properties.color).toBeUndefined()
+    expect(parseDesignInspector('opacity: 100.000000000000000001%').properties.opacity).toBeUndefined()
+  })
+
+  it('keeps tiny opacity percentages distinct and accepts leading-dot percentages', () => {
+    expect(parseDesignInspector('opacity: .07%\n不透明度: 0.0007').conflicts).toEqual({})
+    expect(parseDesignInspector('opacity: 0.00000001%\n不透明度: 0.0000000001').conflicts).toEqual({})
+    expect(parseDesignInspector('opacity: 0.00000001%\nopacity: 0.00000002%').conflicts.opacity).toHaveLength(2)
+  })
 })

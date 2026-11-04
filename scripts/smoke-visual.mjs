@@ -191,6 +191,7 @@ try {
   assert.equal((await command(sessionId, 'browser_read_design_styles', { region: '#properties' })).ok, false, 'Style reads must respect native page revocation')
   assert.equal(await browser.worker.evaluate(id => chrome.debugger.sendCommand({ tabId: id }, 'Page.getFrameTree').then(() => true, () => false), targetId), false)
   assert.equal(await human.evaluate(() => window.syntheticClicks), 0)
+  assert.ok(await host.client.rpc('session.history', { sessionId }), 'Direct preparation must leave a readable test Session')
   let modelEvidence
   if (realModel) {
     phase = 'real-model'
@@ -226,7 +227,7 @@ try {
     staleScrollAndZoomDenied: true, scrolledAndZoomedPixelsVerified: true, nativeStopDetachedVisualControl: true,
     workerRestartDetachedVisualControl: true, workerRestartRefDenied: true, workerRestartFreshCapture: true,
     invalidRefSkippedApproval: true, validPointApprovedNatively: true,
-    humanTabUntouched: true, ...(modelEvidence === undefined ? {} : { modelEvidence }) }
+    humanTabUntouched: true, directProbeHistoryReadable: true, ...(modelEvidence === undefined ? {} : { modelEvidence }) }
   await writeFile(join(artifacts, realModel ? 'real-model.json' : 'result.json'), JSON.stringify(summary, null, 2), { mode: 0o600 })
   console.log(JSON.stringify(summary))
 } catch (error) {

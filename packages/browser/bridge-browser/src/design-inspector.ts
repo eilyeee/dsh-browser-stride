@@ -37,13 +37,22 @@ const aliases = new Map(Object.entries(LABELS).flatMap(([key, labels]) => labels
 const cleanLabel = (text: string) => text.trim().toLowerCase().replace(/\s+/g, ' ')
 const dimension = /^(-?(?:\d+(?:\.\d+)?|\.\d+))\s*(px|pt|rem|em|rpx|dp|%)?$/i
 
+/** Move the decimal point without a division-rounding artifact or range loss. */
+function percentAlpha(value: string): number | undefined {
+  if (!/^(?:\d+(?:\.\d+)?|\.\d+)$/.test(value)) return
+  const [whole = '', fraction = ''] = value.split('.')
+  if (BigInt(whole + fraction) > 100n * 10n ** BigInt(fraction.length)) return
+  const padded = whole.padStart(3, '0')
+  return Number(`${padded.slice(0, -2)}.${padded.slice(-2)}${fraction}`)
+}
+
 function color(value: string): string | undefined {
   // Inspector swatches often show a HEX color followed by its alpha percent.
   // Keep that alpha in the color; it is not the layer's separate opacity.
   const swatch = /^(#[\da-f]{3}|#[\da-f]{6})\s+(\d+(?:\.\d+)?)%$/i.exec(value)
   if (swatch !== null) {
-    const alpha = Number(swatch[2]) / 100
-    if (alpha > 1) return
+    const alpha = percentAlpha(swatch[2]!)
+    if (alpha === undefined) return
     const hex = swatch[1]!.slice(1).toLowerCase()
     if (alpha === 1) return `#${hex}`
     const rgb = hex.length === 3 ? [...hex].map(char => char + char).join('') : hex
@@ -54,6 +63,25 @@ function color(value: string): string | undefined {
   if (match === null || (match[1]!.toLowerCase() === 'rgba') !== (match[5] !== undefined)
     || match.slice(2, 5).some(component => Number(component) > 255)) return
   return `${match[1]!.toLowerCase()}(${match.slice(2).filter(component => component !== undefined).map(Number).join(', ')})`
+}
+
+/** Compare equivalent supported representations while retaining the first value. */
+function valueIdentity(field: Field, value: string): string {
+  if (field === 'opacity') {
+    return `opacity:${value.endsWith('%') ? percentAlpha(value.slice(0, -1)) : Number(value)}`
+  }
+  if (field !== 'fill' && field !== 'color' && field !== 'borderColor') return value
+  let channels: number[]
+  if (value.startsWith('#')) {
+    let hex = value.slice(1)
+    if (hex.length === 3 || hex.length === 4) hex = [...hex].map(char => char + char).join('')
+    channels = [0, 2, 4].map(index => Number.parseInt(hex.slice(index, index + 2), 16))
+    channels.push(hex.length === 8 ? Number.parseInt(hex.slice(6, 8), 16) / 255 : 1)
+  } else {
+    channels = value.slice(value.indexOf('(') + 1, -1).split(',').map(Number)
+    if (channels.length === 3) channels.push(1)
+  }
+  return JSON.stringify(channels)
 }
 
 function normalize(field: Field, input: string): string | undefined {
@@ -81,6 +109,12 @@ function normalize(field: Field, input: string): string | undefined {
   const number = Number(match[1]), unit = match[2]?.toLowerCase() ?? ''
   if (field === 'opacity') {
     if ((unit !== '' && unit !== '%') || number < 0 || number > (unit === '%' ? 100 : 1)) return
+    if (unit === '%') {
+      if (percentAlpha(match[1]!) === undefined) return
+      const [whole = '', fraction = ''] = match[1]!.split('.')
+      const trimmedFraction = fraction.replace(/0+$/, '')
+      return `${whole.replace(/^0+(?=\d)/, '') || '0'}${trimmedFraction ? `.${trimmedFraction}` : ''}%`
+    }
   } else if (field !== 'letterSpacing' && number < 0) return
   return `${number}${unit}`
 }
@@ -107,7 +141,7 @@ export function parseDesignInspector(text: string): DesignInspectorReport {
     const value = normalize(field, input)
     if (value === undefined) { unsupported.add(field); return }
     const list = candidates.get(field) ?? []
-    const previous = list.find(item => item.value === value)
+    const previous = list.find(item => valueIdentity(field, item.value) === valueIdentity(field, value))
     if (previous !== undefined) {
       if (previous.evidence.length < 3 && !previous.evidence.includes(evidence)) previous.evidence.push(evidence)
     } else if (list.length < 8) list.push({ value, evidence: [evidence] })
@@ -153,7 +187,9 @@ export function parseDesignInspector(text: string): DesignInspectorReport {
   }
   report.missing = DESIGN_STYLE_KEYS.filter(key => report.properties[key] === undefined)
   const found = Object.keys(report.properties).length > 0
-  report.status = !found ? 'unrecognized' : report.layer === null || unsupported.size > 0 || Object.keys(report.conflicts).length > 0 ? 'partial' : 'parsed'
+  const recognizedStyle = DESIGN_STYLE_KEYS.some(key => candidates.has(key))
+  report.status = !found ? recognizedStyle ? 'partial' : 'unrecognized'
+    : report.layer === null || unsupported.size > 0 || Object.keys(report.conflicts).length > 0 ? 'partial' : 'parsed'
   if (report.layer === null && found) report.warnings.push('No unique layer name was read. Check the current selection before attributing these values to a layer.')
   if (Object.keys(report.conflicts).length > 0) report.warnings.push('Conflicting fields are withheld; do not choose one value by guesswork.')
   if (unsupported.size > 0) report.warnings.push('Unsupported labelled values are withheld, including fields with both a supported and unsupported value. Read a narrower region or inspect the snapshot.')

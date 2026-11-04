@@ -28,6 +28,10 @@ and real-browser validation separately.
   evidence of Desktop integration or end-to-end task completion.
 - Do not commit credentials, real page content, personal data, machine-specific
   paths, generated bundles, coverage, or local profiles. Use temporary test homes.
+- Run isolated checks on their own loopback port. Do not replace the user's
+  active Host with a temporary test home. When updating the real Host, verify
+  that no tasks are running, preserve its original profile and data home, and
+  confirm that conversation history and pairing remain available afterwards.
 - Keep product plans and their derivative planning documents in private storage,
   outside the publication branch and its history.
 - Keep documentation and changelog consistent with actual behavior. Mark
