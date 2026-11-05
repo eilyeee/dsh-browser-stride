@@ -57,6 +57,14 @@ Chrome no longer offers human-tab following or keep/follow prompts. Click a page
 
 If authorized group pages exist but this conversation has no selected target, the panel asks you to select an existing page rather than authorize it again. If an approval times out or no panel can receive it, the Host blocks further browser requests from that Agent for the rest of the turn. Return to the extension and send a new message to retry; the new request still requires confirmation. Other conversations are unaffected.
 
+## Custom dropdowns and control keys
+
+Expand a custom dropdown, take a fresh `browser_snapshot`, then use `browser_click` with the visible option's `elementRef`. Snapshots include ARIA combobox/option controls and the observed Element UI select popup/list-item structure. Visible popup options take priority over modal and background controls under the inventory cap; disabled and selected states are shown. Ordinary list items are not inferred to be controls. Hidden/disabled options and changed option labels or popup containers cannot reuse an actionable reference. `browser_select` remains limited to native HTML selects. These DOM adapters retain existing page authorization, observation and action-confirmation checks; they do not read framework internals.
+
+`browser_press` includes `code`, `keyCode` and `which` for common named control keys so legacy page handlers can respond. Events remain synthetic: Tab does not provide native focus movement and Enter does not provide native form submission. Observe the page after each operation.
+
+Run `pnpm run test:smoke-widgets` for a temporary Host and isolated Chrome check covering option references, disabled/closed options, legacy key handlers, and rendered hash-route changes in background manual and DSH-created tabs. `STRIDE_REAL_MODEL=1` adds the existing default model choosing, saving once and navigating, checked against independent server state. It uses the same optional private model inputs as material acceptance below, with at most twenty model requests and thirty browser calls. Evidence stays under `.stride-private/validation/widgets/`. The fixture reproduces observed DOM shapes, not a complete UI library or real CRM backend. This does not establish every SPA's navigation or Desktop integration. Rebuild both components, restart the Host and reload the extension to use the new guidance and references.
+
 ## Canvas and design pages
 
 With both components updated, Chrome offers `browser_screenshot` and `browser_click_at`. Authorize the design page and select it in **DSH control group**. The screenshot captures that native tab, including when you browse elsewhere; it never follows human tab focus. Screenshot sharing uses the page-sharing setting, and points use action approval/trusted-domain settings. Images include the full visible viewport, including embedded pixels; DOM text redaction does not redact screenshot pixels.

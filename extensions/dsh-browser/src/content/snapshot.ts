@@ -13,12 +13,14 @@
 import { accessibleName, collectInteractive, isInViewport, isVisible, mainText, pageText, truncate } from './extract.ts'
 import { ElementIds, SELECT_OPTION_LIMIT } from './ids.ts'
 import { isSensitiveField, maskValue } from './privacy.ts'
+import { customOptionSelected, isControlDisabled, isElementUiOption } from './custom-options.ts'
 import { makeElementRef, makeObservationId, type ObservationId } from '@eilyeee/dsh-browser-stride/src/contracts/ids.ts'
 
 /** Role label per element kind (model-facing vocabulary). */
 function roleOf(el: Element): string {
   const role = el.getAttribute('role')
   if (role !== null && role !== '') return role
+  if (isElementUiOption(el)) return 'option'
   if (el instanceof HTMLAnchorElement) return 'link'
   if (el instanceof HTMLButtonElement) return 'button'
   if (el instanceof HTMLInputElement) {
@@ -236,9 +238,12 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
     element,
     inViewport: isInViewport(element),
     inDialog: openDialogOf(element, isOpenDialog) !== null,
+    // Options are often portalled to body, outside their owning modal.
+    inPopup: isElementUiOption(element) || element.closest('[role="listbox"]') !== null,
   }))
   const ordered = [...elementViews].sort((a, b) =>
-    Number(b.inDialog) - Number(a.inDialog) || Number(b.inViewport) - Number(a.inViewport))
+    Number(b.inPopup && b.inViewport) - Number(a.inPopup && a.inViewport)
+    || Number(b.inDialog) - Number(a.inDialog) || Number(b.inViewport) - Number(a.inViewport))
   const names = new Map<Element, string>()
   const nameOf = (element: Element): string => {
     let name = names.get(element)
@@ -267,13 +272,15 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
     if (ariaInvalid !== undefined) item.ariaInvalid = ariaInvalid
     // Match the same disabled/inert boundary used when deciding whether an
     // observed target can be operated on, including disabled fieldsets.
-    if (el.matches(':disabled') || el.closest('[inert], [aria-disabled="true"]') !== null) item.disabled = true
+    if (isControlDisabled(el)) item.disabled = true
     if (el instanceof HTMLInputElement) {
       if (el.type === 'checkbox' || el.type === 'radio') item.checked = el.checked
     }
     const ariaChecked = el.getAttribute('aria-checked')
     if (ariaChecked === 'true' || ariaChecked === 'false') item.checked = ariaChecked === 'true'
     if (el instanceof HTMLOptionElement && el.selected) item.selected = true
+    const selected = customOptionSelected(el)
+    if (selected !== undefined) item.selected = selected
     if (el instanceof HTMLAnchorElement && el.href !== '') item.href = hrefHeadline(el.href)
     items.push(item)
   }
@@ -374,7 +381,8 @@ function selectedText(select: HTMLSelectElement): string {
 
 function sameItem(a: InventoryItem, b: InventoryItem): boolean {
   return a.role === b.role && a.name === b.name && a.href === b.href
-    && a.disabled === b.disabled && a.checked === b.checked && a.ariaInvalid === b.ariaInvalid && a.inViewport === b.inViewport
+    && a.disabled === b.disabled && a.checked === b.checked && a.selected === b.selected
+    && a.ariaInvalid === b.ariaInvalid && a.inViewport === b.inViewport
 }
 
 function sameForm(a: FormFieldView, b: FormFieldView): boolean {
@@ -405,6 +413,7 @@ function renderItem(item: InventoryItem, observationId: ObservationId): string {
   const state = [
     item.disabled === true ? 'disabled' : undefined,
     item.checked === undefined ? undefined : item.checked ? 'checked' : 'unchecked',
+    item.selected === undefined ? undefined : item.selected ? 'selected' : 'not selected',
     item.ariaInvalid === undefined ? undefined : `aria-invalid=${item.ariaInvalid}`,
     item.inViewport ? undefined : 'outside viewport',
   ].filter((value) => value !== undefined).join('/')

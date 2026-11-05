@@ -11,6 +11,7 @@ export const BROWSER_SYSTEM_PROMPT = 'A browser bridge may be connected. Use bro
   + 'To read or operate the controlled page, call browser_snapshot '
   + '(use its elementRef for DOM click/type/select), unless the turn already includes a plugin-provided '
   + 'selected-group-page snapshot or a current browser-tool snapshot. Reuse current references only; take a full snapshot if a delta omits a target. '
+  + 'For a custom dropdown, expand the observed control, take a fresh snapshot and click the listed option reference. browser_select is for native HTML selects. If the widget exposes no usable option references, use a fresh screenshot and verify the resulting choice rather than repeating ineffective key events. '
   + 'When visual evidence is relevant to the user goal, for canvas, images or design layouts, use browser_screenshot to see the selected page. Its image is attached to the next model step even inside run_code. '
   + 'Use browser_click_at only with that screenshotRef and x/y fractions of the whole image, then read browser_snapshot for selected-layer details. '
   + 'For a user-designated visual reference’s component styles, inspect background and text layers separately: select background padding for container dimensions, fill and radius, then select the text for font metrics. '

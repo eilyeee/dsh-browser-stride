@@ -10,6 +10,7 @@
  */
 
 import { redactSensitivePageText } from './privacy.ts'
+import { ELEMENT_UI_OPTION_SELECTOR } from './custom-options.ts'
 
 /** Every element type the model may be asked to operate on. */
 const INTERACTIVE_SELECTOR = [
@@ -24,6 +25,9 @@ const INTERACTIVE_SELECTOR = [
   '[role="radio"]',
   '[role="tab"]',
   '[role="menuitem"]',
+  '[role="combobox"]',
+  '[role="option"]',
+  ELEMENT_UI_OPTION_SELECTOR,
   'summary',
   '[contenteditable="true"]',
   '[contenteditable=""]',
@@ -42,6 +46,12 @@ export function isVisible(el: Element): boolean {
   if (!(el instanceof HTMLElement)) return false
   const style = getComputedStyle(el)
   if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false
+  // Opacity is not inherited. Portalled/closing widgets can leave their
+  // children with a rectangle even when the entire popup is faded out.
+  for (let parent = el.parentElement; parent !== null; parent = parent.parentElement) {
+    const ancestor = getComputedStyle(parent)
+    if (ancestor.display === 'none' || ancestor.opacity === '0') return false
+  }
   const rect = el.getBoundingClientRect()
   return rect.width > 0 && rect.height > 0
 }

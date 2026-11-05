@@ -10,6 +10,7 @@
  */
 
 import { accessibleName, isVisible } from './extract.ts'
+import { isControlDisabled, optionContextIdentity } from './custom-options.ts'
 import { parseElementRef, type ObservationId } from '@eilyeee/dsh-browser-stride/src/contracts/ids.ts'
 
 /** Attribute written on every inventoried element (observable numbering). */
@@ -119,7 +120,7 @@ export class ElementIds {
     const identity = this.observedIdentity.get(index)
     return el !== undefined && identity !== undefined && el.isConnected && isVisible(el)
       && ancestorsOpaque(el)
-      && !el.matches(':disabled') && el.closest('[inert], [aria-disabled="true"]') === null
+      && !isControlDisabled(el)
       && identity === actionIdentity(el)
   }
 }
@@ -149,7 +150,7 @@ function actionIdentity(el: Element): string | undefined {
     el.getAttribute('form'), el.getAttribute('formaction'), el.getAttribute('formmethod'),
     el.getAttribute('formenctype'), el.getAttribute('formtarget'), el.hasAttribute('formnovalidate'),
     form === null ? null : [form.action, form.method, form.enctype, form.target, form.noValidate],
-    submitValue, el.getAttribute('aria-label'),
+    submitValue, optionContextIdentity(el), el.getAttribute('aria-label'),
     el.getAttribute('aria-labelledby'), editable ? null : accessibleName(el, MAX_ACTION_IDENTITY_CHARS),
     el instanceof HTMLSelectElement ? [
       el.multiple, el.options.length,

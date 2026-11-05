@@ -525,14 +525,26 @@ async function selectAction(args: Record<string, unknown>, ctx: ActionContext): 
   return withPageDelta(`Selected option ${optionIndex} in [${index}]. The control state was read back; this does not confirm a saved change.${settleNote(settled)}`, ctx, settled)
 }
 
+/** Named control keys have layout-independent legacy codes used by Vue 2 widgets. */
+const CONTROL_KEYS: Record<string, readonly [string, number]> = {
+  Enter: ['Enter', 13], Escape: ['Escape', 27], Tab: ['Tab', 9],
+  ArrowLeft: ['ArrowLeft', 37], ArrowUp: ['ArrowUp', 38],
+  ArrowRight: ['ArrowRight', 39], ArrowDown: ['ArrowDown', 40],
+  Home: ['Home', 36], End: ['End', 35], PageUp: ['PageUp', 33], PageDown: ['PageDown', 34],
+  Backspace: ['Backspace', 8], Delete: ['Delete', 46], ' ': ['Space', 32],
+}
+
 async function pressAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
   const key = typeof args.key === 'string' && args.key !== '' ? args.key : ''
   if (key === '' || key.length > 64 || /[\u0000-\u001f\u007f]/u.test(key)) {
     throw new ActionError('bad-args', 'key must be a non-empty KeyboardEvent.key value of at most 64 characters without control characters.')
   }
   const target = document.activeElement instanceof HTMLElement ? document.activeElement : document.body
-  target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
-  target.dispatchEvent(new KeyboardEvent('keyup', { key, bubbles: true, cancelable: true }))
+  const control = Object.hasOwn(CONTROL_KEYS, key) ? CONTROL_KEYS[key] : undefined
+  const init: KeyboardEventInit = { key, bubbles: true, cancelable: true,
+    ...(control === undefined ? {} : { code: control[0], keyCode: control[1], which: control[1] }) }
+  target.dispatchEvent(new KeyboardEvent('keydown', init))
+  target.dispatchEvent(new KeyboardEvent('keyup', init))
   const settled = await waitForPageSettled(ACTION_SETTLE)
   return withPageDelta(`Sent synthetic key events for ${JSON.stringify(key)}; native key behavior is not guaranteed. Page handlers may have caused effects; re-observe and check before continuing.${settleNote(settled)}`, ctx, settled)
 }

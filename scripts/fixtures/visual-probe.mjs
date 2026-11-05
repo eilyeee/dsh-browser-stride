@@ -58,7 +58,8 @@ export const MODEL_BROWSER_TOOLS = ['browser_screenshot','browser_snapshot','bro
 export const ZOOM_MODEL_TOOLS = [...MODEL_BROWSER_TOOLS, 'browser_set_design_zoom', 'browser_select']
 export const WIKI_MODEL_TOOLS = [...ZOOM_MODEL_TOOLS, 'browser_measure_layout', 'browser_click', 'browser_press']
 const LAYOUT_MODEL_TOOLS = ['browser_snapshot', 'browser_measure_layout', 'browser_navigate', 'browser_wait']
-const modelTools = model => model.reportKind === 'wiki' ? [...WIKI_MODEL_TOOLS, ...(model.projectFile ? PROJECT_FILE_TOOLS : [])] : model.reportKind === 'layout' ? LAYOUT_MODEL_TOOLS
+export const WIDGET_MODEL_TOOLS = ['browser_snapshot','browser_click','browser_type','browser_press','browser_navigate','browser_wait','browser_get_text']
+const modelTools = model => model.reportKind === 'widgets' ? WIDGET_MODEL_TOOLS : model.reportKind === 'wiki' ? [...WIKI_MODEL_TOOLS, ...(model.projectFile ? PROJECT_FILE_TOOLS : [])] : model.reportKind === 'layout' ? LAYOUT_MODEL_TOOLS
   : model.autoZoom === true ? ZOOM_MODEL_TOOLS : MODEL_BROWSER_TOOLS
 export function apply(ctx, config) {
   let sequence = -1, pending = false, model, releaseModelTools, writes = Promise.resolve()
@@ -79,12 +80,12 @@ export function apply(ctx, config) {
       if (reason) { evidence.blocked.push(exec.name); void save() }
       return reason
     }
-    if (model.reportKind === 'layout' && exec.name === 'browser_navigate' && !model.allowedUrls.includes(exec.arguments?.url)) {
-      evidence.blocked.push(exec.name); void save(); return 'Navigation is limited to the two controlled layout fixture URLs.'
+    if (['layout', 'widgets'].includes(model.reportKind) && exec.name === 'browser_navigate' && !model.allowedUrls.includes(exec.arguments?.url)) {
+      evidence.blocked.push(exec.name); void save(); return 'Navigation is limited to this check’s controlled fixture URLs.'
     }
   }))
   ctx.on('agent/request', async (payload, next) => {
-    if (belongs(payload.agent)) { if (++evidence.modelRequests > (model.autoZoom === true || model.reportKind === 'wiki' ? 14 : 10)) throw new Error('synthetic-visual-model-budget'); await save() }
+    if (belongs(payload.agent)) { if (++evidence.modelRequests > (model.reportKind === 'widgets' ? 20 : model.autoZoom === true || model.reportKind === 'wiki' ? 14 : 10)) throw new Error('synthetic-visual-model-budget'); await save() }
     return next()
   })
   ctx.on('tools/execute', async (exec, next) => {
@@ -94,7 +95,7 @@ export function apply(ctx, config) {
       evidence.projectFileCalls.push(exec.name); await save()
     }
     if (belongs(exec.agent) && exec.name.startsWith('browser_')) {
-      if (evidence.browserCalls.length >= 20) throw new Error('synthetic-visual-browser-budget')
+      if (evidence.browserCalls.length >= (model.reportKind === 'widgets' ? 30 : 20)) throw new Error('synthetic-visual-browser-budget')
       evidence.browserCalls.push(exec.name); await save()
     }
     return next()
@@ -107,7 +108,7 @@ export function apply(ctx, config) {
       evidence.projectFileErrors.push({ name: exec.name, code: result.error?.info?.code, message: result.error?.message?.slice(0, 500) })
     }
     evidence.results.push({ name: exec.name, ok: !result.isError, imageBlocks: result.content?.filter(block => block.type === 'image').length ?? 0,
-      ...(model.reportKind === 'layout' || model.reportKind === 'wiki' ? {} : { selectedLayerReported: text.includes(model.layer), exactColorReported: text.toLowerCase().includes(model.color.toLowerCase()) }) })
+      ...(['layout', 'wiki', 'widgets'].includes(model.reportKind) ? {} : { selectedLayerReported: text.includes(model.layer), exactColorReported: text.toLowerCase().includes(model.color.toLowerCase()) }) })
     void save()
   })
   ctx.on('session/event', (session, event) => {
@@ -115,7 +116,10 @@ export function apply(ctx, config) {
     if (event.type === 'assistant/message' && event.data?.message?.source?.kind === 'model') {
       const message = event.data.message, text = message.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
       evidence.model = { provider: message.source.provider, model: message.source.model }
-      if (model.reportKind === 'wiki') {
+      if (model.reportKind === 'widgets') {
+        evidence.finalWidgetReportCorrect = matchesWikiReport(text, model.expected)
+      }
+      else if (model.reportKind === 'wiki') {
         evidence.finalWikiReportCorrect = matchesWikiReport(text, model.expected)
         // All Wiki cases are synthetic; retain the actual report privately so
         // schema failures can be distinguished from material-role mistakes.

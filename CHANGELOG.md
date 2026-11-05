@@ -9,6 +9,17 @@ no release version has been assigned yet.
 
 ### Added
 
+- Custom dropdown snapshots expose ARIA options and the observed Element UI
+  popup/list-item shape, with selected/disabled state and visible-popup
+  priority. Option references retain the existing observation/action guards,
+  include popup identity and reject hidden/disabled or changed targets. Common
+  control keys also carry legacy event fields without providing native keyboard
+  defaults. The widget smoke checks real Host dispatch and background hash-route
+  rendering for manual and automatically controlled tabs; its optional default
+  model must select, save once and navigate against independent synthetic server
+  state. This does not certify every SPA or real backend. Benchmark suite 18
+  records these model-facing inventory, event and guidance changes.
+
 - Material guidance preserves conflicting source values, follows explicit user
   precedence and keeps read-only project tasks read-only. Three additional
   synthetic default-model cases verify unresolved/resolved conflicts and a

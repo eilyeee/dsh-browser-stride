@@ -4,7 +4,7 @@ import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
-import { apply, MODEL_BROWSER_TOOLS, ZOOM_MODEL_TOOLS, WIKI_MODEL_TOOLS, matchesLayerReport, matchesLayoutReport, matchesWikiReport, reportedDesignZoom } from '../fixtures/visual-probe.mjs'
+import { apply, MODEL_BROWSER_TOOLS, ZOOM_MODEL_TOOLS, WIKI_MODEL_TOOLS, WIDGET_MODEL_TOOLS, matchesLayerReport, matchesLayoutReport, matchesWikiReport, reportedDesignZoom } from '../fixtures/visual-probe.mjs'
 
 const expected = { layer: 'background', textLayer: 'text-Medium', color: '#2563eb', width: 320, height: 144, radius: 14,
   text: { width: 126, height: 24, fontSize: 18, fontWeight: 400, lineHeight: 24, color: '#ffffff' } }
@@ -71,7 +71,7 @@ test('unresolved conflicts cannot pass with an invented width or an unsupported 
   assert.equal(matchesWikiReport(JSON.stringify({ ...resolved, resolutionSource: 'document' }), resolved), false)
 })
 
-for (const reportKind of ['styles', 'layout', 'zoom', 'wiki']) test(`${reportKind} model tools are restricted only in the test Agent scope before arming`, async t => {
+for (const reportKind of ['styles', 'layout', 'zoom', 'wiki', 'widgets']) test(`${reportKind} model tools are restricted only in the test Agent scope before arming`, async t => {
   const root = await mkdtemp(join(tmpdir(), 'stride-visual-scope-'))
   const trigger = join(root, 'trigger.json'), result = join(root, 'result.json'), stops = []
   let restriction, released = false, guard
@@ -91,12 +91,12 @@ for (const reportKind of ['styles', 'layout', 'zoom', 'wiki']) test(`${reportKin
   }
   assert.equal(ready?.modelReady, true)
   assert.deepEqual(restriction, { allow: reportKind === 'layout' ? ['browser_snapshot', 'browser_measure_layout', 'browser_navigate', 'browser_wait']
-    : reportKind === 'zoom' ? ZOOM_MODEL_TOOLS : reportKind === 'wiki' ? WIKI_MODEL_TOOLS : MODEL_BROWSER_TOOLS })
+    : reportKind === 'zoom' ? ZOOM_MODEL_TOOLS : reportKind === 'wiki' ? WIKI_MODEL_TOOLS : reportKind === 'widgets' ? WIDGET_MODEL_TOOLS : MODEL_BROWSER_TOOLS })
   assert.equal(typeof guard({ agent: { id: 'synthetic-model' }, name: 'bash' }), 'string')
   if (reportKind !== 'layout') assert.equal(guard({ agent: { id: 'synthetic-model' }, name: 'browser_set_design_zoom' }) === undefined, ['zoom', 'wiki'].includes(reportKind))
   assert.equal(guard({ agent: { id: 'other' }, name: 'bash' }), undefined)
   assert.equal(typeof guard({ agent: { id: 'synthetic-model' }, name: 'browser_list_tabs' }), 'string')
-  if (reportKind === 'layout') {
+  if (['layout','widgets'].includes(reportKind)) {
     assert.equal(guard({ agent: { id: 'synthetic-model' }, name: 'browser_navigate', arguments: { url: 'http://stride-layout.test/fixed' } }), undefined)
     assert.equal(typeof guard({ agent: { id: 'synthetic-model' }, name: 'browser_navigate', arguments: { url: 'https://example.com/' } }), 'string')
     assert.equal(typeof guard({ agent: { id: 'synthetic-model' }, name: 'browser_navigate', arguments: {} }), 'string')

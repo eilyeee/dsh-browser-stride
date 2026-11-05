@@ -9,6 +9,33 @@ const budget = { maxItems: 20, maxForms: 10, maxChars: 4_000 }
 afterEach(() => { document.body.replaceChildren() })
 
 describe('synthetic keyboard actions', () => {
+  it('reaches legacy control-key handlers without fabricating native focus or submission', async () => {
+    document.body.innerHTML = '<input aria-label="Picker"><button>Next</button>'
+    const input = document.querySelector('input')!
+    const events: unknown[] = []
+    let highlighted = 0
+    for (const type of ['keydown', 'keyup']) input.addEventListener(type, event => {
+      const key = event as KeyboardEvent
+      events.push([key.type, key.key, key.code, key.keyCode, key.which, key.isTrusted])
+      if (key.type === 'keydown' && key.keyCode === 40) highlighted++
+    })
+    input.focus()
+    const ctx = { ids: new ElementIds(), budget }
+    await runAction('browser_press', { key: 'ArrowDown' }, ctx)
+    expect(highlighted).toBe(1)
+    expect(events).toEqual([
+      ['keydown', 'ArrowDown', 'ArrowDown', 40, 40, false],
+      ['keyup', 'ArrowDown', 'ArrowDown', 40, 40, false],
+    ])
+    await runAction('browser_press', { key: 'Tab' }, ctx)
+    expect(document.activeElement).toBe(input)
+    events.length = 0
+    await runAction('browser_press', { key: '字' }, ctx)
+    expect(events).toEqual([
+      ['keydown', '字', '', 0, 0, false], ['keyup', '字', '', 0, 0, false],
+    ])
+  })
+
   it('does not dispatch a fabricated submit event for an invalid or valid form', async () => {
     document.body.innerHTML = '<form><input required><button>Submit</button></form>'
     const form = document.querySelector('form')!
