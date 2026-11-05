@@ -9,6 +9,14 @@ no release version has been assigned yet.
 
 ### Added
 
+- Material guidance preserves conflicting source values, follows explicit user
+  precedence and keeps read-only project tasks read-only. Three additional
+  synthetic default-model cases verify unresolved/resolved conflicts and a
+  disposable project's unchanged bytes with scoped read/write/edit tools
+  available. The test-only synchronous file guard rejects paths outside that
+  fixture. Benchmark suite 17 records these changes; this is not evidence of
+  real-project editing or integration.
+
 - Material roles follow the task and observed content, including embedded designs
   in prose and Wiki pages requested as implementation targets. Tool descriptions
   no longer exclude Wiki styling by name. Three independent synthetic model

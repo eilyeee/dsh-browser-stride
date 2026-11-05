@@ -60,6 +60,17 @@ test('material schemas accept task-relevant visual or target facts regardless of
   assert.equal(matchesWikiReport(JSON.stringify({ ...target, target: { width: 800, paddingTop: '31px', theme: 'extra' } }), target), false)
 })
 
+test('unresolved conflicts cannot pass with an invented width or an unsupported resolution source', () => {
+  const expected = { conflicts: [{ field: 'width', documentValue: 360, designValue: 320 }], needsClarification: true, resolvedWidth: null, resolutionSource: null }
+  assert.equal(matchesWikiReport(JSON.stringify(expected), expected), true)
+  for (const resolvedWidth of [320, 340, 360, false, '']) {
+    assert.equal(matchesWikiReport(JSON.stringify({ ...expected, resolvedWidth }), expected), false)
+  }
+  const resolved = { ...expected, needsClarification: false, resolvedWidth: 360, resolutionSource: 'user' }
+  assert.equal(matchesWikiReport(JSON.stringify(resolved), resolved), true)
+  assert.equal(matchesWikiReport(JSON.stringify({ ...resolved, resolutionSource: 'document' }), resolved), false)
+})
+
 for (const reportKind of ['styles', 'layout', 'zoom', 'wiki']) test(`${reportKind} model tools are restricted only in the test Agent scope before arming`, async t => {
   const root = await mkdtemp(join(tmpdir(), 'stride-visual-scope-'))
   const trigger = join(root, 'trigger.json'), result = join(root, 'result.json'), stops = []
@@ -92,6 +103,33 @@ for (const reportKind of ['styles', 'layout', 'zoom', 'wiki']) test(`${reportKin
   }
   for (const stop of stops.splice(0).reverse()) await stop()
   assert.equal(released, true)
+})
+
+test('project probe keeps file tools visible and returns synchronous file-guard verdicts', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'stride-project-probe-')), stops = []
+  const file = join(root, 'README.md'), trigger = join(root, 'trigger.json'), result = join(root, 'result.json')
+  await writeFile(file, 'synthetic')
+  let guard
+  const agent = { id: 'synthetic-project', ctx: { tools: { restrict() { return () => {} } } } }
+  const ctx = {
+    agents: { get: id => id === agent.id ? agent : undefined },
+    tools: { guard(fn) { guard = fn; return () => {} }, schemas(scope) { assert.equal(scope, agent); return ['read', 'write', 'edit'].map(name => ({ name })) } },
+    on() {}, effect(fn) { stops.push(fn()) },
+  }
+  t.after(async () => { for (const stop of stops.reverse()) await stop(); await rm(root, { recursive: true, force: true }) })
+  apply(ctx, { trigger, result })
+  await writeFile(trigger, JSON.stringify({ sequence: 1, mode: 'model', reportKind: 'wiki', sessionId: agent.id, projectFile: file }))
+  let ready
+  for (let i = 0; i < 200; i++) {
+    try { ready = JSON.parse(await readFile(result, 'utf8')); if (ready.modelReady) break } catch {}
+    await delay(10)
+  }
+  assert.equal(ready?.modelReady, true)
+  for (const name of ['read', 'write', 'edit']) {
+    assert.equal(guard({ agent, name, arguments: { file_path: file } }), undefined)
+  }
+  assert.equal(typeof guard({ agent, name: 'read', arguments: { file_path: join(root, 'outside.txt') } }), 'string')
+  assert.equal(guard({ agent: { id: 'other' }, name: 'write', arguments: { file_path: '/tmp/other' } }), undefined)
 })
 
 test('direct visual preparation restores the scoped presentation after success or failure', async t => {

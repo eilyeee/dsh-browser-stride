@@ -14,7 +14,7 @@ export class DshRpcError extends Error {
 }
 
 // Keep this client deliberately limited to the benchmark's current Typert API.
-const REQUEST_METHODS = new Set(['session.create', 'session.selectModel', 'session.prompt', 'session.cancel'])
+const REQUEST_METHODS = new Set(['session.create', 'session.selectModel', 'session.prompt', 'session.cancel', 'workspace.create'])
 
 export class DshClient {
   constructor(baseUrl) {

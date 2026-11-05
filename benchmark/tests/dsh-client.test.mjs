@@ -83,6 +83,14 @@ test('unary calls use current Typert endpoints, args and correlated prompt IDs',
   assert.equal(requests.length, 3)
 })
 
+test('a disposable project can create an explicit workspace for its test session', async t => {
+  const { client, requests } = await fixture(t, { unary: () => ({ workspace: { workspaceId: 'synthetic-workspace' } }) })
+  const result = await client.rpc('workspace.create', { path: '/tmp/synthetic-project' })
+  assert.equal(result.workspace.workspaceId, 'synthetic-workspace')
+  assert.equal(requests[0].url, '/api/workspace/create')
+  assert.deepEqual(requests[0].body.payload, { args: { request: { path: '/tmp/synthetic-project' } } })
+})
+
 test('launch tokens exchange for a same-origin cookie shared by HTTP and WebSocket requests', async (t) => {
   let upgraded = false
   const { client, baseUrl } = await fixture(t, {

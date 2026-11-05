@@ -7,6 +7,9 @@ export async function startVisualSite({ lanhuZoomMenu = false } = {}) {
     endpoint: '/api/customer-drafts', successFields: ['草稿编号', '已保存'], readOnlyCanSubmit: false, visualRequirements: [] }
   const reference = { referenceKey: 'VIS-' + randomBytes(3).toString('hex').toUpperCase(), width: 320, height: 144, fill: '#2563eb', radius: 14, fontSize: 18 }
   const mixedWikiExpected = { ...wikiExpected, sourceRole: 'mixed', visualRequirements: [{ source: 'embedded_design', ...reference }] }
+  const conflictingWikiExpected = { sourceRole: 'mixed', documentKey: nonce, referenceKey: reference.referenceKey,
+    conflicts: [{ field: 'width', documentValue: 360, designValue: 320 }], needsClarification: true, resolvedWidth: null, resolutionSource: null }
+  const resolvedWikiExpected = { ...conflictingWikiExpected, needsClarification: false, resolvedWidth: 360, resolutionSource: 'user' }
   const wikiTargetExpected = { sourceRole: 'implementation', documentKey: nonce, target: { selector: '#wiki-article', width: 800, paddingTop: '31px' } }
   const designs = {
     a: { layer: `Synthetic_background_${nonce}`, textLayer: `Synthetic_text_Medium_${nonce}`, color: '#2563eb', radius: 14,
@@ -47,11 +50,13 @@ export async function startVisualSite({ lanhuZoomMenu = false } = {}) {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
     if (new URL(req.url, 'http://synthetic.test').pathname === '/requirements') {
       const embedded = new URL(req.url, 'http://synthetic.test').searchParams.get('reference') === '1'
+      const conflict = embedded && new URL(req.url, 'http://synthetic.test').searchParams.get('conflict') === '1'
       res.end(`<!doctype html><meta charset="utf-8"><title>客户信息需求 Wiki</title>
 <style>body{margin:0;background:#ffe4fa;font:19px Arial}article{width:800px;box-sizing:border-box;padding:31px}h1{font-size:24px;margin:0 0 16px}li{line-height:28px}aside{color:#b0239f}img{display:block}</style>
 <article id="wiki-article"><h1>客户信息联调需求</h1><p>文档编号：${nonce}</p><ul><li>客户类型必填，可选“个人”和“企业”。</li>
 <li>选择企业时，纳税识别号必填。</li><li>提交接口：POST /api/customer-drafts。</li>
 <li>提交成功后展示“已保存”和返回的“草稿编号”。</li><li>只读模式下不可提交。</li></ul>
+${conflict ? '<section><h2>客户卡片尺寸要求</h2><p>正文要求：客户卡片宽度为 360px。下方保留设计参考，文档未指定两者的优先级。</p></section>' : ''}
 ${embedded ? '<section><h2>客户卡片设计参考</h2><img src="/material-reference.svg" width="640" height="260" alt="客户卡片设计参考图"/></section>' : ''}</article>
 <aside id="properties">Wiki 站点主题信息（文档阅读器）<br>Layer: Wiki_shell<br>Fill: #b0239f<br>font-size: 19px<br>width: 800px</aside>
 <script>window.syntheticWrites=0;for(const event of ['input','change','submit'])addEventListener(event,()=>syntheticWrites++)</script>`)
@@ -81,7 +86,7 @@ canvas.addEventListener('pointerdown',e=>{window.syntheticCanvasPoints++;const d
   await new Promise(done => server.listen(0, '127.0.0.1', done))
   const origin = `http://${lanhuZoomMenu ? 'lanhuapp.com' : 'stride-visual.test'}:${server.address().port}`
   const route = lanhuZoomMenu ? '/web/' : '/design', hash = lanhuZoomMenu ? '#/item/project/detailDetach' : ''
-  return { origin, wikiUrl: `${origin}/requirements`, mixedWikiUrl: `${origin}/requirements?reference=1`, wikiExpected, mixedWikiExpected, wikiTargetExpected, url: `${origin}${route}${hash}`, smallUrl: `${origin}${route}?zoom=27${hash}`, noZoomControlUrl: `${origin}${route}?zoom=27&controls=none${hash}`, alternativeZoomUrl: `${origin}${route}?zoom=27&controls=alternative${hash}`, ...designs.a, designs,
+  return { origin, wikiUrl: `${origin}/requirements`, mixedWikiUrl: `${origin}/requirements?reference=1`, conflictingWikiUrl: `${origin}/requirements?reference=1&conflict=1`, wikiExpected, mixedWikiExpected, conflictingWikiExpected, resolvedWikiExpected, wikiTargetExpected, url: `${origin}${route}${hash}`, smallUrl: `${origin}${route}?zoom=27${hash}`, noZoomControlUrl: `${origin}${route}?zoom=27&controls=none${hash}`, alternativeZoomUrl: `${origin}${route}?zoom=27&controls=alternative${hash}`, ...designs.a, designs,
     state: () => ({ selection: selection ?? null, clicks }), history: () => [...selections], zoomHistory: () => [...zooms], reset: () => { selection = undefined; clicks = 0; selections = []; zooms = [] },
     close: () => new Promise(done => server.close(done)) }
 }

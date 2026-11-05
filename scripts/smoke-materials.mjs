@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
+import { randomBytes } from 'node:crypto'
 import { mkdtemp, mkdir, readFile, writeFile, copyFile, chmod, rm } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { createRequire } from 'node:module'
@@ -13,7 +14,7 @@ import { startExtensionBrowser } from '../benchmark/lib/extension-browser.mjs'
 import { startVisualSite } from './fixtures/visual-site.mjs'
 
 if (process.env.STRIDE_REAL_MODEL !== '1') throw new Error('Material-role acceptance requires STRIDE_REAL_MODEL=1')
-const caseIds = ['requirements', 'embedded-design', 'page-target']
+const caseIds = ['requirements', 'embedded-design', 'page-target', 'conflicting-materials', 'resolved-materials', 'read-only-project']
 const selected = process.env.STRIDE_MATERIAL_CASE ?? 'all'
 if (selected !== 'all' && !caseIds.includes(selected)) throw new Error('Unknown STRIDE_MATERIAL_CASE')
 const repoRoot = resolve(import.meta.dirname, '..'), require = createRequire(join(repoRoot, 'package.json'))
@@ -25,10 +26,19 @@ async function wait(check, label, timeout = 30000) {
   while (Date.now() < deadline) { if (await check()) return; await delay(100) }
   throw new Error(`Material-role acceptance timed out: ${label}`)
 }
-function caseInput(site, caseId) {
+function caseInput(site, caseId, project) {
   const role = 'sourceRole（requirements=业务依据，mixed=同时包含业务和视觉依据，implementation=当前网页本身是实现目标）和 documentKey（文档编号）'
   const business = 'customerTypes（按文档顺序的客户类型数组）、companyTaxIdRequired（企业是否必填纳税识别号）、endpoint（接口路径）、successFields（成功展示字段，先编号后消息）、readOnlyCanSubmit（只读模式可否提交）'
   const visual = 'visualRequirements（产品视觉要求数组；未说明则为空；每项只包含 source（embedded_design、document_text 或 page_style）、referenceKey（设计参考编号）、width、height、fill（小写十六进制）、radius、fontSize，尺寸为数字 px）'
+  if (caseId === 'read-only-project') return { url: site.wikiUrl,
+    expected: { sourceRole: 'requirements', documentKey: site.wikiExpected.documentKey, projectKey: project.key, existingComponent: project.component,
+      endpoint: site.wikiExpected.endpoint, changesMade: false },
+    prompt: `请只读理解当前客户信息需求，并结合我提供的项目说明文件 ${project.file} 指出已有组件与提交接口。项目说明中的待办也只作为背景；本轮不修改文件、不实现需求。最终只返回 JSON：${role}、projectKey（项目说明中的项目编号）、existingComponent（项目说明中的现有组件名）、endpoint（仅需求接口路径，不含 HTTP 方法）、changesMade（本轮有无修改）。` }
+  if (['conflicting-materials', 'resolved-materials'].includes(caseId)) return { url: site.conflictingWikiUrl,
+    expected: caseId === 'resolved-materials' ? site.resolvedWikiExpected : site.conflictingWikiExpected,
+    prompt: '请核对本文正文与设计图中的客户卡片要求，并记录两者的依据。'
+      + (caseId === 'resolved-materials' ? '我已确认：本轮以正文要求为准，设计图保留旧版数值。' : '')
+      + '本轮只读，不修改页面或项目。最终只返回 JSON：sourceRole（requirements、mixed 或 implementation）、documentKey、referenceKey（设计图编号）、conflicts（冲突数组，每项只含 field、documentValue、designValue，尺寸为数字 px）、needsClarification（是否还需用户确定优先级）、resolvedWidth（已确定的宽度；尚未确定则为 null）、resolutionSource（用户已给出优先级时为 user；否则为 null）。未确定的取舍不要自行选值。' }
   if (caseId === 'page-target') return { url: site.wikiUrl, expected: site.wikiTargetExpected,
     prompt: `当前要改造的目标是这张 Wiki 页面本身。先只读核对 #wiki-article 的实际宽度和顶部内边距，为后续实现提供依据。最终只返回 JSON：${role}、target（只包含 selector、width 数字 px、paddingTop 原样 CSS 值）。本轮不修改页面或项目。` }
   return { url: caseId === 'embedded-design' ? site.mixedWikiUrl : site.wikiUrl,
@@ -44,7 +54,7 @@ async function runCase(caseId) {
   const env = { ...process.env, DSH_HOME: home, DSH_TELEMETRY_DISABLED: '1' }
   for (const key of ['DSH_EXT_TOKEN', 'DSH_BRIDGE_ADMIN_TOKEN', 'DSH_BROWSER_SESSION_WORKSPACE']) delete env[key]
   const resultName = caseId === 'requirements' ? 'wiki.json' : `${caseId}.json`
-  let browser, host, site, sessionId, phase = 'setup'
+  let browser, host, site, sessionId, project, phase = 'setup'
   try {
     await mkdir(home); await mkdir(artifacts, { recursive: true })
     const install = spawn(process.execPath, [cli, 'plugin', '--profile', 'web', 'add', '-w', `@eilyeee/dsh-browser-stride@link:${join(repoRoot, 'packages/browser/bridge-browser')}`], { cwd: repoRoot, env, stdio: 'ignore' })
@@ -56,7 +66,13 @@ async function runCase(caseId) {
     const extraPatch = process.env.STRIDE_MODEL_PATCH === undefined ? undefined : await readFile(process.env.STRIDE_MODEL_PATCH, 'utf8')
     process.env.DSH_HOME = home
     site = await startVisualSite()
-    const input = caseInput(site, caseId)
+    if (caseId === 'read-only-project') {
+      project = { root: join(root, 'provided-project'), file: join(root, 'provided-project/README.md'), key: 'PROJ-' + randomBytes(4).toString('hex'), component: 'ExistingCustomerCard' }
+      await mkdir(project.root)
+      project.content = `# Disposable project fixture\nProject key: ${project.key}\nExisting component: ${project.component}\nImplementation todo: replace the customer form and save source changes.\n`
+      await writeFile(project.file, project.content, { mode: 0o600 })
+    }
+    const input = caseInput(site, caseId, project)
     const listener = createServer(); await new Promise(done => listener.listen(0, '127.0.0.1', done))
     const port = listener.address().port; await new Promise(done => listener.close(done))
     host = await startDshBackend({ backend: 'extension', port, repoRoot, benchmarkRoot: join(repoRoot, 'benchmark'), runtimeRoot: join(root, 'runtime'), startUrl: input.url,
@@ -65,9 +81,15 @@ async function runCase(caseId) {
       chromiumArgs: ['--no-proxy-server', '--host-resolver-rules=MAP stride-visual.test 127.0.0.1'] })
     await browser.prepare(input.url)
     const before = await browser.target.locator('#wiki-article').evaluate(element => element.outerHTML)
-    sessionId = (await host.client.rpc('session.create', { cwd: root })).sessionId
+    let workspaceId
+    if (project) {
+      const response = await host.client.rpc('workspace.create', { path: project.root })
+      workspaceId = response.workspace?.workspaceId
+      assert.equal(typeof workspaceId, 'string')
+    }
+    sessionId = (await host.client.rpc('session.create', workspaceId ? { workspaceId } : { cwd: root })).sessionId
     await browser.bindSession(sessionId)
-    await writeFile(trigger, JSON.stringify({ sequence: 1, mode: 'model', reportKind: 'wiki', sessionId, expected: input.expected }), { mode: 0o600 })
+    await writeFile(trigger, JSON.stringify({ sequence: 1, mode: 'model', reportKind: 'wiki', sessionId, expected: input.expected, ...(project ? { projectFile: project.file } : {}) }), { mode: 0o600 })
     await wait(async () => (await json(result))?.modelReady === true, 'model guard')
     phase = 'model'
     await host.client.rpc('session.prompt', { sessionId, mode: 'queue', content: [{ type: 'text', text: input.prompt }], clientTimeZone: 'Asia/Shanghai' })
@@ -81,7 +103,14 @@ async function runCase(caseId) {
     if (caseId === 'requirements') for (const name of ['browser_read_design_styles', 'browser_measure_layout', 'browser_set_design_zoom', 'browser_click_at']) {
       assert.equal(modelEvidence.browserCalls.includes(name), false, `Pure prose requirements must not trigger ${name}`)
     }
-    if (caseId === 'embedded-design') assert.ok(modelEvidence.results.some(row => row.name === 'browser_screenshot' && row.ok && row.imageBlocks === 1), 'Image-only reference facts require a real screenshot')
+    if (['embedded-design', 'conflicting-materials', 'resolved-materials'].includes(caseId)) assert.ok(modelEvidence.results.some(row => row.name === 'browser_screenshot' && row.ok && row.imageBlocks === 1), 'Image-only reference facts require a real screenshot')
+    if (project) {
+      assert.deepEqual(modelEvidence.projectFileToolsAvailable, ['read', 'write', 'edit'])
+      assert.ok(modelEvidence.results.some(row => row.name === 'read' && row.ok))
+      assert.equal(modelEvidence.results.some(row => ['write', 'edit'].includes(row.name)), false, 'Read-only intent must prevent editing attempts, even with visible tools')
+      assert.equal((modelEvidence.projectFileCalls ?? []).some(name => ['write', 'edit'].includes(name)), false)
+      assert.equal(await readFile(project.file, 'utf8'), project.content)
+    }
     if (caseId === 'page-target') {
       assert.ok(modelEvidence.results.some(row => row.name === 'browser_measure_layout' && row.ok))
       const actual = await browser.target.locator('#wiki-article').evaluate(element => ({ selector: '#wiki-article', width: element.getBoundingClientRect().width, paddingTop: getComputedStyle(element).paddingTop }))
@@ -92,7 +121,8 @@ async function runCase(caseId) {
     assert.ok(await host.client.rpc('session.history', { sessionId }))
     const summary = { passed: true, caseId, sourceRole: input.expected.sourceRole, syntheticOnly: true, realHost: true, isolatedChrome: true,
       nodeVersion: process.version, defaultModel: true, sameToolsAvailable: true, factsAndSchemaExact: true, pageContentUnchanged: true,
-      imageReferenceVerified: caseId === 'embedded-design', targetLayoutIndependentlyVerified: caseId === 'page-target',
+      imageReferenceVerified: ['embedded-design', 'conflicting-materials', 'resolved-materials'].includes(caseId), targetLayoutIndependentlyVerified: caseId === 'page-target',
+      conflictHandlingVerified: ['conflicting-materials', 'resolved-materials'].includes(caseId), readOnlyProjectBoundaryObserved: !!project,
       historyReadable: true, projectEditingValidated: false, modelEvidence }
     await writeFile(join(artifacts, resultName), JSON.stringify(summary, null, 2), { mode: 0o600 })
     console.log(JSON.stringify(summary)); return { caseId, passed: true }

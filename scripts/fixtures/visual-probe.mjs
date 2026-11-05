@@ -1,5 +1,6 @@
 // Disposable Host probe: real tool/attachment pipeline, optional bounded default-model check.
 import { readFile, writeFile, rename } from 'node:fs/promises'
+import { guardMaterialProjectFile, materialProjectScope, PROJECT_FILE_TOOLS } from './material-project-scope.mjs'
 async function saveJson(path, value) {
   await writeFile(`${path}.tmp`, JSON.stringify(value), { mode: 0o600 })
   await rename(`${path}.tmp`, path)
@@ -57,7 +58,7 @@ export const MODEL_BROWSER_TOOLS = ['browser_screenshot','browser_snapshot','bro
 export const ZOOM_MODEL_TOOLS = [...MODEL_BROWSER_TOOLS, 'browser_set_design_zoom', 'browser_select']
 export const WIKI_MODEL_TOOLS = [...ZOOM_MODEL_TOOLS, 'browser_measure_layout', 'browser_click', 'browser_press']
 const LAYOUT_MODEL_TOOLS = ['browser_snapshot', 'browser_measure_layout', 'browser_navigate', 'browser_wait']
-const modelTools = model => model.reportKind === 'wiki' ? WIKI_MODEL_TOOLS : model.reportKind === 'layout' ? LAYOUT_MODEL_TOOLS
+const modelTools = model => model.reportKind === 'wiki' ? [...WIKI_MODEL_TOOLS, ...(model.projectFile ? PROJECT_FILE_TOOLS : [])] : model.reportKind === 'layout' ? LAYOUT_MODEL_TOOLS
   : model.autoZoom === true ? ZOOM_MODEL_TOOLS : MODEL_BROWSER_TOOLS
 export function apply(ctx, config) {
   let sequence = -1, pending = false, model, releaseModelTools, writes = Promise.resolve()
@@ -73,15 +74,25 @@ export function apply(ctx, config) {
     if (exec.name !== 'run_code' && !modelTools(model).includes(exec.name)) {
       evidence.blocked.push(exec.name); void save(); return 'This check permits only the synthetic fixture and its browser tools.'
     }
+    if (model.projectFile && PROJECT_FILE_TOOLS.includes(exec.name)) {
+      const reason = guardMaterialProjectFile(model.projectScope, exec.arguments)
+      if (reason) { evidence.blocked.push(exec.name); void save() }
+      return reason
+    }
     if (model.reportKind === 'layout' && exec.name === 'browser_navigate' && !model.allowedUrls.includes(exec.arguments?.url)) {
       evidence.blocked.push(exec.name); void save(); return 'Navigation is limited to the two controlled layout fixture URLs.'
     }
   }))
   ctx.on('agent/request', async (payload, next) => {
-    if (belongs(payload.agent)) { if (++evidence.modelRequests > (model.autoZoom === true ? 14 : 10)) throw new Error('synthetic-visual-model-budget'); await save() }
+    if (belongs(payload.agent)) { if (++evidence.modelRequests > (model.autoZoom === true || model.reportKind === 'wiki' ? 14 : 10)) throw new Error('synthetic-visual-model-budget'); await save() }
     return next()
   })
   ctx.on('tools/execute', async (exec, next) => {
+    if (belongs(exec.agent) && model.projectFile && PROJECT_FILE_TOOLS.includes(exec.name)) {
+      evidence.projectFileCalls ??= []
+      if (evidence.projectFileCalls.length >= 8) throw new Error('synthetic-project-file-budget')
+      evidence.projectFileCalls.push(exec.name); await save()
+    }
     if (belongs(exec.agent) && exec.name.startsWith('browser_')) {
       if (evidence.browserCalls.length >= 20) throw new Error('synthetic-visual-browser-budget')
       evidence.browserCalls.push(exec.name); await save()
@@ -91,6 +102,10 @@ export function apply(ctx, config) {
   ctx.on('tools/result', (exec, result) => {
     if (!belongs(exec.agent)) return
     const text = result.content?.filter(block => block.type === 'text').map(block => block.text).join('\n') ?? ''
+    if (model.projectFile && PROJECT_FILE_TOOLS.includes(exec.name) && result.isError) {
+      evidence.projectFileErrors ??= []
+      evidence.projectFileErrors.push({ name: exec.name, code: result.error?.info?.code, message: result.error?.message?.slice(0, 500) })
+    }
     evidence.results.push({ name: exec.name, ok: !result.isError, imageBlocks: result.content?.filter(block => block.type === 'image').length ?? 0,
       ...(model.reportKind === 'layout' || model.reportKind === 'wiki' ? {} : { selectedLayerReported: text.includes(model.layer), exactColorReported: text.toLowerCase().includes(model.color.toLowerCase()) }) })
     void save()
@@ -133,9 +148,15 @@ export function apply(ctx, config) {
         if (command.mode === 'model') {
           const agent = ctx.agents.get(command.sessionId)
           if (agent === undefined) throw new Error('Synthetic model probe agent unavailable')
+          const projectScope = command.projectFile ? await materialProjectScope(command.projectFile) : undefined
           releaseModelTools?.()
           releaseModelTools = agent.ctx.tools.restrict({ allow: modelTools(command) })
-          model = command; await save()
+          if (command.projectFile) {
+            const visible = new Set(ctx.tools.schemas(agent).map(tool => tool.name))
+            if (!PROJECT_FILE_TOOLS.every(name => visible.has(name))) throw new Error('Synthetic project read/write/edit tools are unavailable')
+            evidence.projectFileToolsAvailable = [...PROJECT_FILE_TOOLS]
+          }
+          model = { ...command, projectScope }; await save()
           await writeFile(config.result, JSON.stringify({ sequence, ok: true, modelReady: true }), { mode: 0o600 }); return
         }
         const agent = ctx.agents.get(command.sessionId)
