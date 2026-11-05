@@ -36,8 +36,20 @@ export function reportedDesignZoom(text) {
 export function matchesWikiReport(text, expected) {
   try {
     const report = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] ?? '')
-    return Object.keys(expected).every(key => JSON.stringify(report[key]) === JSON.stringify(expected[key]))
+    return sameJson(report, expected)
   } catch { return false }
+}
+/** Exact case schema, including nested fields; object key order is immaterial. */
+function sameJson(value, expected) {
+  if (value === expected) return true
+  if (Array.isArray(value) || Array.isArray(expected)) {
+    return Array.isArray(value) && Array.isArray(expected) && value.length === expected.length
+      && value.every((item, index) => sameJson(item, expected[index]))
+  }
+  if (value === null || expected === null || typeof value !== 'object' || typeof expected !== 'object') return false
+  const keys = Object.keys(expected)
+  return Object.keys(value).length === keys.length
+    && keys.every(key => Object.hasOwn(value, key) && sameJson(value[key], expected[key]))
 }
 export const name = 'stride-visual-probe'
 export const inject = ['tools', 'agents', 'attachments']
@@ -88,7 +100,12 @@ export function apply(ctx, config) {
     if (event.type === 'assistant/message' && event.data?.message?.source?.kind === 'model') {
       const message = event.data.message, text = message.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
       evidence.model = { provider: message.source.provider, model: message.source.model }
-      if (model.reportKind === 'wiki') evidence.finalWikiReportCorrect = matchesWikiReport(text, model.expected)
+      if (model.reportKind === 'wiki') {
+        evidence.finalWikiReportCorrect = matchesWikiReport(text, model.expected)
+        // All Wiki cases are synthetic; retain the actual report privately so
+        // schema failures can be distinguished from material-role mistakes.
+        writes = writes.then(() => writeFile(`${config.result}.final`, text.slice(0, 6000), { mode: 0o600 })).catch(() => {})
+      }
       else if (model.reportKind === 'layout') evidence.finalLayoutReportCorrect = matchesLayoutReport(text)
       else {
         evidence.finalLayerReported = text.includes(model.layer); evidence.finalColorReported = text.toLowerCase().includes(model.color.toLowerCase())

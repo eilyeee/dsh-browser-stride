@@ -37,15 +37,27 @@ test('design zoom acceptance requires an explicit bounded percentage, not a gues
   assert.equal(reportedDesignZoom('No measured zoom'), null)
 })
 
-test('Wiki acceptance checks exact business facts and excludes the reader theme from product requirements', () => {
+test('material acceptance checks exact business facts and rejects unrequested reader CSS fields', () => {
   const expected = { sourceRole: 'requirements', documentKey: 'synthetic', customerTypes: ['个人', '企业'], companyTaxIdRequired: true,
     endpoint: '/api/customer-drafts', successFields: ['草稿编号', '已保存'], readOnlyCanSubmit: false, visualRequirements: [] }
   assert.equal(matchesWikiReport(JSON.stringify(expected), expected), true)
   for (const patch of [{ sourceRole: 'design' }, { documentKey: 'guessed' }, { companyTaxIdRequired: 'true' },
-    { readOnlyCanSubmit: true }, { endpoint: '/api/other' }, { customerTypes: ['个人'] }, { visualRequirements: ['font-size: 19px'] }]) {
+    { readOnlyCanSubmit: true }, { endpoint: '/api/other' }, { customerTypes: ['个人'] }, { visualRequirements: ['font-size: 19px'] },
+    { productCssFromWiki: { color: '#b0239f', fontSize: '19px' } }]) {
     assert.equal(matchesWikiReport(JSON.stringify({ ...expected, ...patch }), expected), false)
   }
   assert.equal(matchesWikiReport('No evidence', expected), false)
+})
+
+test('material schemas accept task-relevant visual or target facts regardless of object key order', () => {
+  const expected = { sourceRole: 'mixed', visualRequirements: [{ source: 'embedded_design', referenceKey: 'VIS-A1B2C3', width: 320, fill: '#2563eb' }] }
+  const reordered = { visualRequirements: [{ fill: '#2563eb', width: 320, referenceKey: 'VIS-A1B2C3', source: 'embedded_design' }], sourceRole: 'mixed' }
+  assert.equal(matchesWikiReport(JSON.stringify(reordered), expected), true)
+  assert.equal(matchesWikiReport(JSON.stringify({ ...reordered, visualRequirements: [{ ...reordered.visualRequirements[0], readerCss: '19px' }] }), expected), false)
+  assert.equal(matchesWikiReport(JSON.stringify({ ...reordered, visualRequirements: [{ ...reordered.visualRequirements[0], width: '320' }] }), expected), false)
+  const target = { sourceRole: 'implementation', target: { width: 800, paddingTop: '31px' } }
+  assert.equal(matchesWikiReport(JSON.stringify(target), target), true)
+  assert.equal(matchesWikiReport(JSON.stringify({ ...target, target: { width: 800, paddingTop: '31px', theme: 'extra' } }), target), false)
 })
 
 for (const reportKind of ['styles', 'layout', 'zoom', 'wiki']) test(`${reportKind} model tools are restricted only in the test Agent scope before arming`, async t => {

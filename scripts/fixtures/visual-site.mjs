@@ -5,6 +5,9 @@ export async function startVisualSite({ lanhuZoomMenu = false } = {}) {
   const nonce = randomBytes(4).toString('hex')
   const wikiExpected = { sourceRole: 'requirements', documentKey: nonce, customerTypes: ['个人', '企业'], companyTaxIdRequired: true,
     endpoint: '/api/customer-drafts', successFields: ['草稿编号', '已保存'], readOnlyCanSubmit: false, visualRequirements: [] }
+  const reference = { referenceKey: 'VIS-' + randomBytes(3).toString('hex').toUpperCase(), width: 320, height: 144, fill: '#2563eb', radius: 14, fontSize: 18 }
+  const mixedWikiExpected = { ...wikiExpected, sourceRole: 'mixed', visualRequirements: [{ source: 'embedded_design', ...reference }] }
+  const wikiTargetExpected = { sourceRole: 'implementation', documentKey: nonce, target: { selector: '#wiki-article', width: 800, paddingTop: '31px' } }
   const designs = {
     a: { layer: `Synthetic_background_${nonce}`, textLayer: `Synthetic_text_Medium_${nonce}`, color: '#2563eb', radius: 14,
       width: 320, height: 144, text: { width: 126, height: 24, fontSize: 18, fontWeight: 400, lineHeight: 24, color: '#ffffff' },
@@ -31,15 +34,27 @@ export async function startVisualSite({ lanhuZoomMenu = false } = {}) {
       } catch {}
       res.end('ok'); return
     }
+    if (req.url === '/material-reference.svg') {
+      res.writeHead(200, { 'content-type': 'image/svg+xml; charset=utf-8' })
+      res.end(`<svg xmlns="http://www.w3.org/2000/svg" width="640" height="260" viewBox="0 0 640 260">
+<rect width="640" height="260" fill="white"/><g font-family="Arial" font-size="20" fill="#111827">
+<text x="20" y="32">Customer card design</text><text x="20" y="61" font-family="monospace">Reference: ${reference.referenceKey}</text>
+<rect x="20" y="85" width="320" height="144" rx="14" fill="#2563eb"/><text x="92" y="163" fill="white" font-size="18">Customer info</text>
+<text x="365" y="100">Width: 320px</text><text x="365" y="132">Height: 144px</text><text x="365" y="164">Fill: #2563eb</text>
+<text x="365" y="196">Radius: 14px</text><text x="365" y="228">Font size: 18px</text></g></svg>`)
+      return
+    }
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-    if (req.url === '/requirements') {
+    if (new URL(req.url, 'http://synthetic.test').pathname === '/requirements') {
+      const embedded = new URL(req.url, 'http://synthetic.test').searchParams.get('reference') === '1'
       res.end(`<!doctype html><meta charset="utf-8"><title>客户信息需求 Wiki</title>
-<style>body{background:#ffe4fa;font:19px serif}article{max-width:800px;padding:31px}aside{color:#b0239f}</style>
-<article><h1>客户信息联调需求</h1><p>文档编号：${nonce}</p><ul><li>客户类型必填，可选“个人”和“企业”。</li>
+<style>body{margin:0;background:#ffe4fa;font:19px Arial}article{width:800px;box-sizing:border-box;padding:31px}h1{font-size:24px;margin:0 0 16px}li{line-height:28px}aside{color:#b0239f}img{display:block}</style>
+<article id="wiki-article"><h1>客户信息联调需求</h1><p>文档编号：${nonce}</p><ul><li>客户类型必填，可选“个人”和“企业”。</li>
 <li>选择企业时，纳税识别号必填。</li><li>提交接口：POST /api/customer-drafts。</li>
-<li>提交成功后展示“已保存”和返回的“草稿编号”。</li><li>只读模式下不可提交。</li></ul></article>
+<li>提交成功后展示“已保存”和返回的“草稿编号”。</li><li>只读模式下不可提交。</li></ul>
+${embedded ? '<section><h2>客户卡片设计参考</h2><img src="/material-reference.svg" width="640" height="260" alt="客户卡片设计参考图"/></section>' : ''}</article>
 <aside id="properties">Wiki 站点主题信息（文档阅读器）<br>Layer: Wiki_shell<br>Fill: #b0239f<br>font-size: 19px<br>width: 800px</aside>
-<script>window.syntheticWrites=0;addEventListener('pointerdown',()=>syntheticWrites++)</script>`)
+<script>window.syntheticWrites=0;for(const event of ['input','change','submit'])addEventListener(event,()=>syntheticWrites++)</script>`)
       return
     }
     if (req.url === '/personal') {
@@ -66,7 +81,7 @@ canvas.addEventListener('pointerdown',e=>{window.syntheticCanvasPoints++;const d
   await new Promise(done => server.listen(0, '127.0.0.1', done))
   const origin = `http://${lanhuZoomMenu ? 'lanhuapp.com' : 'stride-visual.test'}:${server.address().port}`
   const route = lanhuZoomMenu ? '/web/' : '/design', hash = lanhuZoomMenu ? '#/item/project/detailDetach' : ''
-  return { origin, wikiUrl: `${origin}/requirements`, wikiExpected, url: `${origin}${route}${hash}`, smallUrl: `${origin}${route}?zoom=27${hash}`, noZoomControlUrl: `${origin}${route}?zoom=27&controls=none${hash}`, alternativeZoomUrl: `${origin}${route}?zoom=27&controls=alternative${hash}`, ...designs.a, designs,
+  return { origin, wikiUrl: `${origin}/requirements`, mixedWikiUrl: `${origin}/requirements?reference=1`, wikiExpected, mixedWikiExpected, wikiTargetExpected, url: `${origin}${route}${hash}`, smallUrl: `${origin}${route}?zoom=27${hash}`, noZoomControlUrl: `${origin}${route}?zoom=27&controls=none${hash}`, alternativeZoomUrl: `${origin}${route}?zoom=27&controls=alternative${hash}`, ...designs.a, designs,
     state: () => ({ selection: selection ?? null, clicks }), history: () => [...selections], zoomHistory: () => [...zooms], reset: () => { selection = undefined; clicks = 0; selections = []; zooms = [] },
     close: () => new Promise(done => server.close(done)) }
 }

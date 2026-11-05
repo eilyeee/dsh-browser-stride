@@ -9,6 +9,13 @@ no release version has been assigned yet.
 
 ### Added
 
+- Material roles follow the task and observed content, including embedded designs
+  in prose and Wiki pages requested as implementation targets. Tool descriptions
+  no longer exclude Wiki styling by name. Three independent synthetic model
+  cases share the same tool set; per-case report schemas reject extra/missing
+  fields at every depth and tolerate object-key reordering. Benchmark suite 16
+  records these guidance and acceptance changes.
+
 - Shared guidance distinguishes supplied projects, visual references and Wiki
   requirements. Document-reader themes are not product visual requirements.
   Synthetic default-model checks cover material roles and observed-control
