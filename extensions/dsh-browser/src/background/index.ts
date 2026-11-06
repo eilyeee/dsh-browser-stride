@@ -2010,16 +2010,10 @@ chrome.runtime.onConnect.addListener((port) => {
         const refresh = rpcSessionId === undefined
           ? Promise.resolve()
           : sessionSnapshotRefreshes.get(rpcSessionId) ?? Promise.resolve()
-        const prepare = rpcMsg.method === 'session.prompt'
-          ? Promise.resolve().then(async () => {
-              await refresh
-              return rpcSessionId === undefined || tabAffinity.getSessionTab(rpcSessionId) !== undefined
-            })
-          : Promise.resolve(true)
-        void prepare.then((ready) => {
-          if (!ready) throw new Error('This session is not bound to a live browser tab')
-          return gatewayRpc(rpcMsg.method, rpcMsg.payload)
-        }).then(
+        // Seed an already selected page before the prompt, but allow ordinary
+        // chat without one. Browser tools enforce their own live target/grant.
+        const prepare = rpcMsg.method === 'session.prompt' ? refresh : Promise.resolve()
+        void prepare.then(() => gatewayRpc(rpcMsg.method, rpcMsg.payload)).then(
           (result) => {
             try { port.postMessage({ type: 'rpc.result', id: rpcMsg.id, ok: true, result }) } catch { /* port closed */ }
           },

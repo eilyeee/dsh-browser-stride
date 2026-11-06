@@ -87,6 +87,11 @@ no release version has been assigned yet.
 
 ### Fixed
 
+- Side-panel chat no longer requires a live browser tab. New conversations
+  without an authorized page and conversations whose page was closed or
+  unbound can send messages. Existing selected-page snapshot ordering and
+  browser-tool target/authorization checks remain in place.
+
 - Browser guidance checks authorized tabs before opening a supplied document.
   Ordinary `browser_open_tab` calls reuse a matching authorized URL without
   reloading it; `newTab: true` requests a separate copy. URL matching retains

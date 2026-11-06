@@ -89,6 +89,7 @@ function mockChrome(options: {
   const actionClick = chromeEvent<[chrome.tabs.Tab]>()
   const onActivated = chromeEvent<[{ tabId: number; windowId: number }]>()
   const onUpdated = chromeEvent<[number, Parameters<Parameters<typeof chrome.tabs.onUpdated.addListener>[0]>[1], chrome.tabs.Tab]>()
+  const onRemoved = chromeEvent<[number]>()
   let pageState = options.authorizedPages === false ? undefined : authorizedExamplePages()[PAGE_ACCESS_KEY]
   const onCommitted = chromeEvent<[{ tabId: number; frameId: number }]>()
   const onAlarm = chromeEvent<[chrome.alarms.Alarm]>()
@@ -138,7 +139,7 @@ function mockChrome(options: {
       onActivated,
       onUpdated,
       onReplaced: chromeEvent<[number, number]>(),
-      onRemoved: chromeEvent<[number]>(),
+      onRemoved,
     },
     webNavigation: {
       getAllFrames: vi.fn(async () => [{
@@ -160,7 +161,7 @@ function mockChrome(options: {
       onRemoved: chromeEvent<[number]>(),
     },
   } as unknown as typeof chrome)
-  return { alarms, onConnect, onCommitted, actionClick, onActivated, onUpdated, tabs: chrome.tabs }
+  return { alarms, onConnect, onCommitted, actionClick, onActivated, onUpdated, onRemoved, tabs: chrome.tabs }
 }
 
 afterEach(() => {
@@ -170,6 +171,98 @@ afterEach(() => {
 })
 
 describe('background bridge lifecycle', () => {
+  it.each(['new', 'history', 'closed', 'detached'] as const)(
+    'forwards ordinary chat with a %s page binding without granting browser access', async binding => {
+      const sid = 'chat-without-page'
+      const h = mockChrome({
+        authorizedPages: binding !== 'new',
+        localGet: async () => ({
+          dshSettings: { bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge', unrestrictedBrowserAccess: true },
+          ...(binding === 'detached' ? { dshDetachedSessions: { sessionIds: [sid], detached: true } } : {}),
+        }),
+      })
+      vi.stubGlobal('WebSocket', FakeWebSocket)
+      await import('../src/background/index.ts')
+      const panel = panelPort(); h.onConnect.emit(panel.port)
+      await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+      const socket = FakeWebSocket.instances[0]!
+      socket.open(); await Promise.resolve()
+      socket.receive({ t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        caps: { textOnly: true, snapshotMaxChars: 32000, maxInteractiveItems: 60 } })
+      try {
+        await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'status', state: 'connected' })))
+        panel.onMessage.emit({ type: 'session.active', sessionId: sid, isNew: binding !== 'history' })
+        if (binding === 'closed') {
+          await vi.waitFor(() => expect(chrome.tabs.sendMessage).toHaveBeenCalledWith(1,
+            expect.objectContaining({ action: 'browser_snapshot' }), expect.any(Object)))
+          vi.mocked(chrome.tabs.get).mockImplementation(async tabId => {
+            if (tabId === 1) throw new Error('Tab closed')
+            return { id: tabId, windowId: 1, groupId: 50, url: 'https://example.com/' } as chrome.tabs.Tab
+          })
+          h.onRemoved.emit(1)
+        }
+        const payload = { sessionId: sid, mode: 'queue', content: [{ type: 'text', text: 'Hello' }] }
+        panel.onMessage.emit({ type: 'rpc', id: 'ordinary-chat', method: 'session.prompt', payload })
+        await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({
+          t: 'rpc', method: 'session.prompt', payload,
+        })))
+        const prompt = socket.sent.find(frame => (frame as { method?: string }).method === 'session.prompt') as { id: string }
+        socket.receive({ t: 'rpc.result', id: prompt.id, ok: true, result: { accepted: true } })
+        await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith({
+          type: 'rpc.result', id: 'ordinary-chat', ok: true, result: { accepted: true },
+        }))
+
+        vi.mocked(chrome.tabs.sendMessage).mockClear()
+        socket.receive({ t: 'tool.call', id: 'no-page-read', name: 'browser_snapshot', args: {}, sessionId: sid,
+          expiresAt: Date.now() + 10000 })
+        await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({
+          t: 'tool.result', id: 'no-page-read', ok: false,
+        })))
+        expect(chrome.tabs.sendMessage).not.toHaveBeenCalled()
+        expect(chrome.tabs.create).not.toHaveBeenCalled()
+        panel.onMessage.emit({ type: 'request-status' })
+        expect(panel.postMessage.mock.calls.filter(([m]) => m.type === 'tab-affinity').at(-1)![0].state.controlled).toBeNull()
+      } finally { panel.onDisconnect.emit(); socket.close() }
+    },
+  )
+
+  it('waits for the selected page snapshot before forwarding an ordinary chat prompt', async () => {
+    let finishSnapshot!: (answer: unknown) => void
+    const snapshot = new Promise<unknown>(resolve => { finishSnapshot = resolve })
+    const h = mockChrome({
+      localGet: async () => ({ dshSettings: { bridgeUrl: 'ws://127.0.0.1:39001/ext/bridge', unrestrictedBrowserAccess: true } }),
+      tabSendMessage: async (_tabId, message) => (message as { type?: string }).type === 'DSH_ACTION' ? snapshot : undefined,
+    })
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+    const panel = panelPort(); h.onConnect.emit(panel.port)
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const socket = FakeWebSocket.instances[0]!
+    socket.open(); await Promise.resolve()
+    socket.receive({ t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      caps: { textOnly: true, snapshotMaxChars: 32000, maxInteractiveItems: 60 } })
+    try {
+      await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'status', state: 'connected' })))
+      panel.onMessage.emit({ type: 'session.active', sessionId: 'chat-with-page', isNew: true })
+      await vi.waitFor(() => expect(chrome.tabs.sendMessage).toHaveBeenCalledWith(1,
+        expect.objectContaining({ action: 'browser_snapshot' }), expect.any(Object)))
+      panel.onMessage.emit({ type: 'rpc', id: 'chat-after-snapshot', method: 'session.prompt', payload: { sessionId: 'chat-with-page' } })
+      await new Promise(resolve => { setTimeout(resolve, 0) })
+      expect(socket.sent).not.toContainEqual(expect.objectContaining({ method: 'session.prompt' }))
+      finishSnapshot({ ok: true, result: { text: 'Synthetic selected page' } })
+      await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({ method: 'bridge.injectBrowserSnapshot' })))
+      expect(socket.sent).not.toContainEqual(expect.objectContaining({ method: 'session.prompt' }))
+      const injection = socket.sent.find(frame => (frame as { method?: string }).method === 'bridge.injectBrowserSnapshot') as { id: string }
+      socket.receive({ t: 'rpc.result', id: injection.id, ok: true, result: {} })
+      await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({ method: 'session.prompt' })))
+      const prompt = socket.sent.find(frame => (frame as { method?: string }).method === 'session.prompt') as { id: string }
+      socket.receive({ t: 'rpc.result', id: prompt.id, ok: true, result: {} })
+      await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith({
+        type: 'rpc.result', id: 'chat-after-snapshot', ok: true, result: {},
+      }))
+    } finally { finishSnapshot(undefined); panel.onDisconnect.emit(); socket.close() }
+  })
+
   it('cancels a staged zoom after menu dispatch without admitting its selection', async () => {
     const phases: string[] = []
     let finish!: (value: unknown) => void
