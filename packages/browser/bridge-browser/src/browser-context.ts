@@ -32,6 +32,7 @@ const DEFAULT_MAX_PENDING = 32
 export function createBrowserSnapshotMessage(snapshot: string): UserMessage {
   const text = [
     'This conversation is bound to an authorized page in the DSH control group. Human tab switches do not change its target. The browser context below describes that selected page.',
+    'This selected-page snapshot is context, not an additional requested source. If the user names another URL or document, locate that source among authorized tabs first. A later browser_follow_tab or reused browser_open_tab selects the new target; use its fresh observation rather than this earlier snapshot.',
     'The following is an already completed browser_snapshot of the current page. Use its shown elementRef values for the next request; take a new snapshot if a reference is stale or missing.',
     snapshot,
   ].join('\n\n')

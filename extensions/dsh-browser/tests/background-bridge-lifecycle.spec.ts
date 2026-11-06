@@ -400,7 +400,7 @@ describe('background bridge lifecycle', () => {
     try {
       panel.onMessage.emit({ type: 'tab-affinity.rebind', id: 'initial' })
       await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith({ type: 'tab-affinity.rebind.result', id: 'initial', ok: true }))
-      socket.receive({ t: 'tool.call', id: 'late-open', name: 'browser_open_tab', args: { url: 'https://example.com/' }, expiresAt: Date.now() + 10000 })
+      socket.receive({ t: 'tool.call', id: 'late-open', name: 'browser_open_tab', args: { url: 'https://example.com/', newTab: true }, expiresAt: Date.now() + 10000 })
       await vi.waitFor(() => expect(chrome.tabs.create).toHaveBeenCalled())
       const state = panel.postMessage.mock.calls.map(([m]) => m).filter(m => m.type === 'tab-affinity').at(-1).state
       panel.onMessage.emit({ type: 'tab-affinity.unbind', id: 'release', sessionId: null, revision: state.revision })

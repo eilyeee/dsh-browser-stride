@@ -93,6 +93,7 @@ import {
   type AffinityTab,
 } from './tab-affinity.ts'
 import { bindOpenedTabAffinity } from './open-tab-binding.ts'
+import { reuseAuthorizedTab } from './open-tab-reuse.ts'
 import { FocusedWindowTracker } from './focused-window.ts'
 import { SelectionTracker, type SelectionSource } from './selection.ts'
 import { parsePageSelection, parseSelectionCapture } from '../selection.ts'
@@ -1271,9 +1272,13 @@ function commitTabAffinityRebind(
 }
 
 async function selectModelTarget(tab: chrome.tabs.Tab, sessionId: string | undefined, isCurrentCall: () => boolean): Promise<void> {
-  const summary = summarizeTab(tab)
-  if (summary === null || !pageAccess.allows(tab)) throw new Error('The page needs a native toolbar authorization')
   await pageSessionContexts.ready
+  const live = tab.id === undefined ? undefined : await chrome.tabs.get(tab.id)
+  if (live === undefined || live.url !== tab.url || live.pendingUrl !== tab.pendingUrl || live.windowId !== tab.windowId || live.groupId !== tab.groupId) {
+    throw new Error('The selected page changed before it could be bound')
+  }
+  const summary = summarizeTab(live)
+  if (summary === null || !pageAccess.allows(live)) throw new Error('The page needs a native toolbar authorization')
   if (!isCurrentCall()) throw new Error('Browser connection changed before the selected tab could be bound')
   commitTabAffinityRebind(summary, sessionId, 'background')
 }
@@ -1309,6 +1314,7 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
   const automaticOpen = call.name === 'browser_open_tab' && automaticAccessActive
   const automaticAllowed = () => automaticAccessActive && automaticAccessRevision === automaticRevision
   let openedPageAccess: CreatedPageAccess | undefined
+  let reusedPageAccess: (() => boolean) | undefined
   let settle!: () => void
   const callRpc = rpc
   let executionFence: ToolExecutionFence | undefined
@@ -1331,10 +1337,10 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
   const admittedPages = pageAccess.snapshot()
   const pageLease = target !== undefined && !('ok' in target) ? pageAccess.lease(target.target.tabId) : () => true
   const isCurrentCall = (): boolean => activeToolCalls.get(call.id) === activeCall
-  const targetAllowed = (): boolean => (!automaticOpen || automaticAllowed()) && (call.name !== 'browser_list_tabs' || admittedPages.current()) && pageLease() && !tabAffinity.isDetached(call.sessionId) && isCurrentCall() && executionFence?.current() === true && (runTarget === undefined || runTarget.current()) && (activeCall.targetLease === undefined
+  const targetAllowed = (): boolean => (!automaticOpen || automaticAllowed()) && (reusedPageAccess?.() ?? true) && (!['browser_list_tabs', 'browser_open_tab'].includes(call.name) || admittedPages.current()) && pageLease() && !tabAffinity.isDetached(call.sessionId) && isCurrentCall() && executionFence?.current() === true && (runTarget === undefined || runTarget.current()) && (activeCall.targetLease === undefined
     || (activeCall.committed ? activeCall.targetLease.sameBinding() : activeCall.targetLease.current()))
   const commitAction = (): void => {
-    if (!targetAllowed() || (automaticOpen && openedPageAccess?.current() !== true)) throw new Error('Browser target lease expired before dispatch')
+    if (!targetAllowed() || (automaticOpen && !(reusedPageAccess?.() ?? openedPageAccess?.current() ?? false))) throw new Error('Browser target lease expired before dispatch')
     activeCall.committed = true
   }
   const rollbackActionCommit = (): void => {
@@ -1353,7 +1359,7 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
   // An operation that arrived without unrestricted access must not acquire a
   // newer grant merely because the user enabled it later.
   const sharePageContent = (): Settings['sharePageContent'] => unrestrictedAccess ? 'auto' : settings.sharePageContent
-  const managementDispatch = async (): Promise<ToolAnswer> => {
+  const managementDispatch = async (managementCall = call, allowsTab: (tab: chrome.tabs.Tab) => boolean = admittedPages.allows, activate = false): Promise<ToolAnswer> => {
     await affinityReady
     const affinity = tabAffinity.snapshot()
     let windowId = affinity.active?.windowId ?? affinity.controlled?.windowId
@@ -1366,7 +1372,7 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
       ? affinity.controlled?.tabId
       : tabAffinity.getSessionTab(call.sessionId)?.tabId
     return dispatchToolCall(
-      call,
+      managementCall,
       sharePageContent(),
       budget,
       (prompt) => authorize(prompt, windowId ?? 0),
@@ -1375,10 +1381,16 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
       undefined,
       {
         unrestrictedAccess,
-        allowsTab: admittedPages.allows,
+        allowsTab,
         emptyAuthorizedScope: admittedPages.empty,
         ...(controlledTabId === undefined ? {} : { controlledTabId }),
-        followTab: (tab) => selectModelTarget(tab, call.sessionId, () => targetAllowed() && admittedPages.allows(tab)),
+        followTab: async (tab) => {
+          await selectModelTarget(tab, call.sessionId, () => targetAllowed() && allowsTab(tab))
+          if (activate && tab.id !== undefined) {
+            if (!targetAllowed() || !allowsTab(tab)) throw new Error('The selected page changed before activation')
+            await chrome.tabs.update(tab.id, { active: true })
+          }
+        },
         commitAction,
         rollbackActionCommit,
       },
@@ -1393,10 +1405,19 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
     return authorizeToolCall(prompt, controller.signal, windowId, call.sessionId, unrestrictedAccess, notify)
   }
   const visualSharingRevision = pageSharingRevision
-  const dispatch = (): Promise<ToolAnswer> => (isTabManagementTool(call.name)
-    ? managementDispatch()
-    : call.name === 'browser_open_tab'
-    ? resolveOpenTabWindow(call.sessionId).then((target) => 'ok' in target
+  const openDispatch = async (): Promise<ToolAnswer> => {
+    await affinityReady
+    const controlledTabId = call.sessionId === undefined ? tabAffinity.snapshot().controlled?.tabId : tabAffinity.getSessionTab(call.sessionId)?.tabId
+    const reused = await reuseAuthorizedTab(call, {
+      empty: admittedPages.empty,
+      ...(controlledTabId === undefined ? {} : { controlledTabId }),
+      allows: admittedPages.allows,
+      capture: tabId => { reusedPageAccess = pageAccess.lease(tabId); return reusedPageAccess },
+      follow: (tabId, allows, active) => managementDispatch({ ...call, name: 'browser_follow_tab', args: { tabId } }, allows, active),
+    })
+    if (reused !== undefined) return reused
+    if (!targetAllowed()) return staleTarget()
+    return resolveOpenTabWindow(call.sessionId).then((target) => 'ok' in target
       ? target
       : dispatchOpenTab(
           call,
@@ -1419,6 +1440,11 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
           } : undefined,
           tabId => openedPageAccess ?? { current: () => false, release: async () => {}, canClose: () => pageAccess.unclaimed(tabId) },
         ))
+  }
+  const dispatch = (): Promise<ToolAnswer> => (isTabManagementTool(call.name)
+    ? managementDispatch()
+    : call.name === 'browser_open_tab'
+    ? openDispatch()
     : (target === undefined || 'ok' in target ? Promise.resolve(target ?? affinityFailure('missing'))
       : prepareToolTarget(target, call.sessionId, controller.signal)).then((prepared) => 'ok' in prepared
       ? prepared

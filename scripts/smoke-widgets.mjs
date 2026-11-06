@@ -49,6 +49,17 @@ try{
   chromiumArgs:['--no-proxy-server','--host-resolver-rules=MAP stride-widgets.test 127.0.0.1']})
  await browser.prepare(site.url)
  const sessionId=(await host.client.rpc('session.create',{cwd:root})).sessionId;await browser.bindSession(sessionId)
+ phase='authorized-tab-reuse'
+ const pagesBeforeReuse=browser.context.pages().length
+ await browser.target.evaluate(()=>{window.reuseMarker='preserved'})
+ let reused=await command(sessionId,'browser_open_tab',{url:site.url,active:false})
+ assert.equal(reused.ok,true);assert.match(reused.text,/Reused already authorized tab/)
+ assert.equal(browser.context.pages().length,pagesBeforeReuse)
+ assert.equal(await browser.target.evaluate(()=>window.reuseMarker),'preserved')
+ assert.equal((await command(sessionId,'browser_open_tab',{url:site.url,active:false,newTab:true})).ok,true)
+ await wait(async()=>browser.context.pages().some(page=>page!==browser.target&&page.url()===site.url),'explicit separate copy')
+ assert.equal(browser.context.pages().length,pagesBeforeReuse+1)
+ await browser.context.pages().findLast(page=>page!==browser.target&&page.url()===site.url).close()
  phase='custom-options'
  let view=await command(sessionId,'browser_snapshot');assert.equal(view.ok,true)
  assert.equal(view.text.includes(`option "${site.choice}"`),false)
@@ -80,13 +91,22 @@ try{
  await browser.panel.getByRole('checkbox',{name:'自动控制 DSH 新建页面',exact:false}).check()
  await browser.panel.getByRole('button',{name:'保存并连接',exact:true}).click()
  await browser.panel.locator('.connection .dot.connected').waitFor({state:'visible'})
+ const unauthorizedCopy=await browser.context.newPage();await unauthorizedCopy.goto(site.url)
+ const pagesBeforeOpen=browser.context.pages().length
  assert.equal((await command(sessionId,'browser_open_tab',{url:site.url})).ok,true)
+ assert.equal(browser.context.pages().length,pagesBeforeOpen+1,'An ungranted copy cannot be reused')
  const managed=browser.context.pages().findLast(page=>page!==browser.target&&page.url()===site.url)
+ assert.notEqual(managed,unauthorizedCopy)
  assert.ok(managed,'The auto-controlled tab must be independently observable')
  await other.bringToFront()
  assert.equal((await command(sessionId,'browser_navigate',{url:site.second})).ok,true)
  await wait(async()=>await managed.locator('#route').innerText()==='Route: /second','managed rendered hash route')
  assert.equal(other.url(),site.origin+'/personal')
+ const pagesBeforeManagedReuse=browser.context.pages().length
+ reused=await command(sessionId,'browser_open_tab',{url:site.second,active:false})
+ assert.equal(reused.ok,true);assert.match(reused.text,/Reused already authorized tab/)
+ assert.equal(browser.context.pages().length,pagesBeforeManagedReuse,'The current granted copy wins over other granted copies')
+ await unauthorizedCopy.close()
  let modelEvidence
  if(realModel){
   phase='default-model'
@@ -105,7 +125,8 @@ try{
  }
  const summary={passed:true,realHost:true,isolatedChrome:true,syntheticOnly:true,realModel,
   observedOptionClick:true,disabledOptionDenied:true,closedOptionDenied:true,legacyKeyHandlerVerified:true,
-  backgroundHashRendered:true,managedBackgroundHashRendered:true,otherTabUnchanged:true,navigationInvalidatesReferences:true,...modelEvidence?{modelEvidence}:{}}
+  backgroundHashRendered:true,managedBackgroundHashRendered:true,otherTabUnchanged:true,navigationInvalidatesReferences:true,
+  authorizedTabReused:true,existingDocumentPreserved:true,explicitCopyCreated:true,unauthorizedCopyNotReused:true,managedTabReused:true,...modelEvidence?{modelEvidence}:{}}
  await writeFile(join(artifacts,realModel?'real-model.json':'result.json'),JSON.stringify(summary,null,2)+'\n',{mode:0o600});console.log(JSON.stringify(summary))
 }catch(error){await mkdir(artifacts,{recursive:true});await writeFile(join(artifacts,realModel?'real-model.json':'result.json'),JSON.stringify({passed:false,phase,errorName:error.name})+'\n',{mode:0o600});console.error(JSON.stringify({phase}));throw error}
 finally{if(modelSessionId)await host?.client.rpc('session.cancel',{sessionId:modelSessionId}).catch(()=>{});await browser?.close().catch(()=>{});await host?.close().catch(()=>{});await site?.close().catch(()=>{});await rm(root,{recursive:true,force:true,maxRetries:3,retryDelay:100})}

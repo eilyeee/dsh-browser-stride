@@ -95,7 +95,11 @@ for (const reportKind of ['styles', 'layout', 'zoom', 'wiki', 'widgets']) test(`
   assert.equal(typeof guard({ agent: { id: 'synthetic-model' }, name: 'bash' }), 'string')
   if (reportKind !== 'layout') assert.equal(guard({ agent: { id: 'synthetic-model' }, name: 'browser_set_design_zoom' }) === undefined, ['zoom', 'wiki'].includes(reportKind))
   assert.equal(guard({ agent: { id: 'other' }, name: 'bash' }), undefined)
-  assert.equal(typeof guard({ agent: { id: 'synthetic-model' }, name: 'browser_list_tabs' }), 'string')
+  assert.equal(guard({ agent: { id: 'synthetic-model' }, name: 'browser_list_tabs' }) === undefined, reportKind === 'wiki')
+  if (reportKind === 'wiki') {
+    assert.equal(guard({ agent: { id: 'synthetic-model' }, name: 'browser_open_tab', arguments: { url: 'http://stride-layout.test/fixed' } }), undefined)
+    assert.equal(typeof guard({ agent: { id: 'synthetic-model' }, name: 'browser_open_tab', arguments: { url: 'https://example.com/' } }), 'string')
+  }
   if (['layout','widgets'].includes(reportKind)) {
     assert.equal(guard({ agent: { id: 'synthetic-model' }, name: 'browser_navigate', arguments: { url: 'http://stride-layout.test/fixed' } }), undefined)
     assert.equal(typeof guard({ agent: { id: 'synthetic-model' }, name: 'browser_navigate', arguments: { url: 'https://example.com/' } }), 'string')

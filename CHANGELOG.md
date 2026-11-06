@@ -87,6 +87,16 @@ no release version has been assigned yet.
 
 ### Fixed
 
+- Browser guidance checks authorized tabs before opening a supplied document.
+  Ordinary `browser_open_tab` calls reuse a matching authorized URL without
+  reloading it; `newTab: true` requests a separate copy. URL matching retains
+  document IDs, query values and SPA fragments. Multiple matches require a
+  choice unless the session already targets one. Unauthorized pages, revoked
+  grants and managed-run restrictions retain their existing boundaries.
+  Selected-page context does not make unrelated controlled tabs additional
+  task sources.
+  Benchmark suite 19 records these tool and guidance semantics.
+
 - Equivalent HEX/RGB colors and percentage/scalar opacity values share one
   inspector field while retaining both sources. Decimal alpha conversion avoids
   division artifacts, and distinct values still conflict. Reads whose recognized

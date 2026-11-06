@@ -56,7 +56,7 @@ export const name = 'stride-visual-probe'
 export const inject = ['tools', 'agents', 'attachments']
 export const MODEL_BROWSER_TOOLS = ['browser_screenshot','browser_snapshot','browser_click_at','browser_get_text','browser_read_design_styles','browser_wait','browser_scroll']
 export const ZOOM_MODEL_TOOLS = [...MODEL_BROWSER_TOOLS, 'browser_set_design_zoom', 'browser_select']
-export const WIKI_MODEL_TOOLS = [...ZOOM_MODEL_TOOLS, 'browser_measure_layout', 'browser_click', 'browser_press']
+export const WIKI_MODEL_TOOLS = [...ZOOM_MODEL_TOOLS, 'browser_measure_layout', 'browser_click', 'browser_press', 'browser_list_tabs', 'browser_follow_tab', 'browser_open_tab']
 const LAYOUT_MODEL_TOOLS = ['browser_snapshot', 'browser_measure_layout', 'browser_navigate', 'browser_wait']
 export const WIDGET_MODEL_TOOLS = ['browser_snapshot','browser_click','browser_type','browser_press','browser_navigate','browser_wait','browser_get_text']
 const modelTools = model => model.reportKind === 'widgets' ? WIDGET_MODEL_TOOLS : model.reportKind === 'wiki' ? [...WIKI_MODEL_TOOLS, ...(model.projectFile ? PROJECT_FILE_TOOLS : [])] : model.reportKind === 'layout' ? LAYOUT_MODEL_TOOLS
@@ -83,6 +83,9 @@ export function apply(ctx, config) {
     if (['layout', 'widgets'].includes(model.reportKind) && exec.name === 'browser_navigate' && !model.allowedUrls.includes(exec.arguments?.url)) {
       evidence.blocked.push(exec.name); void save(); return 'Navigation is limited to this check’s controlled fixture URLs.'
     }
+    if (model.reportKind === 'wiki' && exec.name === 'browser_open_tab' && !model.allowedUrls?.includes(exec.arguments?.url)) {
+      evidence.blocked.push(exec.name); void save(); return 'Opening is limited to this check’s synthetic document URL.'
+    }
   }))
   ctx.on('agent/request', async (payload, next) => {
     if (belongs(payload.agent)) { if (++evidence.modelRequests > (model.reportKind === 'widgets' ? 20 : model.autoZoom === true || model.reportKind === 'wiki' ? 14 : 10)) throw new Error('synthetic-visual-model-budget'); await save() }
@@ -108,6 +111,8 @@ export function apply(ctx, config) {
       evidence.projectFileErrors.push({ name: exec.name, code: result.error?.info?.code, message: result.error?.message?.slice(0, 500) })
     }
     evidence.results.push({ name: exec.name, ok: !result.isError, imageBlocks: result.content?.filter(block => block.type === 'image').length ?? 0,
+      // Optional private diagnostics for disposable synthetic fixtures, never real-site acceptance.
+      ...(model.traceSynthetic === true ? { fixtureText: text.slice(0, 12000), tabId: exec.arguments?.tabId, requestedUrl: exec.arguments?.url } : {}),
       ...(['layout', 'wiki', 'widgets'].includes(model.reportKind) ? {} : { selectedLayerReported: text.includes(model.layer), exactColorReported: text.toLowerCase().includes(model.color.toLowerCase()) }) })
     void save()
   })

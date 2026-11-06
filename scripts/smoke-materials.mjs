@@ -14,7 +14,7 @@ import { startExtensionBrowser } from '../benchmark/lib/extension-browser.mjs'
 import { startVisualSite } from './fixtures/visual-site.mjs'
 
 if (process.env.STRIDE_REAL_MODEL !== '1') throw new Error('Material-role acceptance requires STRIDE_REAL_MODEL=1')
-const caseIds = ['requirements', 'embedded-design', 'page-target', 'conflicting-materials', 'resolved-materials', 'read-only-project']
+const caseIds = ['requirements', 'embedded-design', 'page-target', 'conflicting-materials', 'resolved-materials', 'read-only-project', 'reuse-wiki']
 const selected = process.env.STRIDE_MATERIAL_CASE ?? 'all'
 if (selected !== 'all' && !caseIds.includes(selected)) throw new Error('Unknown STRIDE_MATERIAL_CASE')
 const repoRoot = resolve(import.meta.dirname, '..'), require = createRequire(join(repoRoot, 'package.json'))
@@ -30,6 +30,11 @@ function caseInput(site, caseId, project) {
   const role = 'sourceRole（requirements=业务依据，mixed=同时包含业务和视觉依据，implementation=当前网页本身是实现目标）和 documentKey（文档编号）'
   const business = 'customerTypes（按文档顺序的客户类型数组）、companyTaxIdRequired（企业是否必填纳税识别号）、endpoint（接口路径）、successFields（成功展示字段，先编号后消息）、readOnlyCanSubmit（只读模式可否提交）'
   const visual = 'visualRequirements（产品视觉要求数组；未说明则为空；每项只包含 source（embedded_design、document_text 或 page_style）、referenceKey（设计参考编号）、width、height、fill（小写十六进制）、radius、fontSize，尺寸为数字 px）'
+  if (caseId === 'reuse-wiki') {
+    return { url: site.wikiUrl,
+      expected: { sourceRole: 'requirements', documentKey: site.wikiExpected.documentKey, customerTypes: site.wikiExpected.customerTypes, endpoint: site.wikiExpected.endpoint },
+      prompt: `请只读理解我已经打开并授权的 Wiki 需求说明：${site.wikiUrl}，给出文档编号、客户类型和提交接口。最终仅返回 JSON，恰好包含 sourceRole（材料用途，只能为 requirements、mixed、implementation 之一）、documentKey（文档编号）、customerTypes（按文档顺序的数组）、endpoint（接口路径，不含 HTTP 方法）四个字段，不附加解释或额外字段。本轮不修改页面或项目。` }
+  }
   if (caseId === 'read-only-project') return { url: site.wikiUrl,
     expected: { sourceRole: 'requirements', documentKey: site.wikiExpected.documentKey, projectKey: project.key, existingComponent: project.component,
       endpoint: site.wikiExpected.endpoint, changesMade: false },
@@ -46,7 +51,7 @@ function caseInput(site, caseId, project) {
     prompt: (caseId === 'embedded-design'
       ? '请理解这篇客户信息文档，整理业务规则和其中客户卡片的设计要求，为后续项目开发提供依据。'
       : '请理解这篇客户信息需求说明，为后续项目联调整理业务依据。')
-      + `本轮只读，不修改页面或项目。最终只返回 JSON：${role}、${business}、${visual}。基于实际读取的材料回答，缺少依据时说明，不猜测数值。` }
+      + `本轮只读，不修改页面或项目。最终只返回 JSON：${role}、${business}、${visual}。只包含上述字段，不附加解释或额外字段；未说明的视觉要求用空数组，不猜测数值。` }
 }
 async function runCase(caseId) {
   const root = await mkdtemp(join(tmpdir(), 'stride-materials-')), home = join(root, 'home')
@@ -80,6 +85,7 @@ async function runCase(caseId) {
     browser = await startExtensionBrowser({ repoRoot, benchmarkRoot: join(repoRoot, 'benchmark'), bridgeUrl: `ws://127.0.0.1:${port}/ext/bridge`, pairingCode: await host.issuePairingCode(), trustedOrigin: site.origin,
       chromiumArgs: ['--no-proxy-server', '--host-resolver-rules=MAP stride-visual.test 127.0.0.1'] })
     await browser.prepare(input.url)
+    const wikiTabId = await browser.worker.evaluate(async url => (await chrome.tabs.query({})).find(tab => tab.url === url)?.id, input.url)
     const before = await browser.target.locator('#wiki-article').evaluate(element => element.outerHTML)
     let workspaceId
     if (project) {
@@ -89,7 +95,16 @@ async function runCase(caseId) {
     }
     sessionId = (await host.client.rpc('session.create', workspaceId ? { workspaceId } : { cwd: root })).sessionId
     await browser.bindSession(sessionId)
-    await writeFile(trigger, JSON.stringify({ sequence: 1, mode: 'model', reportKind: 'wiki', sessionId, expected: input.expected, ...(project ? { projectFile: project.file } : {}) }), { mode: 0o600 })
+    const reuseMarker = randomBytes(8).toString('hex')
+    await browser.target.evaluate(marker => { window.reuseMarker = marker }, reuseMarker)
+    if (caseId === 'reuse-wiki') {
+      const decoy = await browser.context.newPage()
+      await decoy.goto(site.url)
+      assert.notEqual(decoy.url(), input.url)
+      await browser.bindSession(sessionId, decoy)
+    }
+    const originalPageCount = browser.context.pages().length
+    await writeFile(trigger, JSON.stringify({ sequence: 1, mode: 'model', reportKind: 'wiki', sessionId, allowedUrls: [input.url], traceSynthetic: caseId === 'reuse-wiki', expected: input.expected, ...(project ? { projectFile: project.file } : {}) }), { mode: 0o600 })
     await wait(async () => (await json(result))?.modelReady === true, 'model guard')
     phase = 'model'
     await host.client.rpc('session.prompt', { sessionId, mode: 'queue', content: [{ type: 'text', text: input.prompt }], clientTimeZone: 'Asia/Shanghai' })
@@ -98,9 +113,18 @@ async function runCase(caseId) {
     assert.equal(modelEvidence.reason, 'completed'); assert.deepEqual(modelEvidence.blocked, [])
     assert.equal(modelEvidence.finalWikiReportCorrect, true, 'Role, facts, source and exact report schema must match this task')
     assert.ok(modelEvidence.results.some(row => ['browser_snapshot', 'browser_get_text'].includes(row.name) && row.ok))
+    if (caseId === 'reuse-wiki') {
+      assert.ok(modelEvidence.results.some(row => row.name === 'browser_list_tabs' && row.ok))
+      assert.ok(modelEvidence.results.some(row => row.name === 'browser_follow_tab' && row.ok))
+      assert.equal(modelEvidence.browserCalls.includes('browser_open_tab'), false, 'Read the existing authorized Wiki instead of opening a duplicate')
+      assert.ok(modelEvidence.results.filter(row => row.name === 'browser_follow_tab').every(row => row.tabId === wikiTabId), 'Do not inspect unrelated controlled tabs')
+      assert.equal(modelEvidence.results.some(row => /synthetic-.*-budget/.test(row.fixtureText ?? '')), false, 'Complete the read within the test budget')
+      assert.equal(browser.context.pages().length, originalPageCount)
+      assert.equal(await browser.target.evaluate(() => window.reuseMarker), reuseMarker, 'Existing document must not reload')
+    }
     // All cases expose the same tools. Restrictions below evaluate observed
     // behaviour for this task, not a product rule attached to a Wiki URL.
-    if (caseId === 'requirements') for (const name of ['browser_read_design_styles', 'browser_measure_layout', 'browser_set_design_zoom', 'browser_click_at']) {
+    if (['requirements', 'reuse-wiki'].includes(caseId)) for (const name of ['browser_read_design_styles', 'browser_measure_layout', 'browser_set_design_zoom', 'browser_click_at']) {
       assert.equal(modelEvidence.browserCalls.includes(name), false, `Pure prose requirements must not trigger ${name}`)
     }
     if (['embedded-design', 'conflicting-materials', 'resolved-materials'].includes(caseId)) assert.ok(modelEvidence.results.some(row => row.name === 'browser_screenshot' && row.ok && row.imageBlocks === 1), 'Image-only reference facts require a real screenshot')
@@ -119,11 +143,14 @@ async function runCase(caseId) {
     assert.equal(await browser.target.evaluate(() => window.syntheticWrites), 0)
     assert.equal(await browser.target.locator('#wiki-article').evaluate(element => element.outerHTML), before)
     assert.ok(await host.client.rpc('session.history', { sessionId }))
+    if (caseId === 'reuse-wiki') await writeFile(join(artifacts, 'reuse-wiki-trace.json'), JSON.stringify(modelEvidence, null, 2), { mode: 0o600 })
+    const conciseEvidence = { ...modelEvidence, results: modelEvidence.results.map(({ fixtureText, ...row }) => row) }
     const summary = { passed: true, caseId, sourceRole: input.expected.sourceRole, syntheticOnly: true, realHost: true, isolatedChrome: true,
       nodeVersion: process.version, defaultModel: true, sameToolsAvailable: true, factsAndSchemaExact: true, pageContentUnchanged: true,
       imageReferenceVerified: ['embedded-design', 'conflicting-materials', 'resolved-materials'].includes(caseId), targetLayoutIndependentlyVerified: caseId === 'page-target',
       conflictHandlingVerified: ['conflicting-materials', 'resolved-materials'].includes(caseId), readOnlyProjectBoundaryObserved: !!project,
-      historyReadable: true, projectEditingValidated: false, modelEvidence }
+      existingWikiReused: caseId === 'reuse-wiki',
+      historyReadable: true, projectEditingValidated: false, modelEvidence: conciseEvidence }
     await writeFile(join(artifacts, resultName), JSON.stringify(summary, null, 2), { mode: 0o600 })
     console.log(JSON.stringify(summary)); return { caseId, passed: true }
   } catch (error) {

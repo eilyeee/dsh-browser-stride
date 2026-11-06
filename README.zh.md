@@ -38,9 +38,11 @@ Chrome 可以在扩展设置中开启「自动控制 DSH 新建页面」并保�
 
 也可在另一个终端的仓库根目录运行 `pnpm run pair:browser`，将一次性配对码填入扩展设置。配对码五分钟后过期，使用后换成安装级凭据。地址可以自动发现；非默认端口可在扩展中填写 `ws://127.0.0.1:PORT/ext/bridge`，手动配对命令加上 `-- issue --url http://127.0.0.1:PORT`。使用 `pnpm run pair:browser -- list` 查看安装实例，使用 `pnpm run pair:browser -- revoke INSTALLATION_ID` 撤销并断开指定实例，同时取消它尚未领取的配对请求；非默认端口也需加上 `--url`。
 
+对话中提供网页链接时，Stride 默认优先复用网址匹配的已授权页面，保留原页状态。需要单独的副本时，请明确说明“新开一个独立标签页”。同一网站的不同文档不会仅凭域名被合并，详见[选页说明](extensions/dsh-browser/README.zh.md#自动控制-chrome-新页面)。
+
 ### 更新
 
-当前使用源码安装：在原检出目录拉取更新，用项目要求的 Node/pnpm 安装锁定依赖并运行 `pnpm build`，重启 Host，在 `chrome://extensions/` 点击扩展的「重新加载」，再刷新需要操作的网页。保留原扩展安装、相同浏览器配置和 Host 数据即可沿用配对；更换扩展安装身份或清除数据后需要重新配对。Firefox 临时扩展需重新载入。Bridge 和扩展应来自同一检出，不兼容时会提示更新哪一端。
+当前使用源码安装：在原检出目录拉取更新，用项目要求的 Node/pnpm 安装锁定依赖并运行 `pnpm build`，重启 Host，在 `chrome://extensions/` 点击扩展的「重新加载」。重载会清除页面授权，请回到需要控制的原标签页，再点击一次 DSH Stride 工具栏图标；刷新网页不能代替这一步，无需另开页面。保留原扩展安装、相同浏览器配置和 Host 数据即可沿用配对；更换扩展安装身份或清除数据后需要重新配对。Firefox 临时扩展需重新载入。Bridge 和扩展应来自同一检出，不兼容时会提示更新哪一端。
 
 本次包名迁移需在拉取并构建后再运行一次安装脚本（`./scripts/install.sh`，Windows 使用 `.\scripts\install.ps1`）。脚本会先注册 `@eilyeee/dsh-browser-stride`，再移除过渡名称 `@eilyeee/dsh-stride-browser-bridge` 以及旧的 `@yuxianglin/dsh-bridge-browser` 与 `@deepseek-ai/dsh-bridge-browser` 注册。保留原 DSH home 和扩展安装即可沿用配对及任务记录。
 

@@ -85,13 +85,15 @@ Chrome 可能显示调试提示。视觉连接保留在已授权的分组页上�
 
 自动放大验收：`STRIDE_REAL_MODEL=1 STRIDE_AUTO_ZOOM=1` 验证原生下拉框；再加 `STRIDE_LANHU_ZOOM_MENU=1` 使用本地合成的蓝湖菜单，独立映射测试域名，不登录真实蓝湖。此模式先暂停菜单准备结果并停止页面控制，确认不会派发选项操作，再重新授权进入模型验收。模型必须实际调整比例、报告与独立检查一致的值、重新截图并准确读取两层属性；另加 `STRIDE_AUTO_ZOOM_FALLBACK=1` 可验证没有可用控件时请求人工处理；单独加 `STRIDE_AUTO_ZOOM_RECOVERY=1` 可验证专用缩放预检失败后，重新观察并用已识别的原生控件完成缩放、截图和分层读取。上限为十四次模型请求、二十次浏览器调用；私有结果文件为 `auto-zoom.json`、`auto-zoom-fallback.json`、`auto-zoom-recovery.json`、`lanhu-zoom.json`、`lanhu-zoom-fallback.json`。两端仍使用可选 wire-v4 `designViewZoom`，中间步骤只在扩展内部传递。更新后重建、重启 Host 并重载扩展。2026-11-04 已另外在常用 Chrome 的 DSH 新建受控验收页中，用现有默认模型将真实蓝湖工具条从 27% 调至 150%，并通过工具文字和独立页面读取核对比例，原页面保持不变。本次真实检查只确认比例操作和读回；合成页面的截图与图层读取检查不能代替真实稿件的画布渲染或整页还原度核验。
 
-运行 `STRIDE_REAL_MODEL=1 pnpm run test:smoke-materials`，默认分别用全新的临时 Host 和独立 Chrome 验证六种任务：纯需求正文、正文内嵌设计图、Wiki 页面本身作为实现目标、材料冲突、用户明确指定优先来源，以及提供临时项目的只读任务。各项开放相同的浏览器工具；模型须结合任务判断用途。纯需求核对业务事实；混合材料须从实际截图读出仅存在于设计图中的编号和视觉标注；页面目标须调用布局工具，并与独立 DOM 量测一致。冲突须保留两个来源的值；用户没有指定优先级时请求确认，指定后按其要求处理。只读项目用例额外开放限定文件的 read/write/edit 工具，要求成功读取项目，并核对没有尝试修改、文件字节保持不变。仅纯需求样本检查未调用设计工具，不把它作为所有 Wiki 的禁令。回答按各任务的完整 JSON 结构核对，拒绝额外或缺失字段，允许对象字段顺序不同。可用 `STRIDE_MATERIAL_CASE=requirements|embedded-design|page-target|conflicting-materials|resolved-materials|read-only-project` 单独复核一项。私有结果位于 `.stride-private/validation/materials/`；单项文件与全量汇总 `result.json` 分别记录实际运行范围。临时项目的只读检查不代表已经完成用户项目的代码修改或真实联调。
+运行 `STRIDE_REAL_MODEL=1 pnpm run test:smoke-materials`，默认分别用全新的临时 Host 和独立 Chrome 验证七种任务：纯需求正文、正文内嵌设计图、Wiki 页面本身作为实现目标、材料冲突、用户明确指定优先来源，提供临时项目的只读任务，以及当前选中另一页时复用已有受控 Wiki。各项开放相同的浏览器工具；模型须结合任务判断用途。纯需求核对业务事实；混合材料须从实际截图读出仅存在于设计图中的编号和视觉标注；页面目标须调用布局工具，并与独立 DOM 量测一致。冲突须保留两个来源的值；用户没有指定优先级时请求确认，指定后按其要求处理。只读项目用例额外开放限定文件的 read/write/edit 工具，要求成功读取项目，并核对没有尝试修改、文件字节保持不变。仅纯需求样本检查未调用设计工具，不把它作为所有 Wiki 的禁令。回答按各任务的完整 JSON 结构核对，拒绝额外或缺失字段，允许对象字段顺序不同。可用 `STRIDE_MATERIAL_CASE=requirements|embedded-design|page-target|conflicting-materials|resolved-materials|read-only-project|reuse-wiki` 单独复核一项。私有结果位于 `.stride-private/validation/materials/`；单项文件与全量汇总 `result.json` 分别记录实际运行范围。临时项目的只读检查不代表已经完成用户项目的代码修改或真实联调。
 
 Host 新增的 `browser_read_design_styles` 可把当前可读的属性标签整理成固定字段，并保留原文依据、缺项和冲突。它复用现有页面读取权限；不支持的面板布局仍用快照读取，背景与文字分别处理。已通过默认模型加合成页面的分层读取检查，并在放大视图后验证了常用 Chrome 的所测蓝湖面板；其他布局需另验。更新后重启 Host 并重载扩展，文本读取才能保留属性换行。参数、支持格式与限制见 [Bridge 样式字段说明](../../packages/browser/bridge-browser/README.zh.md#读取设计稿样式字段)。
 
 对于生成的 DOM 页面，`browser_measure_layout` 能直接读取元素间的实际距离和计算后的 CSS 间距，不改动页面。选择器缺失或不唯一会报错，无法形成明确对齐间距时保留 `null`。它沿用页面授权和读取分享审批，需要两端更新；不测量画布图层，也不证明整体还原度。详见[布局测量](../../packages/browser/bridge-browser/README.zh.md#测量页面实际布局)。
 
 ## 自动控制 Chrome 新页面
+
+读取已经打开的 Wiki 等文档时，模型的选页指引改为先查看已授权页面并选择对应文档。两端更新后，`browser_open_tab` 也会默认复用网址匹配的已授权页面，不重新加载；`active: false` 保持后台打开状态。匹配时会规范查询参数顺序，但保留文档编号、参数值和网址片段的区别。同一网址有多个已授权页面时，优先复用本会话正在控制的那一个，否则需要明确选择。用户要求单独副本或任务确实需要独立测试页时，才使用 `newTab: true`。复用不会授权未受控的现有页面；复用失败也不会自动改为新开。托管任务仍不能通过这些工具切换目标。
 
 在设置中开启「自动控制 DSH 新建页面」并保存，默认关闭。之后普通 DSH 对话通过 `browser_open_tab` 创建页面时，扩展会对本次实际创建的标签页授权、加入控制分组并绑定原会话，无需再点击工具栏图标。后台打开时保持原页面在前台。此设置允许新建页面，读取内容和后续操作仍遵循页面分享与确认设置。原有标签页和手动拖入分组的页面不会获得权限。
 

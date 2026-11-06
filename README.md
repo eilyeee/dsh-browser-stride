@@ -38,9 +38,14 @@ To disconnect, choose **Unpair DSH** in extension settings. This removes the loc
 
 Manual pairing remains available: run `pnpm run pair:browser` in another terminal and enter the one-time code in extension settings. It expires after five minutes and is exchanged for an installation credential. The address is discovered automatically. For a nondefault port set `ws://127.0.0.1:PORT/ext/bridge` in the extension and add `-- issue --url http://127.0.0.1:PORT` to the manual command. Run `pnpm run pair:browser -- list` to see installations or `pnpm run pair:browser -- revoke INSTALLATION_ID` to revoke and disconnect one, including its outstanding pairing requests. Add the same `--url` when needed.
 
+When a conversation supplies a page URL, Stride prefers an already authorized
+matching page and preserves its state. Ask explicitly for a separate tab when
+you need an independent copy. Different documents are not merged merely because
+they share a website; see [page selection](extensions/dsh-browser/README.md#automatically-controlling-new-chrome-pages).
+
 ### Updating
 
-For the current source installation, pull into the original checkout, install locked dependencies using the required Node/pnpm versions, and run `pnpm build`. Restart the Host, click **Reload** at `chrome://extensions/`, and refresh target pages. Keeping the original extension installation, browser profile and Host data preserves pairing. Changing the extension installation identity or clearing data requires pairing again. Reload Firefox's temporary add-on as well. Build the Bridge and extension from the same checkout; incompatible peers identify which component needs updating.
+For the current source installation, pull into the original checkout, install locked dependencies using the required Node/pnpm versions, and run `pnpm build`. Restart the Host and click **Reload** at `chrome://extensions/`. Reloading clears page authorization: return to the existing target tab and click the DSH Stride toolbar icon again. Refreshing the page does not restore its grant, and no duplicate tab is needed. Keeping the original extension installation, browser profile and Host data preserves pairing. Changing the extension installation identity or clearing data requires pairing again. Reload Firefox's temporary add-on as well. Build the Bridge and extension from the same checkout; incompatible peers identify which component needs updating.
 
 For the package-name migration, run the installer once after pulling and building (`./scripts/install.sh`, or `.\scripts\install.ps1` on Windows). It registers `@eilyeee/dsh-browser-stride`, then removes the transitional `@eilyeee/dsh-stride-browser-bridge` and legacy `@yuxianglin/dsh-bridge-browser` and `@deepseek-ai/dsh-bridge-browser` registrations. Keep the existing DSH home and extension installation to preserve pairing and task records.
 

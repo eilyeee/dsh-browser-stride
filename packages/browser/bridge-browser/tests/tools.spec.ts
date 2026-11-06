@@ -237,6 +237,8 @@ describe('registerBrowserTools', () => {
 
     await run('browser_list_tabs', {})
     expect(requestTool).toHaveBeenLastCalledWith('browser_list_tabs', {}, exec.signal, 1_000)
+    await run('browser_open_tab', { url: 'https://example.com/copy', newTab: true, active: false })
+    expect(requestTool).toHaveBeenLastCalledWith('browser_open_tab', { url: 'https://example.com/copy', newTab: true, active: false }, exec.signal, 1_000)
     await run('browser_follow_tab', { tabId: 17 })
     expect(requestTool).toHaveBeenLastCalledWith('browser_follow_tab', { tabId: 17 }, exec.signal, 1_000)
     await run('browser_close_tab', { tabId: 18 })
