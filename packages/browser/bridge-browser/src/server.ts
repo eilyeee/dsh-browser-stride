@@ -55,6 +55,8 @@ import { verifyToken } from './token.ts'
 import type { PairingStore } from './pairing.ts'
 import type { BrowserRunStore, BrowserRunExecution } from './run-store.ts'
 import { browserRunPanelRpc, browserRunPanelFailure, type RunPanelStore } from './run-panel.ts'
+import { TaskBriefError, taskBriefInputSchema, type TaskBriefStore } from './task-brief.ts'
+import { TASK_BRIEF_GET, TASK_BRIEF_SAVE, TASK_BRIEF_REVIEW } from './task-brief-contract.ts'
 
 /**
  * Host management methods that must not be granted by browser pairing alone.
@@ -108,6 +110,7 @@ export interface BridgeServerDeps {
   pairing?: PairingStore
   /** Explicit Host-side opt-in for settings, credentials and local paths. */
   allowHostManagement?: boolean
+  briefs?: TaskBriefStore
   /** Active dsh Host adapter used for unary calls, events, and waterfalls. */
   api: BrowserHostApi
   /** Default per-tool-call timeout in ms. */
@@ -514,6 +517,8 @@ export class BridgeServer {
           snapshotMaxChars: Math.min(this.deps.caps.snapshotMaxChars, frame.caps.snapshotMaxChars),
           maxInteractiveItems: Math.min(this.deps.caps.maxInteractiveItems, frame.caps.maxInteractiveItems),
           ...(frame.caps.taskTargetLoss === true && this.deps.runs?.pauseLostTargetTask !== undefined ? { taskTargetLoss: true } : {}),
+          ...(frame.caps.taskNotes === true && this.deps.briefs !== undefined ? { taskNotes: true } : {}),
+          ...(this.deps.caps.release === undefined ? {} : { release: this.deps.caps.release }),
         }
         authenticating = true
         // Origin headers are not credentials: a local process can forge them.
@@ -632,6 +637,30 @@ export class BridgeServer {
     // An ordered call may have waited while another connection replaced its
     // owner. It must never borrow the new connection's identity or signal.
     if (this.current !== conn || conn.abort.signal.aborted) return
+    if (frame.method.startsWith('bridge.taskBrief.')) {
+      try {
+        if (this.deps.briefs === undefined) throw new TaskBriefError('not-found')
+        const base = { sessionId: z.string().min(1).max(200) }
+        const version = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
+        let value
+        if (frame.method === TASK_BRIEF_GET) {
+          const payload = z.strictObject(base).parse(frame.payload)
+          value = this.deps.briefs.get(payload.sessionId)
+        } else if (frame.method === TASK_BRIEF_SAVE) {
+          const payload = z.strictObject({ ...base, version, input: taskBriefInputSchema }).parse(frame.payload)
+          value = await this.deps.briefs.save(payload.sessionId, payload.version, payload.input, 'user', conn.abort.signal)
+        } else if (frame.method === TASK_BRIEF_REVIEW) {
+          const payload = z.strictObject({ ...base, version, criterionId: z.string().min(1).max(200), confirmed: z.boolean() }).parse(frame.payload)
+          value = await this.deps.briefs.review(payload.sessionId, payload.version, payload.criterionId, payload.confirmed, conn.abort.signal)
+        } else throw new TaskBriefError('bad-request')
+        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true,
+          result: { type: 'server-response', rpcId: frame.id, result: { ok: true, value } } })
+      } catch (error) {
+        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false,
+          error: { code: error instanceof TaskBriefError ? error.code : 'bad-request', message: 'Task notes could not be read or saved. Refresh before retrying.' } })
+      }
+      return
+    }
     if (frame.method === BRIDGE_TASK_TARGET_LOST_METHOD) {
       try {
         const id = z.string().min(1).max(200).refine(value => value.trim() === value)

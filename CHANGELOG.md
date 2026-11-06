@@ -3,11 +3,34 @@
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The project intends to
 use [Semantic Versioning](https://semver.org/) once a public release exists;
-no release version has been assigned yet.
+package versions currently identify development builds, not supported releases.
 
 ## [Unreleased]
 
 ### Added
+
+- Development build 0.1.5 adds session task notes for a project path, up to eight
+  relevant material links and sixteen acceptance criteria. Notes persist in a
+  profile-specific Host storage domain, are projected into subsequent Agent
+  steps and can be edited in the side panel. A model helper records inferred
+  notes and criterion reports; user-edited notes reject model replacement.
+  Version checks reject stale updates. Paths and saved links grant no access.
+- Criterion reports distinguish implementation, model-observed evidence,
+  uncertainty and next steps. Native panel review records a user's confirmation;
+  changed reports or requirements invalidate affected confirmations. Markdown
+  export retains this provenance. Reports do not change managed-run verdicts.
+- Connected settings show installed Host, extension, DSH and wire versions.
+  Optional metadata remains compatible with older wire-v4 peers; differing
+  package versions prompt a coordinated update without claiming protocol failure.
+  `release:prepare` creates a standalone Host tarball, Chrome ZIP, checksums and
+  local installation instructions from public sources and selected build files.
+  This prepares local development artifacts; it does not publish a supported
+  release, browser-store update or GitHub-root plugin package.
+- `test:smoke-session` checks chat without a page, tab closure, history selection,
+  worker replacement and temporary Host restart using isolated Chrome. Its opt-in
+  default-model path also checks task-note readback, reported evidence and native
+  user review on a synthetic page. These are separate from regular-browser acceptance.
+  Benchmark suite 20 records the new helper and continuation guidance.
 
 - Custom dropdown snapshots expose ARIA options and the observed Element UI
   popup/list-item shape, with selected/disabled state and visible-popup
@@ -86,6 +109,11 @@ no release version has been assigned yet.
   pairs. Sensitive copied values remain redacted across whitespace changes.
 
 ### Fixed
+
+- Explicit session project directories are no longer replaced with the default
+  browser-session workspace. Starting a project conversation from saved notes
+  creates a new Session with that directory; saving notes alone leaves the
+  existing Session's workspace unchanged.
 
 - Side-panel chat no longer requires a live browser tab. New conversations
   without an authorized page and conversations whose page was closed or

@@ -16,6 +16,9 @@ import type { BridgeState } from '../background/bridge.ts'
 import type { AffinityTab, TabAffinityState } from '../background/tab-affinity.ts'
 import { connectPanel, PanelRpcError, type PanelApi, type PanelSettings, type PageAccessStatus } from './api.ts'
 import { renderMarkdown } from './markdown.ts'
+import { TaskBriefPanel } from './TaskBriefPanel.tsx'
+import { VersionStatus } from './VersionStatus.tsx'
+import { TASK_BRIEF_SAVE, type TaskBrief } from '@eilyeee/dsh-browser-stride/src/task-brief-contract.ts'
 import whaleUrl from '../../assets/icons/deepseek-256.png'
 import type { ApprovalDecision, ApprovalRequest } from '../security/approval.ts'
 import { getUiLocale } from '../i18n.ts'
@@ -1156,11 +1159,13 @@ export function App(): React.JSX.Element {
     }
   }
 
-  async function createSession(transition: number): Promise<void> {
-    const created = await api.rpc<{ sessionId: string }>('session.create', {})
+  async function createSession(transition: number, projectBrief?: TaskBrief): Promise<void> {
+    const created = await api.rpc<{ sessionId: string }>('session.create', projectBrief === undefined ? {} : { cwd: projectBrief.projectPath })
     if (sessionTransitionRef.current !== transition) return
     sessionRef.current = created.sessionId
     await api.setActiveSession(created.sessionId, true)
+    if (projectBrief !== undefined) await api.rpc(TASK_BRIEF_SAVE, { sessionId: created.sessionId, version: 0,
+      input: { goal: projectBrief.goal, projectPath: projectBrief.projectPath, materials: projectBrief.materials, criteria: projectBrief.criteria } })
     setSessionTitle(null)
     sessionRuntimeRef.current.seedRunning(created.sessionId, false)
     applyHistory(created.sessionId, await readHistory(created.sessionId))
@@ -1440,7 +1445,7 @@ export function App(): React.JSX.Element {
   }
 
   /** 新建会话：创建后由 session.active(isNew) 将其绑定到当前标签页。 */
-  async function startNewSession(): Promise<void> {
+  async function startNewSession(projectBrief?: TaskBrief): Promise<void> {
     if (sessionSwitchBlocked || sessionChangingRef.current) return
     const transition = beginSessionTransition()
     try {
@@ -1449,7 +1454,7 @@ export function App(): React.JSX.Element {
       setSessionModels(null)
       setShowModelPicker(false)
       prepareSessionSwitch(false)
-      await createSession(transition)
+      await createSession(transition, projectBrief)
     } catch (cause) {
       if (sessionTransitionRef.current === transition) {
         setError(cause instanceof Error ? cause.message : String(cause))
@@ -1925,6 +1930,7 @@ export function App(): React.JSX.Element {
           </div>
         </div>
         <div className="settings-panel">
+          <VersionStatus caps={caps} locale={locale} detailed />
           <label>
             <span>{copy.settings.bridgeAddress}</span>
             <small>{copy.settings.bridgeHelp}</small>
@@ -2219,7 +2225,10 @@ export function App(): React.JSX.Element {
           if (event.nativeEvent.isTrusted) void api.revokePageAccess(pageAccess.revocableTabId!).catch(() => setError(copy.pageAccess.failed))
         }}>{copy.pageAccess.revoke}</button>}
       </section>
+      <VersionStatus caps={caps} locale={locale} />
       <ControlGroupStatus state={tabAffinity} pages={pageAccess.pages ?? []} copy={copy} onSelect={selectGroupPage} />
+      <TaskBriefPanel api={api} sessionId={sessionRef.current} supported={caps?.taskNotes === true} connected={state === 'connected'} locale={locale}
+        canStartProject={!sessionSwitchBlocked} onProjectChat={brief => { void startNewSession(brief) }} />
       {showSessionPicker && (
         <section className="session-picker" aria-label={copy.app.sessions}>
           <div className="session-picker-head">

@@ -54,6 +54,9 @@ import { BrowserRunStore, BrowserRunStoreError } from './run-store.ts'
 import { DispatchLedgerError } from './dispatch-ledger.ts'
 import { BrowserTaskRuntime } from './task-runtime.ts'
 import { TASK_LIMITS } from './task-contract.ts'
+import { TaskBriefStore } from './task-brief.ts'
+import { registerTaskBrief } from './task-brief-runtime.ts'
+import { bridgeRelease } from './release.ts'
 export type { BrowserTaskVerifier } from './task-runtime.ts'
 export { computeToolCommandDigest } from './tool-identity.ts'
 
@@ -170,15 +173,20 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     throw new Error('bridge-browser: DSH storageDomain service is required for browser run records')
   }
   const runs = await BrowserRunStore.open(storage, resolved.pairingProfile)
+  let briefs: TaskBriefStore
+  try { briefs = await TaskBriefStore.open(storage, resolved.pairingProfile) }
+  catch (error) { await runs.close(); throw error }
   const lifetime: { server?: BridgeServer; requests?: PairingRequests; tasks?: BrowserTaskRuntime } = {}
   // Cordis disposes separate effects concurrently. Keep this ordering inside
   // one effect so receipt writes drain before their storage domain closes.
   ctx.effect(() => async () => {
-    try { await lifetime.tasks?.close(); await lifetime.requests?.close(); await lifetime.server?.close() } finally { await runs.close() }
+    try { await lifetime.tasks?.close(); await lifetime.requests?.close(); await lifetime.server?.close() }
+    finally { try { await briefs.close() } finally { await runs.close() } }
   }, 'bridge-browser: server and durable records')
   ctx.provide('browserRuns', runs)
   const tokenRes = await resolveToken(resolved.token)
-  mountBridge(ctx, resolved, tokenRes, createRemoteHostApi(gateway, connection), runs, lifetime)
+  registerTaskBrief(ctx, briefs)
+  mountBridge(ctx, resolved, tokenRes, createRemoteHostApi(gateway, connection), runs, briefs, lifetime)
 }
 
 function mountBridge(
@@ -187,6 +195,7 @@ function mountBridge(
   tokenRes: Awaited<ReturnType<typeof resolveToken>>,
   hostApi: BrowserHostApi,
   runs: BrowserRunStore,
+  briefs: TaskBriefStore,
   lifetime: { server?: BridgeServer; requests?: PairingRequests; tasks?: BrowserTaskRuntime },
 ): void {
   // Workspace grouping wraps the gateway create; session deferral wraps the
@@ -275,7 +284,7 @@ function mountBridge(
         if (!archived.ok) throw new Error(archived.error.message)
       },
     }
-    try { await runs.purgeSession(sessionId, () => purgeSessionFiles(deps, sessionId)) }
+    try { await runs.purgeSession(sessionId, async () => { await purgeSessionFiles(deps, sessionId); await briefs.purge(sessionId) }) }
     catch (error) {
       if ((error instanceof BrowserRunStoreError || error instanceof DispatchLedgerError) && error.code === 'session-busy') {
         throw new SessionPurgeError('running', 'refusing to purge a session with unfinished browser work; stop it first')
@@ -296,6 +305,7 @@ function mountBridge(
       visualViewport: true,
       layoutMetrics: true,
       designViewZoom: true,
+      release: bridgeRelease(),
       snapshotMaxChars: resolved.snapshotMaxChars,
       maxInteractiveItems: resolved.maxInteractiveItems,
     },
@@ -304,6 +314,7 @@ function mountBridge(
     dispatches: runs.dispatches,
     runs,
     tasks,
+    briefs,
   })
   lifetime.server = server
 

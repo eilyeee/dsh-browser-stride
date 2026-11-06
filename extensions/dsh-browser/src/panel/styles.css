@@ -1,3 +1,24 @@
+.task-brief-panel, .version-status {
+  margin: 8px 12px; padding: 12px; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--surface); overflow-wrap: anywhere; font-size: .86rem;
+}
+.task-brief-panel summary { cursor: pointer; font-weight: 600; }
+.task-brief-panel { max-height: 45vh; overflow: auto; flex-shrink: 0; }
+.task-brief-panel label { display: grid; gap: 5px; margin-top: 12px; }
+.task-brief-panel input, .task-brief-panel textarea, .task-brief-panel select {
+  width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 6px;
+  padding: 7px; background: var(--surface); color: inherit; font: inherit;
+}
+.task-brief-panel textarea { min-height: 64px; resize: vertical; }
+.task-brief-panel fieldset { margin-top: 12px; border: 1px solid var(--line); border-radius: 8px; }
+.task-brief-panel button { border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; cursor: pointer; background: var(--surface); color: inherit; font: inherit; }
+.task-brief-panel button:disabled { cursor: default; opacity: .5; }
+.task-brief-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.task-material { display: grid; gap: 6px; margin-bottom: 12px; }
+.task-criteria { padding-left: 20px; }
+.task-criteria > li { margin-top: 12px; }
+.task-criteria p { margin: 5px 0; }
+
 :root {
   color-scheme: light;
   /* Panel-wide text scale. The side panel has no browser zoom control, so the

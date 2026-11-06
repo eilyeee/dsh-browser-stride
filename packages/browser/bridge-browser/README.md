@@ -43,6 +43,12 @@ Both peers must negotiate optional wire-v4 `layoutMetrics`; restart the updated 
 
 Build first, then run `pnpm run test:smoke-layout` for the isolated Host/Chrome synthetic fixture. Optional `STRIDE_REAL_MODEL=1` uses the existing default model, with the same private model patch/credential inputs as the visual smoke. Test homes and ports are isolated from the regular Host; results stay in ignored private storage. This does not test automatic design zoom or hidden Lanhu layer measurements.
 
+## Session task notes
+
+`browser_task_notes` stores a session goal, project path, material roles, acceptance criteria and per-criterion model reports in a profile-specific Host domain. Its execution context determines the Session; model arguments cannot select another Session. Version checks reject stale writes, and model writes cannot replace user-edited notes. Paths and links grant neither filesystem nor browser authority.
+
+Observed reports require evidence and keep uncertainty/missing conditions explicit. Native panel review is a user annotation, not a `browserRuns` completion fact; changed reports invalidate earlier reviews. Notes enter subsequent Agent steps as attributed context snapshots without waking idle work, survive Host restart and are purged with their Session. Optional wire-v4 `taskNotes` enables the new UI; release metadata provides informational update guidance.
+
 ## Configuration
 
 For first connection, click **Connect to local DSH** in extension settings, then confirm the matching code in the signed-in DSH **Settings → General → Browser pairing** section. Up to eight requests stay in memory for five minutes; only a Connection-authenticated owner can approve them. Request proofs and installation credentials never enter Host pages or URLs. Credentials can be claimed once; lost responses, restart or storage failure require a fresh confirmation. Manual pairing codes remain supported. Normal source upgrades preserve pairing when the original extension installation and Host data remain; see the repository README for update steps.

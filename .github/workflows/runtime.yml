@@ -29,3 +29,7 @@ jobs:
       - run: pnpm run build
       - run: pnpm --filter dsh-browser-extension run build:firefox
       - run: pnpm run test:smoke
+      - name: Prepare and verify a standalone development package
+        run: |
+          pnpm run release:prepare -- --out "$RUNNER_TEMP/stride-release"
+          pnpm run test:smoke-release -- --dir "$RUNNER_TEMP/stride-release"

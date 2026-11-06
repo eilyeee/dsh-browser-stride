@@ -310,7 +310,7 @@ if [ "$IS_UPDATE" -eq 1 ]; then
   printf '\n'
   print_pair "    地址栏输入 chrome://extensions" "    Type chrome://extensions in the address bar"
   printf '\n'
-  print_pair "如果页面上已有“dsh 浏览器助手”卡片：" "If the “dsh Browser Assistant” card is already listed:"
+  print_pair "如果页面上已有“DSH Stride”卡片：" "If the “DSH Stride” card is already listed:"
   print_pair "  点击卡片上的“重新加载”按钮，让扩展加载新文件。" "  Click “Reload” on that card so it picks up the updated files."
   printf '\n'
   print_pair "如果没有该卡片（例如从未加载过）：" "If the card is not listed (e.g. it was never loaded):"
@@ -319,7 +319,7 @@ if [ "$IS_UPDATE" -eq 1 ]; then
   print_pair "  选择这个目录：" "  Select this directory:"
   printf '   %s\n' "$DIST_DIR"
   printf '\n'
-  print_pair "出现 “dsh 浏览器助手” 卡片即成功。" "When the “dsh Browser Assistant” card appears, it is loaded."
+  print_pair "出现 “DSH Stride” 卡片即成功。" "When the “DSH Stride” card appears, it is loaded."
 else
   if [ "$CHROME_OPENED" -eq 1 ]; then
     print_pair "Chrome 扩展管理页已打开，请完成以下操作：" "Chrome Extensions is open. Complete these steps:"
@@ -347,7 +347,7 @@ fi
 
 printf '\n'
 print_pair "加载完成后：" "After loading the extension:"
-print_pair "• 点击工具栏中的 DeepSeek 鲸鱼图标，打开侧边栏" "Click the DeepSeek whale icon in the toolbar to open the side panel"
+print_pair "• 点击工具栏中的 DSH Stride 图标，打开侧边栏" "Click the DSH Stride toolbar icon to open the side panel"
 print_pair "• 启动 Host 后，在仓库根目录运行 pnpm run pair:browser，将一次性配对码填入侧栏设置" "After starting the Host, run pnpm run pair:browser from the repository and enter the one-time code in side-panel settings"
 printf '• 启动固定版本：cd %q && pnpm start\n' "$ROOT"
 printf '   Start the pinned version: cd %q && pnpm start\n' "$ROOT"

@@ -46,7 +46,19 @@ Chrome 可以在扩展设置中开启「自动控制 DSH 新建页面」并保�
 
 本次包名迁移需在拉取并构建后再运行一次安装脚本（`./scripts/install.sh`，Windows 使用 `.\scripts\install.ps1`）。脚本会先注册 `@eilyeee/dsh-browser-stride`，再移除过渡名称 `@eilyeee/dsh-stride-browser-bridge` 以及旧的 `@yuxianglin/dsh-bridge-browser` 与 `@deepseek-ai/dsh-bridge-browser` 注册。保留原 DSH home 和扩展安装即可沿用配对及任务记录。
 
-DSH 能安装 GitHub 插件，但本仓库根目录目前是开发工作区，尚未提供可直接通过 GitHub 插件入口安装的发布包，也没有浏览器商店自动更新渠道。GitHub 安装 Host 插件不会替浏览器安装或更新扩展。
+DSH 能安装 GitHub 插件，但本仓库根目录目前是开发工作区，不能直接当作 GitHub 插件发布包使用，也没有浏览器商店自动更新渠道。开发包可在构建后运行 `pnpm run release:prepare` 生成，位于 `.stride-private/releases/0.1.5/`：包含独立 Host tarball、Chrome ZIP、SHA256SUMS、版本信息和安装说明。在可信来源取得开发包后，按其中 README 安装；无需复制本仓库的开发依赖。安装 Host 插件不会替浏览器安装或更新扩展。
+
+扩展设置会显示实际连接的 Host、DSH、扩展和线协议版本。包版本不同会提示配套更新，旧 Host 未报告的版本显示为未知；协议兼容不代表所有功能已配套。更新前先让任务结束，保留原 DSH home/profile，再重启 Host、重载扩展。重载后重新授权已有页面，配对和任务资料无需重新录入。
+
+## 任务资料与验收
+
+在扩展的「任务资料与验收」中保存本轮目标、项目目录、材料链接和逐条验收条件。材料默认「待模型判断」，用途由任务和实际内容决定，可手动纠正。模型可通过 `browser_task_notes` 读取和整理资料；用户保存过的资料不会被模型覆盖。资料存放在本机 Host 的 profile 数据中，恢复原对话后可继续使用；删除对话也会删除对应资料。
+
+记录项目目录不会改变当前对话的工作目录。点击「从此项目新建对话」会显式创建该目录中的新会话并复制资料；原对话及其页面绑定保持独立。新会话仍须核对目标页面和授权，资料中的链接不会自动获得控制权限。
+
+每条验收条件分别显示实现进度、模型观察依据、缺少条件和下一步。模型报告不等于独立核验；核对后可点击「确认核验通过」，并下载带来源说明的 Markdown 记录。修改材料、需求或报告会清除受影响的旧确认。这些记录不改变托管浏览器任务的完成判定，也不会自动续跑或重放保存操作。
+
+`pnpm run test:smoke-session` 使用临时 Host、隔离 Chrome 和本地固定回复检查聊天与重启接续。设置 `STRIDE_REAL_MODEL=1` 可另行运行现有默认模型的合成页面验收；私有模型配置方式见[扩展验收说明](extensions/dsh-browser/README.zh.md#普通对话的真实模型验收)。它不代表常用浏览器或真实业务站点已经验收。
 
 Host 管理员令牌默认保存在 `$DSH_HOME/ext-bridge-token`，未设置 `DSH_HOME` 时为 `~/.dsh/ext-bridge-token`。请妥善保管，**不要把它填入扩展**。如果 Host 显式配置了令牌，通过 `DSH_BRIDGE_ADMIN_TOKEN` 环境变量传给配对命令。配对期间若保存凭据失败，需要重新生成配对码。
 

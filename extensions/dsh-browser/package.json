@@ -1,7 +1,7 @@
 {
   "name": "dsh-browser-extension",
   "description": "DSH Stride browser extension: controlled-page tools, sidebar chat and optional Chrome viewport images",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "author": "Yuxiang Lin",
   "license": "MIT",
   "private": true,

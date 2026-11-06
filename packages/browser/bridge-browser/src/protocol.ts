@@ -184,6 +184,10 @@ export interface BridgeCaps {
   layoutMetrics?: boolean
   /** Bounded supported design-view zoom control and readback. */
   designViewZoom?: boolean
+  /** Session task notes and per-criterion reports; not execution authority. */
+  taskNotes?: boolean
+  /** Informational installed versions, independent of wire compatibility. */
+  release?: { bridgeVersion: string; dshVersion: string }
 }
 
 /** Frames sent by the extension to the bridge plugin. */
@@ -374,6 +378,12 @@ function isCaps(value: unknown): value is BridgeCaps {
     && (caps.visualViewport === undefined || typeof caps.visualViewport === 'boolean')
     && (caps.layoutMetrics === undefined || typeof caps.layoutMetrics === 'boolean')
     && (caps.designViewZoom === undefined || typeof caps.designViewZoom === 'boolean')
+    && (caps.taskNotes === undefined || typeof caps.taskNotes === 'boolean')
+    && (caps.release === undefined || (typeof caps.release === 'object' && caps.release !== null
+      && ['bridgeVersion', 'dshVersion'].every(key => {
+        const value = (caps.release as Record<string, unknown>)[key]
+        return typeof value === 'string' && /^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][a-zA-Z0-9.-]+)?$/.test(value) && value.length <= 64
+      })))
 }
 
 function isToolError(value: unknown): value is ToolError {

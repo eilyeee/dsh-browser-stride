@@ -10,6 +10,12 @@ The Firefox build uses a provisional extension ID distinct from the upstream ext
 
 Wire protocol v4 requires the matching Host build. Commands carry an action id, a digest and an explicit legacy/run scope. The digest is checked before an extension-origin IndexedDB transaction commits an execution fence. After admission and any write turn, the extension confirms the original pending request with the same Host connection; a copied run id or late reply cannot renew authority. Browser permissions still apply. The same id is never executed twice while its fence is retained, including after worker restart; changed commands are refused. Only identity, timestamps and admission/finish phase are stored. Page/input text and previous result payloads are not cached. The store holds up to 5,000 fences with no automatic expiry or eviction; Unavailable or full storage blocks new execution; a corrupt existing fence blocks its action. Clearing browser/extension data removes this protection. These fences do not replace user permission, live target checks or business-result verification, and there is no automatic recovery/replay.
 
+## Task materials and acceptance
+
+**Task materials and acceptance** persists the conversation's goal, project directory, up to eight material links and sixteen criteria. The model can organize notes until a user edits them, then report evidence per criterion without replacing user corrections. History and Host restarts retain these records without restoring browser grants or replaying operations. Model reports, user reviews and managed-run verdicts remain separate, including in Markdown exports. A path is context; **New chat in this project** explicitly creates another Session in that directory. Version checks prevent stale saves or reviews.
+
+Settings show Host, extension, DSH and wire versions. See the repository's [update instructions](../../README.md#updating) for development artifacts; update the Host and extension separately.
+
 ## Development
 
 From the repository root:

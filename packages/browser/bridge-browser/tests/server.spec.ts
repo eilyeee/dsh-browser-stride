@@ -13,6 +13,7 @@ import { createRunStorage } from './helpers/run-storage.ts'
 import { newBrowserTask } from '../src/task-contract.ts'
 import { asSessionId } from '../src/contracts/ids.ts'
 import { BRIDGE_TASK_PAGE_PREPARE_METHOD, BRIDGE_TASK_PAGE_CANCEL_METHOD } from '../src/protocol.ts'
+import type { TaskBriefStore } from '../src/task-brief.ts'
 
 const TOKEN = 'deadbeefdeadbeefdeadbeefdeadbeef'
 
@@ -934,6 +935,24 @@ describe('recorded tool dispatch', () => {
 })
 
 describe('BridgeServer', () => {
+  it('negotiates notes independently of release metadata and keeps their RPCs out of Host management', async () => {
+    const value = { sessionId: 'notes-session', version: 1 }
+    const briefs = { get: vi.fn(() => value), save: vi.fn(async () => value), review: vi.fn(async () => value) } as unknown as TaskBriefStore
+    const h = await startBridge({ briefs, caps: { ...CAPS, release: { bridgeVersion: '0.1.5', dshVersion: '0.2.1-rc.5' } } })
+    harnesses.push(h)
+    const { ws, frames } = await connect(h.url)
+    send(ws, { t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: TOKEN, caps: { ...CAPS, taskNotes: true } })
+    await waitFor(() => frames.some(frame => frame.t === 'hello.ok'))
+    expect(frames.find(frame => frame.t === 'hello.ok')).toMatchObject({ caps: { taskNotes: true, release: { bridgeVersion: '0.1.5' } } })
+    send(ws, { t: 'rpc', id: 'notes-read', method: 'bridge.taskBrief.get', payload: { sessionId: 'notes-session' } })
+    await waitFor(() => frames.some(frame => frame.t === 'rpc.result' && frame.id === 'notes-read'))
+    expect(frames.find(frame => frame.t === 'rpc.result' && frame.id === 'notes-read')).toMatchObject({ ok: true, result: { result: { ok: true, value } } })
+    send(ws, { t: 'rpc', id: 'forged-note-review', method: 'bridge.taskBrief.review', payload: { sessionId: 'notes-session', version: 1, criterionId: 'title', confirmed: true, authority: 'model' } })
+    await waitFor(() => frames.some(frame => frame.t === 'rpc.result' && frame.id === 'forged-note-review'))
+    expect(briefs.review).not.toHaveBeenCalled()
+    expect(h.callMock).not.toHaveBeenCalled()
+    ws.close()
+  })
   it.each([[false, false], [false, true], [true, false], [true, true]])('negotiates layout reads only with both peers, host=%s extension=%s', async (host, extension) => {
     const h = await startBridge({ caps: { ...CAPS, layoutMetrics: host } })
     harnesses.push(h)

@@ -69,7 +69,7 @@ export function withSessionWorkspace(
   return {
     async call(call: HostRpcCall): Promise<HostRpcResult> {
       if (call.method !== 'session.create' || !isRecord(call.payload)) return api.call(call)
-      if (call.payload.workspaceId !== undefined) return api.call(call)
+      if (call.payload.workspaceId !== undefined || call.payload.cwd !== undefined) return api.call(call)
       const workspaceId = await ensureWorkspace()
       if (workspaceId === undefined) return api.call(call)
       const payload: Record<string, unknown> = { ...call.payload, workspaceId }

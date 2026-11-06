@@ -69,7 +69,7 @@ describe('withSessionWorkspace', () => {
     const wrapped = withSessionWorkspace(api, workspacePath, warn)
 
     await Promise.all([
-      wrapped.call(request({ cwd: '/ignored', sessionId: 'session-chosen' }, 'first')),
+      wrapped.call(request({ sessionId: 'session-chosen' }, 'first')),
       wrapped.call(request({}, 'second')),
     ])
 
@@ -105,6 +105,16 @@ describe('withSessionWorkspace', () => {
     expect(withSessionWorkspace(api, '', vi.fn())).toBe(api)
   })
 
+  it('preserves an explicitly selected project directory without preparing the browser workspace', async () => {
+    const workspacePath = await tempWorkspacePath()
+    const workspaceCreate = workspaceSuccess()
+    const { api, sessionCreate } = apiHarness(workspaceCreate)
+    const original = request({ cwd: '/synthetic/project' })
+    await withSessionWorkspace(api, workspacePath, vi.fn()).call(original)
+    expect(sessionCreate).toHaveBeenCalledWith(original)
+    expect(workspaceCreate).not.toHaveBeenCalled()
+  })
+
   it('caches a workspace failure and preserves ungrouped Session creation', async () => {
     const workspacePath = await tempWorkspacePath()
     const workspaceCreate = vi.fn(async (): Promise<HostRpcResult> => ({
@@ -114,7 +124,7 @@ describe('withSessionWorkspace', () => {
     const { api, sessionCreate } = apiHarness(workspaceCreate)
     const warn = vi.fn()
     const wrapped = withSessionWorkspace(api, workspacePath, warn)
-    const original = request({ cwd: '/original' })
+    const original = request({})
 
     await wrapped.call(original)
     await wrapped.call(original)
@@ -131,7 +141,7 @@ describe('withSessionWorkspace', () => {
     const { api, sessionCreate } = apiHarness(workspaceCreate)
     const warn = vi.fn()
     const wrapped = withSessionWorkspace(api, workspacePath, warn)
-    const original = request({ cwd: '/original' })
+    const original = request({})
 
     await wrapped.call(original)
 

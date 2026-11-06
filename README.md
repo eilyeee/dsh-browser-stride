@@ -49,7 +49,19 @@ For the current source installation, pull into the original checkout, install lo
 
 For the package-name migration, run the installer once after pulling and building (`./scripts/install.sh`, or `.\scripts\install.ps1` on Windows). It registers `@eilyeee/dsh-browser-stride`, then removes the transitional `@eilyeee/dsh-stride-browser-bridge` and legacy `@yuxianglin/dsh-bridge-browser` and `@deepseek-ai/dsh-bridge-browser` registrations. Keep the existing DSH home and extension installation to preserve pairing and task records.
 
-DSH supports GitHub plugins, but this repository root is currently a development workspace, without a release package for direct GitHub plugin installation or a browser-store automatic-update channel. Installing a Host plugin from GitHub does not install or update the browser extension.
+DSH supports GitHub plugins, but this repository root is a development workspace, not a direct GitHub plugin package. There is no browser-store automatic-update channel. After building, run `pnpm run release:prepare` to create local development artifacts under `.stride-private/releases/0.1.5/`: a standalone Host tarball, Chrome ZIP, checksums, version metadata and installation instructions. Use a trusted distribution source and follow the included README; the workspace's development dependencies are not required. Installing the Host plugin does not install or update the browser extension.
+
+Connected settings show installed Host, DSH, extension and wire versions. Different package versions prompt a coordinated update; older Hosts may omit version metadata. A compatible wire does not establish feature parity. Wait for active work to finish, retain the original DSH home/profile, restart the Host and reload the extension. Reauthorize existing pages afterwards; pairing and task notes remain available.
+
+## Task materials and acceptance
+
+Save a goal, project directory, relevant material links and individual acceptance criteria in the panel's **Task materials and acceptance** section. Material roles default to **Model to determine** and follow the task and observed content; users can correct them. The `browser_task_notes` helper reads and records notes and criterion reports. Model writes cannot replace user-edited notes, and version checks reject stale updates. Notes persist in the Host's profile-specific storage, follow the original conversation and are removed when it is deleted.
+
+Recording a project directory does not move an existing conversation. **New chat in this project** explicitly creates a separate Session in the saved directory and copies its materials and criteria. Page targets and grants must be checked separately; saved URLs grant no browser access.
+
+Each criterion shows implementation progress, model-observed evidence, uncertainty and next steps. Users can confirm reviewed evidence and download a Markdown record retaining its provenance. Changed requirements, materials or reports invalidate affected confirmations. These notes do not change managed-run verdicts, automatically resume tasks or replay saves.
+
+`pnpm run test:smoke-session` checks page-free chat and restart continuity with a temporary Host, isolated Chrome and a local deterministic adapter. `STRIDE_REAL_MODEL=1` opts into the existing default model on synthetic pages; private model inputs follow the [extension acceptance instructions](extensions/dsh-browser/README.md#real-model-ordinary-chat-check). This is separate from regular-browser and real-business-site acceptance.
 
 The Host's administrator token is stored at `$DSH_HOME/ext-bridge-token`, or `~/.dsh/ext-bridge-token` when `DSH_HOME` is unset. Keep it private and do not enter it in the extension. If a Host was configured with an explicit token, provide it to the CLI via `DSH_BRIDGE_ADMIN_TOKEN`. If credential storage fails during pairing, issue a new code.
 
