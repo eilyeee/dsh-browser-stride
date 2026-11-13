@@ -46,7 +46,7 @@ Chrome 可以在扩展设置中开启「自动控制 DSH 新建页面」并保�
 
 本次包名迁移需在拉取并构建后再运行一次安装脚本（`./scripts/install.sh`，Windows 使用 `.\scripts\install.ps1`）。脚本会先注册 `@eilyeee/dsh-browser-stride`，再移除过渡名称 `@eilyeee/dsh-stride-browser-bridge` 以及旧的 `@yuxianglin/dsh-bridge-browser` 与 `@deepseek-ai/dsh-bridge-browser` 注册。保留原 DSH home 和扩展安装即可沿用配对及任务记录。
 
-DSH 能安装 GitHub 插件，但本仓库根目录目前是开发工作区，不能直接当作 GitHub 插件发布包使用，也没有浏览器商店自动更新渠道。开发包可在构建后运行 `pnpm run release:prepare` 生成，位于 `.stride-private/releases/0.1.7/`：包含独立 Host tarball、Chrome ZIP、SHA256SUMS、版本信息和安装说明。在可信来源取得开发包后，按其中 README 安装；无需复制本仓库的开发依赖。安装 Host 插件不会替浏览器安装或更新扩展。
+DSH 能安装 GitHub 插件，但本仓库根目录目前是开发工作区，不能直接当作 GitHub 插件发布包使用，也没有浏览器商店自动更新渠道。开发包可在构建后运行 `pnpm run release:prepare` 生成，位于 `.stride-private/releases/<version>/`，其中 `<version>` 取仓库根目录 `package.json` 的版本：包含独立 Host tarball、Chrome ZIP、SHA256SUMS、版本信息和安装说明。在可信来源取得开发包后，按其中 README 安装；无需复制本仓库的开发依赖。安装 Host 插件不会替浏览器安装或更新扩展。
 
 扩展设置会显示实际连接的 Host、DSH、扩展和线协议版本。包版本不同会提示配套更新，旧 Host 未报告的版本显示为未知；协议兼容不代表所有功能已配套。更新前先让任务结束，保留原 DSH home/profile，再重启 Host、重载扩展。重载后重新授权已有页面，配对和任务资料无需重新录入。
 
