@@ -1,7 +1,7 @@
 import { access, readdir } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { homedir } from 'node:os'
-import { isAbsolute, join, resolve } from 'node:path'
+import { isAbsolute, join, resolve, relative, sep } from 'node:path'
 import { createRequire } from 'node:module'
 
 const workspaceRequire = createRequire(new URL('../../packages/browser/bridge-browser/package.json', import.meta.url))
@@ -25,6 +25,13 @@ export function playwrightCacheRoot({ platform = process.platform, env = process
   if (platform === 'darwin') return join(home, 'Library', 'Caches', 'ms-playwright')
   if (platform === 'win32') return join(env.LOCALAPPDATA ?? join(home, 'AppData', 'Local'), 'ms-playwright')
   return join(env.XDG_CACHE_HOME ?? join(home, '.cache'), 'ms-playwright')
+}
+
+/** Match the driver's exact revision/layout in an optional project-private cache. */
+export function privatePairedChromiumPath({ bundledPath, cacheRoot, privateCacheRoot }) {
+  const suffix = relative(cacheRoot, bundledPath)
+  if (!suffix || suffix === '..' || suffix.startsWith(`..${sep}`) || isAbsolute(suffix)) return undefined
+  return join(privateCacheRoot, suffix)
 }
 
 export function systemBrowserCandidates({ platform = process.platform, requireExtensions = false } = {}) {
@@ -91,8 +98,13 @@ export async function findChromiumExecutable(
 ) {
   const explicit = await executable(override)
   if (explicit !== undefined) return explicit
-  const bundled = await executable(chromium.executablePath())
+  const bundledPath = chromium.executablePath()
+  const bundled = await executable(bundledPath)
   if (bundled !== undefined) return bundled
+  const privatePath = privatePairedChromiumPath({ bundledPath, cacheRoot: playwrightCacheRoot(),
+    privateCacheRoot: resolve(import.meta.dirname, '../../.stride-private/runtime/playwright') })
+  const pairedPrivate = await executable(privatePath)
+  if (pairedPrivate !== undefined) return pairedPrivate
   const cached = await newestPlaywrightChromium({ requireExtensions })
   if (cached !== undefined) return cached
   for (const candidate of systemBrowserCandidates({ requireExtensions })) {

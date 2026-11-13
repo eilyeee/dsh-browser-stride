@@ -10,11 +10,13 @@ import { dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import { setTimeout as delay } from 'node:timers/promises'
+import { within } from '../benchmark/lib/extension-connection.mjs'
 import { startDshBackend } from '../benchmark/lib/dsh-process.mjs'
 import { startExtensionBrowser } from '../benchmark/lib/extension-browser.mjs'
 import { startTaskSite } from './fixtures/task-site.mjs'
 
 const repoRoot = resolve(import.meta.dirname, '..'), realModel = process.env.STRIDE_REAL_MODEL === '1'
+const setupOnly = process.argv.includes('--setup-only')
 const version = JSON.parse(await readFile(join(repoRoot, 'package.json'), 'utf8')).version
 const require = createRequire(join(repoRoot, 'package.json')), bridgeRequire = createRequire(join(repoRoot, 'packages/browser/bridge-browser/package.json'))
 const cli = join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'lib/bin.js')
@@ -23,6 +25,8 @@ const artifacts = join(repoRoot, '.stride-private/validation/session-continuity'
 const env = { ...process.env, DSH_HOME: home, DSH_TELEMETRY_DISABLED: '1' }
 for (const key of ['DSH_EXT_TOKEN', 'DSH_BRIDGE_ADMIN_TOKEN', 'DSH_BROWSER_SESSION_WORKSPACE']) delete env[key]
 let host, browser, site, sessionId, config, phase = 'setup'
+const startedAt = performance.now()
+function advance(value) { phase = value; console.log(JSON.stringify({ phase, elapsedMs: Math.round(performance.now() - startedAt) })) }
 async function wait(check, label, timeout = 30000) {
   const end = Date.now() + timeout
   while (Date.now() < end) { if (await check()) return; await delay(100) }
@@ -47,11 +51,49 @@ async function rpc(method, payload) {
   return answer.result.result.value
 }
 async function send(text, expected) {
+  await browser.panel.bringToFront()
   const input = browser.panel.locator('.composer textarea')
   await wait(() => input.isEnabled(), 'composer ready')
-  await input.fill(text); await input.press('Enter')
-  await browser.panel.locator('.row.assistant').filter({ hasText: expected }).waitFor({ state: 'visible', timeout: realModel ? 180000 : 20000 })
-  await wait(async () => await browser.panel.locator('.stop-button').count() === 0, 'turn settled')
+  await host.client.followSession(sessionId)
+  let started = false, finish
+  const terminal = new Promise(resolve => { finish = resolve })
+  const off = host.client.onFrame(frame => {
+    if (frame.type !== 'session/event' || frame.sessionId !== sessionId) return
+    const event = frame.event?.event ?? frame.event
+    if (event.type === 'turn/start') started = true
+    if (started && event.type === 'turn/end') finish(event.data.reason.kind)
+  })
+  const failed = terminal.then(kind => {
+    if (kind !== 'completed') throw new Error(`Synthetic conversation ended with ${kind}`)
+    return new Promise(() => {})
+  })
+  void failed.catch(() => {}) // A very early failure can precede native input acknowledgement.
+  try {
+    await input.fill(text); await input.press('Enter')
+    await Promise.race([failed, browser.panel.locator('.row.assistant').filter({ hasText: expected })
+      .waitFor({ state: 'visible', timeout: realModel ? 180000 : 20000 })])
+    assert.equal(await within(terminal, 15000, 'synthetic turn completion'), 'completed')
+    await wait(async () => await browser.panel.locator('.stop-button').count() === 0, 'turn settled')
+  } finally { off() }
+}
+async function failureMetadata() {
+  if (sessionId === undefined || host === undefined) return undefined
+  try {
+    const history = await host.client.rpc('session.history', { sessionId }, { timeoutMs: 5000 })
+    const events = history.events.map(entry => entry.event ?? entry)
+    const starts = events.map((event, index) => event.type === 'turn/start' ? index : -1).filter(index => index >= 0)
+    const ends = events.map((event, index) => event.type === 'turn/end' ? index : -1).filter(index => index >= 0)
+    const counts = type => events.filter(event => event.type === type).length
+    const errors = ends.filter(index => events[index].data.reason.kind === 'error')
+      .map(index => JSON.stringify(events[index].data.reason.error)).join('\n')
+    return { turnsStarted: starts.length, turnsEnded: ends.length, modelRequests: counts('request/header'),
+      assistantMessages: counts('assistant/message'), pendingTurn: (starts.at(-1) ?? -1) > (ends.at(-1) ?? -1),
+      authenticationFailure: /unauthorized|authentication|credential|\b401\b/i.test(errors),
+      capacityFailure: /rate.?limit|overload|\b429\b|\b503\b/i.test(errors),
+      networkFailure: /network|timeout|fetch failed|ECONN/i.test(errors),
+      terminalKinds: ends.map(index => events[index].data.reason.kind).filter(kind => ['completed', 'error', 'aborted'].includes(kind)),
+      lastEventTypes: events.slice(-12).map(event => /^[a-z][a-z/-]{0,63}$/.test(event.type) ? event.type : 'other') }
+  } catch { return { historyUnavailable: true } }
 }
 async function chat(marker) {
   await send(`只回复 ${marker}。本轮仅聊天，不读取或操作网页、不修改文件，也不更新任务资料。`, marker)
@@ -63,6 +105,7 @@ async function chat(marker) {
   }), 'The message must belong to the original conversation')
 }
 async function restoreHistory() {
+  await browser.panel.bringToFront()
   await browser.panel.locator('.connection .dot.connected').waitFor({ state: 'visible', timeout: 30000 })
   const entry = (await rpc('session.list', {})).items.find(item => item.sessionId === sessionId)
   assert.ok(entry, 'Original session is still listed')
@@ -70,6 +113,7 @@ async function restoreHistory() {
   await browser.panel.locator(`.session-list button[data-session-id="${sessionId}"]`).click()
   await wait(async () => (await affinity())?.focusedSessionId === sessionId, 'history restored')
 }
+async function main() {
 try {
   await mkdir(home); await mkdir(artifacts, { recursive: true })
   const adapter = realModel ? '' : `import {LlmAdapter} from ${JSON.stringify(pathToFileURL(bridgeRequire.resolve('@deepseek-ai/dsh-llm')).href)};
@@ -102,14 +146,24 @@ export function apply(ctx){
   config = { backend: 'extension', port, repoRoot, benchmarkRoot: join(repoRoot, 'benchmark'), runtimeRoot: join(root, 'runtime'), startUrl: site.url, deferSessionCreate: true,
     extraPatch: modelPatch + '\n- insert:\n    - id: session-continuity-fixture\n      name: ' + JSON.stringify(pathToFileURL(fixture).href) + '\n' }
   host = await startDshBackend(config)
-  browser = await startExtensionBrowser({ repoRoot, benchmarkRoot: config.benchmarkRoot, bridgeUrl: `ws://127.0.0.1:${port}/ext/bridge`, pairingCode: await host.issuePairingCode(), trustedOrigin: site.origin })
-  phase = 'new-chat-without-page'
+  browser = await startExtensionBrowser({ repoRoot, benchmarkRoot: config.benchmarkRoot, bridgeUrl: `ws://127.0.0.1:${port}/ext/bridge`,
+    issuePairingCode: () => host.issuePairingCode(), trustedOrigin: site.origin, onPhase: stage => advance(`setup/${stage}`) })
+  if (setupOnly) {
+    assert.ok(Array.isArray((await rpc('session.list', {})).items))
+    assert.equal((await host.listInstallations()).length, 1)
+    const summary = { passed: true, version, browserVersion: browser.browserVersion, setupOnly: true, realHost: true, isolatedChrome: true,
+      freshPairingAfterPanelReady: true, expectedHostAuthenticated: true, modelRequests: 0, originalHostUntouched: true }
+    await writeFile(join(artifacts, realModel ? 'real-model-setup.json' : 'setup.json'), JSON.stringify(summary, null, 2) + '\n', { mode: 0o600 })
+    console.log(JSON.stringify(summary)); return
+  }
+  advance('new-chat-without-page')
+  await browser.panel.bringToFront()
   await wait(async () => typeof (await affinity())?.focusedSessionId === 'string', 'initial session')
   sessionId = (await affinity()).focusedSessionId
   assert.equal((await affinity()).controlledTabId, undefined)
   if (!realModel) await rpc('session.selectModel', { sessionId, provider: 'stride-chat-fixture', model: 'echo' })
   assert.equal((await rpc('session.list', {})).items.some(item => item.sessionId === sessionId), false, 'An unused provisional Session leaves no history')
-  phase = 'save-notes-before-first-prompt'
+  advance('save-notes-before-first-prompt')
   await browser.panel.locator('.task-brief-panel > summary').click()
   const goal = browser.panel.getByRole('textbox', { name: '本轮目标', exact: true })
   await goal.fill('Synthetic notes saved before the first prompt')
@@ -119,7 +173,7 @@ export function apply(ctx){
   assert.equal(savedOnly.blank, false); assert.equal(savedOnly.notesOnly, true)
   const unprompted = await rpc('session.history', { sessionId })
   assert.equal(unprompted.events.some(entry => ['turn/start', 'request/header', 'assistant/message'].includes((entry.event ?? entry).type)), false)
-  phase = 'unsaved-draft-across-host-restart'
+  advance('unsaved-draft-across-host-restart')
   await goal.fill('Synthetic retained unsaved draft')
   await host.close(); host = await startDshBackend(config)
   await restoreHistory()
@@ -130,15 +184,15 @@ export function apply(ctx){
   assert.equal((await rpc('bridge.taskBrief.get', { sessionId })).goal, 'Synthetic notes saved before the first prompt')
   await browser.panel.getByRole('button', { name: '重新载入（放弃未保存修改）', exact: true }).click()
   await wait(async () => await goal.inputValue() === 'Synthetic notes saved before the first prompt', 'explicit draft discard')
-  phase = 'new-chat-without-page'
+  advance('new-chat-without-page')
   await chat('STRIDE_NEW_CHAT_OK')
-  phase = 'chat-after-tab-close'
+  advance('chat-after-tab-close')
   await browser.bindSession(sessionId); await browser.target.close()
   await wait(async () => (await affinity())?.controlledTabId === undefined, 'closed binding removed')
   await chat('STRIDE_CLOSED_TAB_OK')
-  phase = 'history-chat-without-page'
+  advance('history-chat-without-page')
   await browser.panel.reload(); await restoreHistory(); await chat('STRIDE_HISTORY_OK')
-  phase = 'notes-and-evidence'
+  advance('notes-and-evidence')
   const materialPage = await browser.context.newPage(); await materialPage.goto(site.url)
   await browser.panel.evaluate(() => { window.__dshBenchmarkPort ??= chrome.runtime.connect({ name: 'dsh-panel' }) })
   await browser.bindSession(sessionId, materialPage)
@@ -146,6 +200,7 @@ export function apply(ctx){
     materials: [{ url: site.url, label: 'Synthetic task material', role: 'unknown' }], criteria: [{ id: 'title', text: 'Read the synthetic page title' }] }
   const saved = await rpc('bridge.taskBrief.save', { sessionId, version: (await rpc('bridge.taskBrief.get', { sessionId })).version, input: { ...input, materials: [] } })
   assert.equal(saved.userEdited, true)
+  await browser.panel.bringToFront()
   const notesDisclosure = browser.panel.locator('.task-brief-panel')
   if (!await notesDisclosure.evaluate(element => element.open)) await notesDisclosure.locator(':scope > summary').click()
   await wait(async () => await notesDisclosure.getByRole('textbox', { name: '本轮目标', exact: true }).inputValue() === input.goal, 'saved notes displayed')
@@ -163,6 +218,7 @@ export function apply(ctx){
   await materialPage.evaluate(() => { window.__strideMaterialReuseProof = 'same-document' })
   const beforeReuse = await browser.worker.evaluate(async () => ({ tabs: (await chrome.tabs.query({})).length,
     grants: (await chrome.storage.session.get('dshPageAccess')).dshPageAccess.grants.map(grant => ({ tabId: grant.tabId, nonce: grant.nonce })) }))
+  await browser.panel.bringToFront()
   await notesDisclosure.getByRole('button', { name: '使用已有页面', exact: true }).click()
   await wait(async () => (await affinity()).controlledTabId === materialTabId, 'native material selection')
   assert.equal(await materialPage.evaluate(() => window.__strideMaterialReuseProof), 'same-document', 'Selecting a material does not reload it')
@@ -177,6 +233,7 @@ export function apply(ctx){
     assert.equal(reported.progress[0]?.criterionId, 'title'); assert.equal(reported.progress[0]?.observation, 'observed')
     assert.equal(reported.progress[0]?.userConfirmed, false)
     assert.ok(reported.progress[0]?.evidence.some(value => value.includes('本地设置测试')))
+    await browser.panel.bringToFront()
     if (!await notesDisclosure.evaluate(element => element.open)) await notesDisclosure.locator(':scope > summary').click()
     await browser.panel.getByRole('button', { name: '确认核验通过', exact: true }).waitFor({ state: 'visible' })
     const downloadReady = browser.panel.waitForEvent('download')
@@ -189,18 +246,18 @@ export function apply(ctx){
     await browser.panel.screenshot({ path: join(artifacts, 'task-notes.png'), fullPage: true })
     reportVerified = true
   }
-  phase = 'worker-restart'
+  advance('worker-restart')
   Object.assign(browser, await browser.restartWorker())
   await restoreHistory(); await chat('STRIDE_WORKER_RESTART_OK')
   assert.equal((await rpc('bridge.taskBrief.get', { sessionId })).goal, input.goal)
-  phase = 'host-restart'
+  advance('host-restart')
   await host.close(); host = await startDshBackend(config)
   await restoreHistory(); await chat('STRIDE_HOST_RESTART_OK')
   const reopened = await rpc('bridge.taskBrief.get', { sessionId })
   assert.equal(reopened.goal, input.goal)
   if (realModel) assert.equal(reopened.progress[0]?.userConfirmed, true)
   assert.ok(await host.client.rpc('session.history', { sessionId }))
-  phase = 'explicit-project-conversation'
+  advance('explicit-project-conversation')
   const disclosure = browser.panel.locator('.task-brief-panel')
   if (!await disclosure.evaluate(element => element.open)) await disclosure.locator(':scope > summary').click()
   await browser.panel.getByRole('button', { name: '从此项目新建对话', exact: true }).click()
@@ -220,7 +277,7 @@ export function apply(ctx){
   assert.ok((await browser.panel.locator('.version-status').innerText()).includes(`Host ${version}`))
   await browser.panel.getByRole('button', { name: '返回对话', exact: true }).click()
   await restoreHistory()
-  phase = 'notes-storage-write-failure'
+  advance('notes-storage-write-failure')
   const notesFile = join(root, 'runtime/extension/storages/browser_briefs_776562.json')
   const notesBackup = notesFile + '.audit-backup'
   const lastNotes = await rpc('bridge.taskBrief.get', { sessionId })
@@ -233,7 +290,7 @@ export function apply(ctx){
   } finally { await rm(notesFile, { recursive: true, force: true }); await rename(notesBackup, notesFile) }
   assert.equal(rejected.ok, false); assert.equal(rejected.error.code, 'storage-unavailable')
   await chat('STRIDE_NOTES_FAULT_CHAT_OK')
-  phase = 'notes-storage-startup-failure'
+  advance('notes-storage-startup-failure')
   await host.close()
   await writeFile(notesFile, '{ synthetic invalid note-storage JSON', { mode: 0o600 })
   host = await startDshBackend(config)
@@ -245,13 +302,13 @@ export function apply(ctx){
   assert.equal(deletion.ok, false); assert.equal(deletion.error.code, 'storage-unavailable')
   assert.ok(await host.client.rpc('session.history', { sessionId }))
   await chat('STRIDE_NOTES_STARTUP_FAULT_OK')
-  phase = 'notes-storage-repaired'
+  advance('notes-storage-repaired')
   await host.close(); await writeFile(notesFile, validNotes, { mode: 0o600 }); host = await startDshBackend(config)
   await restoreHistory()
   assert.equal((await rpc('bridge.taskBrief.get', { sessionId })).goal, input.goal)
   await chat('STRIDE_NOTES_REPAIRED_OK')
   assert.deepEqual(site.state(), { enabled: false, saved: false })
-  const summary = { passed: true, version, realHost: true, isolatedChrome: true, realModel, syntheticOnly: true, defaultSessionDeferral: true,
+  const summary = { passed: true, version, browserVersion: browser.browserVersion, realHost: true, isolatedChrome: true, realModel, syntheticOnly: true, defaultSessionDeferral: true,
     savedBeforeFirstPrompt: true, unpromptedSessionVisibleAfterRestart: true, noModelStartedBySaving: true, unsavedDraftSurvivesRestart: true,
     notesWriteFailureDoesNotBlockChat: true, notesStartupFailureDoesNotBlockBridge: true, unavailableNotesPreventPartialDeletion: true, repairedNotesReadable: true,
     chatWithoutPage: true, chatAfterTabClose: true, historicalChat: true, workerRestart: true, hostRestart: true,
@@ -261,14 +318,16 @@ export function apply(ctx){
   await writeFile(join(artifacts, realModel ? 'real-model.json' : 'result.json'), JSON.stringify(summary, null, 2) + '\n', { mode: 0o600 })
   console.log(JSON.stringify(summary))
 } catch (error) {
-  await writeFile(join(artifacts, realModel ? 'real-model-failure.json' : 'failure.json'), JSON.stringify({
+  await writeFile(join(artifacts, setupOnly ? 'setup-failure.json' : realModel ? 'real-model-failure.json' : 'failure.json'), JSON.stringify({
     phase, body: await browser?.panel.locator('body').innerText().catch(() => undefined),
-    affinity: await affinity().catch(() => undefined), sessionId,
+    affinity: await affinity().catch(() => undefined), sessionId, hostMetadata: await failureMetadata(),
   }, null, 2), { mode: 0o600 })
-  await writeFile(join(artifacts, realModel ? 'real-model.json' : 'result.json'), JSON.stringify({ passed: false, phase, errorName: error.name }, null, 2) + '\n', { mode: 0o600 })
+  await writeFile(join(artifacts, setupOnly ? 'setup-result.json' : realModel ? 'real-model.json' : 'result.json'), JSON.stringify({ passed: false, phase, errorName: error.name }, null, 2) + '\n', { mode: 0o600 })
   console.error(JSON.stringify({ phase, error: error.message })); process.exitCode = 1
 } finally {
   if (sessionId) await host?.client.rpc('session.cancel', { sessionId }).catch(() => {})
   await browser?.close().catch(() => {}); await host?.close().catch(() => {}); await site?.close().catch(() => {})
   await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
 }
+}
+await main()

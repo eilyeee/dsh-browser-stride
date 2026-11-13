@@ -1,9 +1,10 @@
 import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { chromium, findChromiumExecutable } from './chromium.mjs'
+import { configurePanelConnection, installConnectionProbe, within } from './extension-connection.mjs'
 
-export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl, pairingCode, deferPairing = false, trustedOrigin, connectTimeoutMs = 30_000, actionTimeoutMs = 8_000, chromiumArgs = [] }) {
-  if (!deferPairing && (typeof pairingCode !== 'string' || !/^[a-f0-9]{32}$/u.test(pairingCode))) {
+export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl, pairingCode, issuePairingCode, deferPairing = false, trustedOrigin, connectTimeoutMs = 30_000, actionTimeoutMs = 8_000, chromiumArgs = [], onPhase }) {
+  if (!deferPairing && typeof issuePairingCode !== 'function' && (typeof pairingCode !== 'string' || !/^[a-f0-9]{32}$/u.test(pairingCode))) {
     throw new Error('a fresh extension pairing code is required')
   }
   const extensionDir = resolve(repoRoot, 'extensions/dsh-browser/dist')
@@ -13,7 +14,9 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
   await mkdir(tempParent, { recursive: true })
   const profileDir = await mkdtemp(join(tempParent, 'extension-profile-'))
   let context
+  let worker
   let stage = 'launching Chromium'
+  const phase = value => { stage = value; onPhase?.(value) }
   const launch = () => chromium.launchPersistentContext(profileDir, {
       executablePath,
       channel: 'chromium',
@@ -31,61 +34,34 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
       ],
     })
   try {
+    phase(stage)
     context = await launch()
-    stage = 'waiting for extension service worker'
-    let worker = context.serviceWorkers()[0]
+    phase('waiting for extension service worker')
+    worker = context.serviceWorkers()[0]
     if (worker === undefined) worker = await context.waitForEvent('serviceworker', { timeout: 30_000 })
     const extensionId = new URL(worker.url()).host
+    phase('initializing extension worker')
+    await within(worker.evaluate(installConnectionProbe), 10000, 'extension diagnostics initialization')
     // Tests provide one full extension panel page below. Disable a duplicate
     // native sidebar view; the toolbar action still grants real activeTab access.
-    await worker.evaluate(() => chrome.sidePanel.setOptions({ enabled: false }))
-    stage = 'opening benchmark target tab'
+    await within(worker.evaluate(() => chrome.sidePanel.setOptions({ enabled: false })), 10000, 'extension panel initialization')
+    phase('opening benchmark target tab')
     let target = await context.newPage()
     target.setDefaultTimeout(actionTimeoutMs)
     await target.goto(`${trustedOrigin}/health`, { waitUntil: 'domcontentloaded' })
-    stage = 'opening extension panel'
+    phase('opening extension panel')
     let panel = await context.newPage()
     panel.setDefaultTimeout(actionTimeoutMs)
     await panel.goto(`chrome-extension://${extensionId}/panel/index.html`)
+    await panel.bringToFront()
     await panel.waitForSelector('header.topbar', { timeout: 15_000 })
-    stage = 'configuring extension bridge'
-    await panel.evaluate(async ({ configuredBridgeUrl, configuredPairingCode, configuredOrigin, timeoutMs, deferred }) => {
-      await new Promise((resolveConnection, rejectConnection) => {
-        const port = chrome.runtime.connect({ name: 'dsh-panel' })
-        window.__dshBenchmarkPort = port
-        const settingsId = crypto.randomUUID()
-        const timer = setTimeout(() => {
-          port.disconnect()
-          rejectConnection(new Error(`extension bridge did not connect within ${timeoutMs}ms`))
-        }, timeoutMs)
-        port.onDisconnect.addListener(() => {
-          clearTimeout(timer)
-          rejectConnection(new Error(chrome.runtime.lastError?.message ?? 'extension benchmark port disconnected'))
-        })
-        port.onMessage.addListener((message) => {
-          if (deferred && message?.type === 'settings.result' && message.id === settingsId) {
-            clearTimeout(timer)
-            message.ok ? resolveConnection() : rejectConnection(new Error('extension settings failed'))
-            return
-          }
-          if (message?.type !== 'status' || message.state !== 'connected') return
-          clearTimeout(timer)
-          resolveConnection()
-        })
-        port.postMessage({
-          type: 'settings',
-          id: settingsId,
-          settings: {
-            bridgeUrl: configuredBridgeUrl,
-            ...(configuredPairingCode === undefined ? {} : { token: configuredPairingCode }),
-            sharePageContent: 'auto',
-            trustedActionOrigins: [configuredOrigin],
-            approvalNotifications: false,
-            autoResumeSession: false,
-          },
-        })
-      })
-    }, { configuredBridgeUrl: bridgeUrl, configuredPairingCode: pairingCode, configuredOrigin: trustedOrigin, timeoutMs: connectTimeoutMs, deferred: deferPairing })
+    phase('issuing fresh fixture pairing code')
+    const freshCode = deferPairing ? undefined : typeof issuePairingCode === 'function' ? await issuePairingCode() : pairingCode
+    if (!deferPairing && (typeof freshCode !== 'string' || !/^[a-f0-9]{32}$/.test(freshCode))) throw new Error('invalid fixture pairing code')
+    phase('configuring extension bridge')
+    await within(panel.evaluate(configurePanelConnection, {
+      bridgeUrl, pairingCode: freshCode, origin: trustedOrigin, timeoutMs: connectTimeoutMs, deferred: deferPairing,
+    }), connectTimeoutMs + 5000, 'extension bridge configuration')
     async function authorizePage(page = target) {
       await page.bringToFront()
       const previousNonce = await worker.evaluate(async expected => {
@@ -116,7 +92,7 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
         throw new Error('Native page authorization did not finish')
       } finally { await cdp.detach() }
     }
-    stage = 'waiting for extension bridge connection'
+    phase('waiting for extension bridge connection')
     try {
       if (!deferPairing) await panel.locator('.connection .dot.connected').waitFor({ state: 'visible', timeout: connectTimeoutMs })
     } catch (error) {
@@ -140,9 +116,11 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
       panel,
       target,
       executablePath,
+      browserVersion: context.browser().version(),
       authorizePage,
       /** Restart only the worker, retaining native tab grants and session storage. */
       async restartWorker() {
+        await panel.bringToFront()
         const previous = worker
         await previous.evaluate(() => { globalThis.__strideWorkerRestartProof = crypto.randomUUID() })
         await panel.evaluate(() => { window.__stridePanelRestartProof = crypto.randomUUID() })
@@ -247,11 +225,12 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
       },
     }
   } catch (error) {
+    const diagnostics = worker === undefined ? undefined : await within(worker.evaluate(() => globalThis.__strideConnectionDiagnostics), 2000, 'diagnostics read').catch(() => undefined)
     if (context !== undefined) await context.close().catch(() => undefined)
     await rm(profileDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
     const browserHint = stage === 'waiting for extension service worker'
       ? ' Install Chrome for Testing with `pnpm --dir benchmark install-browser`; current Google Chrome Stable builds ignore --load-extension.'
       : ''
-    throw new Error(`extension browser failed while ${stage}: ${error instanceof Error ? error.message : String(error)}.${browserHint}`, { cause: error })
+    throw new Error(`extension browser failed while ${stage}: ${error instanceof Error ? error.message : String(error)}. Handshake=${JSON.stringify(diagnostics ?? [])}.${browserHint}`, { cause: error })
   }
 }

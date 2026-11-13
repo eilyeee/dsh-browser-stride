@@ -7,6 +7,18 @@ package versions currently identify development builds, not supported releases.
 
 ## [Unreleased]
 
+### Test infrastructure
+
+- Extension fixture setup waits for both saved settings and authentication to
+  the intended Host. It reports settings failures immediately, bounds parent
+  waits, records credential-free handshake metadata and can issue the one-time
+  test code after panel startup. The continuity smoke logs phase progress and
+  offers `--setup-only` without model requests. These checks remain separate
+  from model and regular-browser acceptance.
+- Test browser discovery checks an exact matching revision in the optional
+  project-private cache before falling back to older cached browsers. Explicit
+  browser overrides keep priority; the user's regular browser is not updated.
+
 ### Added
 
 - Development build 0.1.7 lets the panel import authorized control-group page

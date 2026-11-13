@@ -3,7 +3,14 @@ import assert from 'node:assert/strict'
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { newestPlaywrightChromium, playwrightCacheRoot, systemBrowserCandidates } from '../lib/chromium.mjs'
+import { newestPlaywrightChromium, playwrightCacheRoot, systemBrowserCandidates, privatePairedChromiumPath } from '../lib/chromium.mjs'
+
+test('project-private cache selection preserves the exact driver revision and cannot escape the cache', () => {
+  const cacheRoot = resolve('/synthetic/cache'), privateCacheRoot = resolve('/synthetic/project/cache')
+  assert.equal(privatePairedChromiumPath({ cacheRoot, privateCacheRoot, bundledPath: join(cacheRoot, 'chromium-1248/chrome-mac-x64/chrome') }),
+    join(privateCacheRoot, 'chromium-1248/chrome-mac-x64/chrome'))
+  assert.equal(privatePairedChromiumPath({ cacheRoot, privateCacheRoot, bundledPath: resolve('/synthetic/other/chrome') }), undefined)
+})
 
 test('Playwright cache root follows each platform convention', () => {
   assert.equal(
