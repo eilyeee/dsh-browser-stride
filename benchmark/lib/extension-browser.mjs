@@ -145,6 +145,7 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
       async restartWorker() {
         const previous = worker
         await previous.evaluate(() => { globalThis.__strideWorkerRestartProof = crypto.randomUUID() })
+        await panel.evaluate(() => { window.__stridePanelRestartProof = crypto.randomUUID() })
         const cdp = await context.newCDPSession(panel)
         const versions = new Map()
         const stopped = new Set()
@@ -166,10 +167,15 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
           await cdp.send('ServiceWorker.stopWorker', { versionId: version.versionId })
           while (Date.now() < deadline && !stopped.has(version.versionId)) await panel.waitForTimeout(50)
           if (!stopped.has(version.versionId)) throw new Error('Native worker stop was not confirmed')
-          await panel.reload()
+          // Chromium can miss lifecycle events here even after the panel has
+          // rendered and connected. Wait for a committed navigation, then prove
+          // that the old document is gone and the actual new UI is available.
+          await panel.reload({ waitUntil: 'commit', timeout: 10000 })
+          await panel.waitForFunction(() => window.__stridePanelRestartProof === undefined, undefined, { timeout: 15000 })
           await panel.waitForSelector('header.topbar', { timeout: 15000 })
           let next
-          while (Date.now() < deadline && next === undefined) {
+          const replacementDeadline = Date.now() + 10000
+          while (Date.now() < replacementDeadline && next === undefined) {
             for (const candidate of context.serviceWorkers().filter(item => new URL(item.url()).host === extensionId)) {
               // Playwright may retain its Worker proxy across native lifetimes.
               if (await candidate.evaluate(() => globalThis.__strideWorkerRestartProof === undefined).catch(() => false)) { next = candidate; break }
