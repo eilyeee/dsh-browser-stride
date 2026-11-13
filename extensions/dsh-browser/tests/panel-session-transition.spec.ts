@@ -15,6 +15,7 @@ vi.mock('../src/panel/api.ts', () => ({
 
 import { App } from '../src/panel/App.tsx'
 import { createRemoteHostApi } from '@eilyeee/dsh-browser-stride/src/remote-host-api.ts'
+import { PANEL_COPY } from '../src/panel/strings.ts'
 
 describe('panel session transitions', () => {
   let root: Root
@@ -97,6 +98,49 @@ describe('panel session transitions', () => {
       onResumeHint?.(hint)
     })
   }
+
+  it.each(['delayed', 'rejected'] as const)('shows a live failed turn immediately with %s history and no prompt replay', async mode => {
+    await renderConnected(null)
+    const failure = { type: 'turn/end', seq: 4, data: { turn: 0, reason: {
+      kind: 'error', error: { code: 'RATE_LIMIT', status: 429, message: 'Bearer synthetic-secret' },
+    } } }
+    const partial = { type: 'assistant/message', seq: 3, data: { turn: 0, step: 0,
+      message: { content: [{ type: 'text', text: 'Prior partial result' }] },
+    } }
+    let finish: ((value: unknown) => void) | undefined
+    const history = new Promise(resolve => { finish = resolve })
+    const original = rpc.getMockImplementation()!
+    rpc.mockImplementation(async (method, payload) => {
+      if (method !== 'session.history') return original(method, payload)
+      if (mode === 'rejected') throw new Error('Synthetic history unavailable')
+      return history
+    })
+    const emit = (event: unknown, sessionId = 'session-current'): void => {
+      onEvent?.({ t: 'event', frame: { rpcId: 'failure', method: 'session/event', payload: { sessionId, event } } })
+    }
+    await act(async () => {
+      emit({ type: 'turn/start', seq: 1, data: { turn: 0 } })
+      emit({ type: 'tool/call', seq: 2, data: { name: 'browser_snapshot', arguments: '{}' } })
+      emit(partial)
+      emit(failure)
+    })
+    expect(document.querySelector('.row.failure[role="status"]')?.textContent).toBe(PANEL_COPY.en.turnFailure.rateLimited)
+    expect(document.querySelector('.row.assistant')?.textContent).toContain('Prior partial result')
+    expect(document.body.textContent).not.toContain('synthetic-secret')
+    expect(document.querySelector('.ai-progress')).toBeNull()
+    expect(document.querySelector('.tool-activity.running')).toBeNull()
+    expect(document.querySelector('.tool-activity.unconfirmed')?.textContent).toContain(PANEL_COPY.en.tool.unconfirmed)
+    expect(document.querySelector('.stop-button')).toBeNull()
+    expect(document.querySelector<HTMLTextAreaElement>('.composer textarea')?.disabled).toBe(false)
+    expect(rpc.mock.calls.some(([method]) => method === 'session.prompt')).toBe(false)
+    await act(async () => { emit(failure, 'session-saved') })
+    expect(document.querySelectorAll('.row.failure')).toHaveLength(1)
+    if (mode === 'delayed') {
+      await act(async () => { finish?.({ events: [{ event: partial }, { event: failure }] }) })
+      expect(document.querySelectorAll('.row.failure')).toHaveLength(1)
+      expect(document.querySelector('.row.assistant')?.textContent).toContain('Prior partial result')
+    }
+  })
 
   it('offers stop control for an authorized page before a task is bound', async () => {
     await act(async () => { root.render(createElement(App)) })

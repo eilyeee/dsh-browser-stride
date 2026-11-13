@@ -17,6 +17,8 @@ import { startTaskSite } from './fixtures/task-site.mjs'
 
 const repoRoot = resolve(import.meta.dirname, '..'), realModel = process.env.STRIDE_REAL_MODEL === '1'
 const setupOnly = process.argv.includes('--setup-only')
+const failuresOnly = process.argv.includes('--failures-only')
+if (failuresOnly && (setupOnly || realModel)) throw new Error('Failure acceptance requires the synthetic adapter and a full panel setup')
 const version = JSON.parse(await readFile(join(repoRoot, 'package.json'), 'utf8')).version
 const require = createRequire(join(repoRoot, 'package.json')), bridgeRequire = createRequire(join(repoRoot, 'packages/browser/bridge-browser/package.json'))
 const cli = join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'lib/bin.js')
@@ -116,10 +118,14 @@ async function restoreHistory() {
 async function main() {
 try {
   await mkdir(home); await mkdir(artifacts, { recursive: true })
-  const adapter = realModel ? '' : `import {LlmAdapter} from ${JSON.stringify(pathToFileURL(bridgeRequire.resolve('@deepseek-ai/dsh-llm')).href)};
+  const adapter = realModel ? '' : `import {LlmAdapter,LlmError} from ${JSON.stringify(pathToFileURL(bridgeRequire.resolve('@deepseek-ai/dsh-llm')).href)};
 class Echo extends LlmAdapter {
  async listModels(provider){return [{provider,id:'echo',name:'Synthetic echo',contextWindow:128000}];}
  async *stream(options){options.signal?.throwIfAborted();const text=[...options.messages].reverse().flatMap(message=>message.content.filter(block=>block.type==='text').map(block=>block.text)).map(text=>text.match(/STRIDE_[A-Z_]+/)?.[0]).find(Boolean)||'Synthetic chat reply';
+ if(${failuresOnly} && ['STRIDE_FAIL_GENERIC','STRIDE_FAIL_LIMIT'].includes(text)) {
+  if(text==='STRIDE_FAIL_GENERIC'){yield {type:'block-start',index:0,blockType:'text'};yield {type:'text-delta',index:0,text:'Synthetic unfinished attempt'};}
+  throw new LlmError('Bearer synthetic-private-diagnostic https://private.invalid/?token=synthetic-secret', 'STRIDE_TEST_TERMINAL', text==='STRIDE_FAIL_LIMIT'?{status:429}:undefined);
+ }
  yield {type:'block-start',index:0,blockType:'text'};yield {type:'text-delta',index:0,text};
  yield {type:'block-end',index:0,block:{type:'text',text}};yield {type:'finish',reason:{kind:'stop'}};}
 }
@@ -163,6 +169,66 @@ export function apply(ctx){
   assert.equal((await affinity()).controlledTabId, undefined)
   if (!realModel) await rpc('session.selectModel', { sessionId, provider: 'stride-chat-fixture', model: 'echo' })
   assert.equal((await rpc('session.list', {})).items.some(item => item.sessionId === sessionId), false, 'An unused provisional Session leaves no history')
+  if (failuresOnly) {
+    // Retain the provisional Session without a model turn before the independent
+    // Host observer follows it (an unused Session is not yet in durable history).
+    await rpc('bridge.taskBrief.save', { sessionId, version: 0, input: { goal: 'Synthetic terminal-failure acceptance', projectPath: '', materials: [], criteria: [] } })
+    advance('terminal-failure/prior-reply')
+    await chat('STRIDE_BEFORE_FAILURE_OK')
+    for (const [index, marker] of ['STRIDE_FAIL_GENERIC', 'STRIDE_FAIL_LIMIT'].entries()) {
+      advance(`terminal-failure/${index + 1}`)
+      await browser.panel.bringToFront()
+      await host.client.followSession(sessionId)
+      let started = false, finish
+      const terminal = new Promise(resolve => { finish = resolve })
+      const off = host.client.onFrame(frame => {
+        if (frame.type !== 'session/event' || frame.sessionId !== sessionId) return
+        const event = frame.event?.event ?? frame.event
+        if (event.type === 'turn/start') started = true
+        if (started && event.type === 'turn/end') finish(event.data.reason)
+      })
+      try {
+        await browser.panel.locator('.composer textarea').fill(marker)
+        await browser.panel.locator('.composer textarea').press('Enter')
+        const reason = await within(terminal, 30000, 'synthetic failed turn')
+        assert.equal(reason.kind, 'error')
+        assert.equal(reason.error.status, index === 1 ? 429 : undefined)
+      } finally { off() }
+      const failure = browser.panel.locator('.row.failure')
+      await wait(async () => await failure.count() === index + 1, 'visible failed turn')
+      assert.match(await failure.nth(index).innerText(), index === 1 ? /HTTP 429/ : /本轮请求失败/)
+      await wait(async () => await browser.panel.locator('.stop-button,.ai-progress,.tool-activity.running').count() === 0, 'failed turn settled')
+      assert.equal(await browser.panel.locator('.composer textarea').isEnabled(), true)
+      assert.equal(await browser.panel.locator('.row.assistant').filter({ hasText: 'STRIDE_BEFORE_FAILURE_OK' }).count(), 1)
+      const body = await browser.panel.locator('body').innerText()
+      for (const privateText of ['synthetic-private-diagnostic', 'synthetic-secret', 'private.invalid', 'Synthetic unfinished attempt']) assert.ok(!body.includes(privateText))
+      const historyBefore = await rpc('session.history', { sessionId })
+      await delay(750)
+      const historyAfter = await rpc('session.history', { sessionId })
+      const count = (history, type) => history.events.filter(entry => (entry.event ?? entry).type === type).length
+      for (const type of ['turn/start', 'request/header', 'tool/call']) assert.equal(count(historyBefore, type), count(historyAfter, type), 'No panel replay after terminal failure')
+      await browser.panel.reload({ waitUntil: 'commit' }); await restoreHistory()
+      await wait(async () => await browser.panel.locator('.row.failure').count() === index + 1, 'failed turn restored once')
+      if (index === 1) {
+        await browser.panel.setViewportSize({ width: 360, height: 800 })
+        await browser.panel.locator('.row.failure').last().scrollIntoViewIfNeeded()
+        assert.equal(await browser.panel.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), true, 'Failure notice fits a narrow panel')
+        await browser.panel.screenshot({ path: join(artifacts, 'failure-panel.png') })
+      }
+    }
+    advance('terminal-failure/continue')
+    await chat('STRIDE_AFTER_FAILURE_OK')
+    assert.equal(await browser.panel.locator('.row.failure').count(), 2)
+    const finalHistory = await rpc('session.history', { sessionId })
+    assert.equal(finalHistory.events.filter(entry => (entry.event ?? entry).type === 'turn/start').length, 4)
+    assert.equal(finalHistory.events.filter(entry => (entry.event ?? entry).type === 'tool/call').length, 0)
+    const summary = { passed: true, version, browserVersion: browser.browserVersion, syntheticAdapter: true, realHost: true,
+      isolatedChrome: true, genericFailure: true, structured429: true, privateDiagnosticsHidden: true, failedStreamNotCompletedReply: true,
+      priorReplyRetained: true, failureHistoryRestoredOnce: true, composerAvailableAfterFailure: true, nextUserTurnCompleted: true,
+      noPanelReplay: true, narrowPanel: true, toolCalls: 0, originalHostUntouched: true }
+    await writeFile(join(artifacts, 'failures.json'), JSON.stringify(summary, null, 2) + '\n', { mode: 0o600 })
+    console.log(JSON.stringify(summary)); return
+  }
   advance('save-notes-before-first-prompt')
   await browser.panel.locator('.task-brief-panel > summary').click()
   const goal = browser.panel.getByRole('textbox', { name: '本轮目标', exact: true })
@@ -318,11 +384,11 @@ export function apply(ctx){
   await writeFile(join(artifacts, realModel ? 'real-model.json' : 'result.json'), JSON.stringify(summary, null, 2) + '\n', { mode: 0o600 })
   console.log(JSON.stringify(summary))
 } catch (error) {
-  await writeFile(join(artifacts, setupOnly ? 'setup-failure.json' : realModel ? 'real-model-failure.json' : 'failure.json'), JSON.stringify({
+  await writeFile(join(artifacts, failuresOnly ? 'terminal-failure.json' : setupOnly ? 'setup-failure.json' : realModel ? 'real-model-failure.json' : 'failure.json'), JSON.stringify({
     phase, body: await browser?.panel.locator('body').innerText().catch(() => undefined),
     affinity: await affinity().catch(() => undefined), sessionId, hostMetadata: await failureMetadata(),
   }, null, 2), { mode: 0o600 })
-  await writeFile(join(artifacts, setupOnly ? 'setup-result.json' : realModel ? 'real-model.json' : 'result.json'), JSON.stringify({ passed: false, phase, errorName: error.name }, null, 2) + '\n', { mode: 0o600 })
+  await writeFile(join(artifacts, failuresOnly ? 'failures.json' : setupOnly ? 'setup-result.json' : realModel ? 'real-model.json' : 'result.json'), JSON.stringify({ passed: false, phase, errorName: error.name }, null, 2) + '\n', { mode: 0o600 })
   console.error(JSON.stringify({ phase, error: error.message })); process.exitCode = 1
 } finally {
   if (sessionId) await host?.client.rpc('session.cancel', { sessionId }).catch(() => {})

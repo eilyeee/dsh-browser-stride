@@ -26,9 +26,11 @@ export interface PanelCopy {
     inProgress: string
     completed: string
     done: string
+    unconfirmed: string
     labels: Record<string, string>
     overflow: (shown: string[], total: number) => string
   }
+  turnFailure: { generic: string; rateLimited: string }
   pageAccess: { required: string; selectExisting: string; granted: string; revoke: string; failed: string }
   controlGroup: {
     title: string
@@ -251,6 +253,7 @@ const EN: PanelCopy = {
     inProgress: 'In progress',
     completed: 'Completed',
     done: 'Done',
+    unconfirmed: 'Result unconfirmed',
     labels: {
       browser_snapshot: 'Read page',
       browser_screenshot: 'View page screenshot',
@@ -272,6 +275,10 @@ const EN: PanelCopy = {
       browser_wait: 'Wait for page',
     },
     overflow: (shown, total) => `${shown.join(' → ')} → ${total - shown.length} more`,
+  },
+  turnFailure: {
+    generic: 'This request failed before the turn completed. Check DSH’s service status before sending another message.',
+    rateLimited: 'The model service rejected this request (HTTP 429), and the turn did not complete. Check the service status before continuing.',
   },
   pageAccess: { required: 'Click the DSH Stride toolbar icon on an unpinned page to authorize it and add it to the DSH control group.', selectExisting: 'Select an already authorized page below for this conversation. You do not need to authorize it again.', granted: 'The target page is authorized. Moving other tabs into the DSH 控制 group does not authorize them.', revoke: 'Stop controlling this page', failed: 'Stopping page control was not confirmed. Reload the extension and check page access.' },
   controlGroup: {
@@ -506,6 +513,7 @@ const ZH: PanelCopy = {
     inProgress: '进行中',
     completed: '已完成',
     done: '完成',
+    unconfirmed: '结果待确认',
     labels: {
       browser_snapshot: '读取页面',
       browser_screenshot: '查看页面截图',
@@ -527,6 +535,10 @@ const ZH: PanelCopy = {
       browser_wait: '等待页面',
     },
     overflow: (shown, total) => `${shown.join(' → ')} 等${total}个工具`,
+  },
+  turnFailure: {
+    generic: '本轮请求失败，未能完成。请检查 DSH 服务状态后再发送消息继续。',
+    rateLimited: '模型服务限制了本次请求（HTTP 429），本轮未完成。请检查服务状态后再继续。',
   },
   pageAccess: { required: '请在未固定的目标页面点击工具栏上的 DSH Stride 图标，将它授权并加入「DSH 控制」分组。', selectExisting: '请在下方为当前对话选择一个已授权的分组页面，无需重复授权。', granted: '目标页面已授权。手动拖入「DSH 控制」分组不会自动授权其他页面。', revoke: '停止控制此页', failed: '停止控制的结果尚未确认，请重新加载扩展后核对页面授权。' },
   controlGroup: {

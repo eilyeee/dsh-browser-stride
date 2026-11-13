@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
+import { PANEL_COPY } from '../src/panel/strings.ts'
 import {
   appendLiveRow,
   completeLastTool,
@@ -7,6 +8,7 @@ import {
   pendingQuestionFromFrame,
   resolvedQuestionFromFrame,
   rowFromEvent,
+  settleToolRows,
   textFromBlocks,
   toolSummary,
   type SessionEventView,
@@ -82,6 +84,31 @@ describe('rowFromEvent', () => {
     expect(rowFromEvent(ev('turn/start', {}))).toBeNull()
     expect(rowFromEvent(ev('tool/call', { name: 'browser_click' }))).toBeNull()
   })
+
+  it.each(['en', 'zh'] as const)('shows fixed %s failure copy without exposing arbitrary diagnostics', locale => {
+    const failure = { message: 'Bearer synthetic-secret https://private.invalid/?token=secret', code: '<script>429</script>', requestId: 'private-id' }
+    expect(rowFromEvent(ev('turn/end', { reason: { kind: 'error', error: failure } }), locale)).toEqual({
+      seq: 0, kind: 'failure', text: PANEL_COPY[locale].turnFailure.generic,
+    })
+    expect(rowFromEvent(ev('turn/end', { reason: { kind: 'error', error: { ...failure, status: 429 } } }), locale)).toEqual({
+      seq: 0, kind: 'failure', text: PANEL_COPY[locale].turnFailure.rateLimited,
+    })
+    expect(rowFromEvent(ev('turn/end', { reason: { kind: 'error', error: { ...failure, status: '429' } } }), locale)?.text)
+      .toBe(PANEL_COPY[locale].turnFailure.generic)
+  })
+
+  it.each([undefined, null, [], 'error', { kind: 'completed' }, { kind: 'aborted' }, { kind: 'blocked' }])(
+    'does not label other or malformed terminal reasons as failures: %j', reason => {
+      expect(rowFromEvent(ev('turn/end', { reason }), 'en')).toBeNull()
+    },
+  )
+
+  it('still reports a failed turn when error details are absent or malformed', () => {
+    for (const error of [undefined, null, 'private diagnostic', []]) {
+      expect(rowFromEvent(ev('turn/end', { reason: { kind: 'error', error } }), 'en')?.text)
+        .toBe(PANEL_COPY.en.turnFailure.generic)
+    }
+  })
 })
 
 describe('toolSummary', () => {
@@ -103,6 +130,15 @@ describe('toolSummary', () => {
 })
 
 describe('appendLiveRow / completeLastTool', () => {
+  it('stops tool waits without claiming unobserved results completed', () => {
+    expect(settleToolRows([
+      { seq: 1, kind: 'tool', text: 'Pending action', status: 'running' },
+      { seq: 2, kind: 'tool', text: 'Observed result', status: 'complete' },
+    ])).toEqual([
+      { seq: 1, kind: 'tool', text: 'Pending action', status: 'unconfirmed' },
+      { seq: 2, kind: 'tool', text: 'Observed result', status: 'complete' },
+    ])
+  })
   it('merges consecutive tool rows into one line (no tool spam)', () => {
     let rows: ReturnType<typeof appendLiveRow> = []
     rows = appendLiveRow(rows, 'user', '帮我操作页面', 1)
@@ -118,6 +154,46 @@ describe('appendLiveRow / completeLastTool', () => {
 })
 
 describe('mergeHistoryRows', () => {
+  it('matches tool results across interleaved metadata, without completing a different pending call', () => {
+    let seq = 0
+    const rows = mergeHistoryRows([
+      ev('tool/call', { callId: 'observed', name: 'browser_snapshot', arguments: '{}' }),
+      ev('session/title', { title: 'Synthetic metadata' }),
+      ev('tool/call', { callId: 'pending', name: 'browser_click', arguments: '{"index":1}' }),
+      ev('tool/result', { callId: 'observed' }),
+      ev('tool/result', {}),
+      ev('turn/end', { reason: { kind: 'error' } }),
+    ], () => ++seq, 'en')
+    expect(rows.filter(row => row.kind === 'tool').map(row => row.status)).toEqual(['complete', 'unconfirmed'])
+  })
+  it('restores unconfirmed tool results truthfully after a failed turn, retaining settled results', () => {
+    let seq = 0
+    const rows = mergeHistoryRows([
+      ev('turn/start', { turn: 0 }),
+      ev('tool/call', { name: 'browser_snapshot', arguments: '{}' }),
+      ev('tool/result', {}),
+      ev('assistant/message', { message: { content: [{ type: 'text', text: 'Prior result' }] } }),
+      ev('tool/call', { name: 'browser_click', arguments: '{"index":1}' }),
+      ev('assistant/message', { message: { content: [{ type: 'text', text: 'Partial reply' }] } }),
+      ev('turn/end', { reason: { kind: 'error' } }),
+    ], () => ++seq, 'en')
+    expect(rows.filter(row => row.kind === 'tool').map(row => row.status)).toEqual(['complete', 'unconfirmed'])
+    expect(rows.at(-1)?.kind).toBe('failure')
+  })
+  it('retains prior replies, failed turns and a later successful reply in order after history restoration', () => {
+    let seq = 0
+    const rows = mergeHistoryRows([
+      ev('assistant/message', { message: { content: [{ type: 'text', text: 'Partial result before failure' }] } }),
+      ev('turn/end', { reason: { kind: 'error', error: { status: 429, message: 'synthetic-secret' } } }),
+      ev('user/message', { source: { kind: 'user' }, content: [{ type: 'text', text: 'Continue' }] }),
+      ev('assistant/message', { message: { content: [{ type: 'text', text: 'Recovered' }] } }),
+      ev('turn/end', { reason: { kind: 'completed' } }),
+    ], () => ++seq, 'en')
+    expect(rows.map(row => row.kind)).toEqual(['assistant', 'failure', 'user', 'assistant'])
+    expect(rows.map(row => row.text)).toEqual([
+      'Partial result before failure', PANEL_COPY.en.turnFailure.rateLimited, 'Continue', 'Recovered',
+    ])
+  })
   it('aggregates tool calls and renders user/assistant text from data', () => {
     let seq = 0
     const nextSeq = (): number => { seq += 1; return seq }

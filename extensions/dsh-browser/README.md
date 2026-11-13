@@ -35,6 +35,8 @@ The side panel shows metadata for Host-created browser runs in the current conve
 
 Ordinary chat does not require a bound page. You can send messages in the same conversation without an authorized page, after its tab closes or after unbinding it. Browser tools separately check their selected target and page authorization. Sending a message does not select another page or restore revoked access.
 
+If the Host ends a turn with an error, the conversation shows a failure notice immediately and retains it in history. Structured HTTP 429 failures have specific copy; raw provider diagnostics are not displayed. Earlier durable replies remain visible. Tools without a recorded result show **Result unconfirmed** after the turn ends. The panel leaves its busy state and permits another user message without adding automatic retries or replaying actions. A failure notice does not establish whether an earlier browser operation succeeded; check its result before asking to repeat it.
+
 Tasks retain cumulative limits of five active minutes, ten model-request admissions and twenty browser calls. A task already at any limit cannot start or continue; the panel keeps **Stop** available and explains how to create another task for remaining work. Pausing or choosing another page does not reset these counters. Already admitted work may still finish independent verification.
 
 With the updated Host, a normal Host restart allows automatic transport reconnection while the side panel is open, using the existing pairing. A connection replaced by another client still needs **Save and connect**. Reconnecting does not resume an interrupted task or restore its old page binding; Host task recovery is not implemented.

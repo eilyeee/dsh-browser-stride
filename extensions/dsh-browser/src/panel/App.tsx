@@ -88,6 +88,7 @@ import {
   pendingQuestionFromFrame,
   resolvedQuestionFromFrame,
   rowFromEvent,
+  settleToolRows,
   toolSummary,
   type Row,
   type PendingQuestion,
@@ -576,15 +577,16 @@ interface HistoryPage {
 
 const ToolActivity = memo(function ToolActivity({ row, copy }: { row: Row; copy: PanelCopy }): React.JSX.Element {
   const running = row.status === 'running'
+  const unconfirmed = row.status === 'unconfirmed'
   return (
-    <div className={`tool-activity ${running ? 'running' : 'complete'}`} role="status">
+    <div className={`tool-activity ${running ? 'running' : unconfirmed ? 'unconfirmed' : 'complete'}`} role="status">
       <span className="tool-icon"><ToolIcon /></span>
       <span className="tool-copy">
-        <span className="tool-label">{running ? copy.tool.running : copy.tool.complete}</span>
+        <span className="tool-label">{unconfirmed ? copy.tool.unconfirmed : running ? copy.tool.running : copy.tool.complete}</span>
         <span className="tool-summary">{row.text}</span>
       </span>
-      <span className="tool-state" aria-label={running ? copy.tool.inProgress : copy.tool.completed}>
-        {running ? <span className="spinner" /> : copy.tool.done}
+      <span className="tool-state" aria-label={unconfirmed ? copy.tool.unconfirmed : running ? copy.tool.inProgress : copy.tool.completed}>
+        {running ? <span className="spinner" /> : unconfirmed ? copy.tool.unconfirmed : copy.tool.done}
       </span>
     </div>
   )
@@ -1029,11 +1031,14 @@ export function App(): React.JSX.Element {
       setStopping(false)
       setWorking(false)
       clearQuestions()
+      const failure = rowFromEvent(payload.event, locale)
+      setRows((prev) => failure === null ? settleToolRows(prev)
+        : appendLiveRow(settleToolRows(prev), failure.kind, failure.text, nextSeq()))
       await refreshHistory(payload.sessionId)
       return
     }
     if (payload.sessionId !== sessionRef.current) return
-    const row = rowFromEvent(payload.event)
+    const row = rowFromEvent(payload.event, locale)
     if (row !== null) {
       setRows((prev) => appendLiveRow(prev, row.kind, row.text, nextSeq(), row.images))
       return
@@ -2310,7 +2315,7 @@ export function App(): React.JSX.Element {
           </div>
         )}
         {rows.map((row) => (
-          <div key={row.seq} className={`row ${row.kind}`}>
+          <div key={row.seq} className={`row ${row.kind}`} role={row.kind === 'failure' ? 'status' : undefined}>
             {row.kind === 'assistant' && <span className="assistant-avatar"><img src={whaleUrl} alt={copy.app.assistant} /></span>}
             {row.kind === 'tool'
               ? <ToolActivity row={row} copy={copy} />

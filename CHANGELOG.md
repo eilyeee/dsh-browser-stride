@@ -36,6 +36,13 @@ package versions currently identify development builds, not supported releases.
 
 ### Fixed
 
+- Development build 0.1.8 shows failed Host turns in the conversation immediately
+  and when restoring history. Fixed localized copy distinguishes structured
+  HTTP 429 responses without displaying provider diagnostics. Earlier durable
+  replies remain visible; the panel ends its busy state and allows another
+  user message, without adding automatic retries or replaying browser actions.
+  A tool without an observed result is labelled unconfirmed after the turn
+  ends, rather than being presented as completed.
 - Development build 0.1.6 retains the real Session before an explicit task-note
   save, without sending a prompt. Notes saved before the first message remain
   discoverable after restart. Legacy orphan notes appear in extension history;

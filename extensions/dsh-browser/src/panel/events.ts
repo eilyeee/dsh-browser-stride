@@ -14,10 +14,10 @@ import { PANEL_COPY } from './strings.ts'
 /** One rendered conversation row. */
 export interface Row {
   seq: number
-  kind: 'user' | 'assistant' | 'tool' | 'info'
+  kind: 'user' | 'assistant' | 'tool' | 'info' | 'failure'
   text: string
   images?: ImageAttachmentRef[]
-  status?: 'running' | 'complete'
+  status?: 'running' | 'complete' | 'unconfirmed'
 }
 
 /** Minimal view of a SessionEvent (payload in `data`). */
@@ -33,7 +33,9 @@ export interface SessionEventView {
     step?: number
     name?: string
     arguments?: string
+    callId?: string
     title?: unknown
+    reason?: unknown
   }
 }
 
@@ -138,8 +140,8 @@ export function textFromBlocks(blocks: unknown): string {
   return parts.join('\n')
 }
 
-/** Map one session event to a row (user/assistant only; tools handled separately). */
-export function rowFromEvent(event: SessionEventView): Row | null {
+/** Map durable messages and failed turns to rows; tools are handled separately. */
+export function rowFromEvent(event: SessionEventView, locale: UiLocale = getUiLocale()): Row | null {
   switch (event.type) {
     case 'user/message': {
       // dsh 每轮把运行时常量上下文作为 source.kind='plugin' 的 user/message
@@ -164,6 +166,14 @@ export function rowFromEvent(event: SessionEventView): Row | null {
       return text.trim() === '' && images.length === 0
         ? null
         : { seq: 0, kind: 'assistant', text, ...(images.length === 0 ? {} : { images }) }
+    }
+    case 'turn/end': {
+      const reason = event.data?.reason
+      if (!isRecord(reason) || reason.kind !== 'error') return null
+      // Only use a structured status to choose fixed copy. Provider messages,
+      // request IDs and other arbitrary diagnostics may contain private data.
+      const rateLimited = isRecord(reason.error) && reason.error.status === 429
+      return { seq: 0, kind: 'failure', text: PANEL_COPY[locale].turnFailure[rateLimited ? 'rateLimited' : 'generic'] }
     }
     default:
       return null
@@ -216,36 +226,60 @@ export function completeLastTool(rows: Row[], seq: number): Row[] {
   return rows
 }
 
+/** A terminal turn stops presentation waits; it does not prove a tool result. */
+export function settleToolRows(rows: Row[]): Row[] {
+  return rows.map(row => row.kind === 'tool' && row.status === 'running'
+    ? { ...row, status: 'unconfirmed' } : row)
+}
+
 /** 历史渲染：连续工具调用归并成一行（tool/call..result 不逐条刷屏；超 3 个折叠计数）。 */
 export function mergeHistoryRows(
   events: SessionEventView[],
   nextSeq: () => number,
   locale: UiLocale = getUiLocale(),
 ): Row[] {
-  const rows: Row[] = []
-  let pendingTool: { items: string[]; total: number } | null = null
+  // Results can arrive after metadata/messages have flushed a tool group.
+  // Match native call identities across the entire authoritative history cut.
+  const settledCalls = new Set(events.filter(event => event.type === 'tool/result')
+    .map(event => event.data?.callId).filter((id): id is string => typeof id === 'string'))
+  let rows: Row[] = []
+  let pendingTool: { items: string[]; total: number; outstanding: number; anonymous: number } | null = null
   const flushTool = (): void => {
     if (pendingTool === null) return
     const shown = pendingTool.items.slice(0, 3)
     const label = pendingTool.total > shown.length
       ? PANEL_COPY[locale].tool.overflow(shown, pendingTool.total)
       : shown.join(' → ')
-    rows.push({ seq: nextSeq(), kind: 'tool', text: label, status: 'complete' })
+    rows.push({ seq: nextSeq(), kind: 'tool', text: label, status: pendingTool.outstanding > 0 ? 'running' : 'complete' })
     pendingTool = null
   }
   for (const ev of events) {
     if (ev.type === 'tool/call') {
       const summary = toolSummary(ev.data?.name ?? 'tool', ev.data?.arguments, locale)
-      if (pendingTool === null) pendingTool = { items: [summary], total: 1 }
+      const callId = ev.data?.callId
+      const anonymous = typeof callId !== 'string' ? 1 : 0
+      const outstanding = typeof callId === 'string' && settledCalls.has(callId) ? 0 : 1
+      if (pendingTool === null) pendingTool = { items: [summary], total: 1, outstanding, anonymous }
       else {
         pendingTool.items.push(summary)
         pendingTool.total += 1
+        pendingTool.outstanding += outstanding
+        pendingTool.anonymous += anonymous
       }
       continue
     }
-    if (ev.type === 'tool/result') continue
+    if (ev.type === 'tool/result') {
+      // Legacy/test event views can omit callId. Such results can settle only
+      // anonymous calls in their own group, never an identified pending call.
+      if (typeof ev.data?.callId !== 'string' && pendingTool !== null && pendingTool.anonymous > 0) {
+        pendingTool.anonymous -= 1
+        pendingTool.outstanding -= 1
+      }
+      continue
+    }
     flushTool()
-    const row = rowFromEvent(ev)
+    if (ev.type === 'turn/end') rows = settleToolRows(rows)
+    const row = rowFromEvent(ev, locale)
     if (row !== null) rows.push({ ...row, seq: nextSeq() })
   }
   flushTool()
