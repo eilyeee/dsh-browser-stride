@@ -6,6 +6,8 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { isReadOnlyBrowserTool } from './protocol.ts'
+import { feedbackText, failureFeedback, observationFeedback, parseToolFeedback } from './tool-feedback.ts'
 import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { BridgeServer } from './server.ts'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
@@ -28,6 +30,7 @@ export interface BrowserToolsOptions {
 /** Canonical tool result: one text payload. */
 interface TextResult {
   text: string
+  feedback?: { version: 1; state: 'observed' | 'dispatched' | 'readback-unconfirmed'; businessChange: 'not-verified' }
 }
 
 /** Output contract shared by the text-returning browser tools. */
@@ -35,11 +38,20 @@ const TEXT_OUTPUT = {
   schema: {
     type: 'object',
     additionalProperties: false,
-    properties: { text: { type: 'string', required: true } },
+    properties: { text: { type: 'string', required: true }, feedback: {
+      type: 'object', additionalProperties: false,
+      properties: { version: { type: 'number', enum: [1], required: true },
+        state: { type: 'string', enum: ['observed', 'dispatched', 'readback-unconfirmed'], required: true },
+        businessChange: { type: 'string', enum: ['not-verified'], required: true } },
+    } },
   },
   render: (_args: unknown, value: unknown) => {
     const result = value as TextResult
     return [{ type: 'text' as const, text: result.text }]
+  },
+  presentationMeta: (_args: unknown, value: unknown) => {
+    const feedback = parseToolFeedback((value as TextResult).feedback)
+    return feedback === undefined ? null : { browserFeedback: { ...feedback } }
   },
 } as const
 
@@ -103,6 +115,18 @@ export function registerBrowserTools(
     const agent = ctx.agents.get(session.id)
     if (agent !== undefined) approvals.reset(agent)
   })
+  const stopFeedback = ctx.on('tools/execute', async (exec, next) => {
+    const result = await next()
+    if (!(BROWSER_TOOL_NAMES as readonly string[]).includes(exec.name)) return result
+    const readOnly = isReadOnlyBrowserTool(exec.name) || exec.name === 'browser_read_design_styles'
+    if (!result.isError && readOnly) return result
+    const feedback = result.isError
+      ? failureFeedback(result.error.info?.code ?? 'internal', readOnly, result.error.info?.name === 'BrowserNotDispatchedError')
+      : parseToolFeedback(typeof result.value === 'object' && result.value !== null && !Array.isArray(result.value) ? result.value.feedback : undefined)
+        ?? observationFeedback(readOnly ? 'observed' : 'dispatched')
+    return { ...result, meta: { browserFeedback: { ...feedback } },
+      ...(result.isError ? { content: [{ type: 'text' as const, text: feedbackText(feedback) }] } : {}) }
+  })
   const call = async (exec: Pick<ToolRunContext, 'agent' | 'signal'>, name: string, args: Record<string, unknown>): Promise<TextResult> => {
     const result = await request(exec, name, args)
     return normalizeTextResult(result, name)
@@ -113,7 +137,7 @@ export function registerBrowserTools(
   }
   const screenshot = defineScreenshotTool(ctx, request, options)
   const stopScreenshot = ctx.tools.register(screenshot)
-  disposers.set(screenshot.name, () => { stopScreenshot(); stopTurnListener() })
+  disposers.set(screenshot.name, () => { stopScreenshot(); stopTurnListener(); stopFeedback() })
   return disposers
 }
 
@@ -165,7 +189,12 @@ function defineScreenshotTool(ctx: Context, request: (exec: Pick<ToolRunContext,
 /** Normalize the extension's result payload to the canonical `{ text }` shape. */
 function normalizeTextResult(result: unknown, name: string): TextResult {
   if (typeof result === 'object' && result !== null && typeof (result as { text?: unknown }).text === 'string') {
-    return { text: (result as { text: string }).text }
+    const text = (result as { text: string }).text
+    if (isReadOnlyBrowserTool(name)) return { text }
+    const reported = parseToolFeedback((result as { feedback?: unknown }).feedback)
+    const state = reported?.state === 'observed' || reported?.state === 'readback-unconfirmed' ? reported.state : 'dispatched'
+    const feedback = observationFeedback(state)
+    return { text: feedbackText(feedback) + '\n' + text, feedback }
   }
   return { text: `${name} returned no text: ${JSON.stringify(result)}` }
 }

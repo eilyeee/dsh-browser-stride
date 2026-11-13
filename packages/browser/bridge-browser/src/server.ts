@@ -21,6 +21,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer } from 'ws'
+import { HarnessError } from '@deepseek-ai/dsh-llm'
 import { isRecord, type BrowserHostApi } from './host-api.ts'
 import { canonicalize, makeActionId, asRunId } from './contracts/ids.ts'
 import { z } from 'zod'
@@ -94,13 +95,15 @@ export function isLoopbackHost(host: string | undefined): boolean {
 }
 
 /** Error thrown by requestTool; the tool registry turns it into an isError result. */
-export class BridgeToolError extends Error {
+export class BridgeToolError extends HarnessError {
+  declare readonly code: ToolErrorCode
   constructor(
-    readonly code: ToolErrorCode,
+    code: ToolErrorCode,
     message: string,
+    readonly notDispatched = false,
   ) {
-    super(message)
-    this.name = 'BridgeToolError'
+    super(message, code)
+    this.name = notDispatched ? 'BrowserNotDispatchedError' : 'BridgeToolError'
   }
 }
 
@@ -264,7 +267,7 @@ export class BridgeServer {
     }
     const conn = this.current
     if (conn === null) {
-      throw new BridgeToolError('bridge-closed', 'no browser extension is connected to the bridge')
+      throw new BridgeToolError('bridge-closed', 'no browser extension is connected to the bridge', true)
     }
     if ((name === 'browser_screenshot' || name === 'browser_click_at') && !conn.visualViewport) {
       throw new BridgeToolError('content-unavailable', 'Visual browser tools require an updated Chrome extension and Host Bridge.')
@@ -280,7 +283,7 @@ export class BridgeServer {
     // below does not replay for pre-aborted signals, so the call would be
     // sent to the extension and executed despite the cancellation.
     if (signal.aborted) {
-      throw new BridgeToolError('bridge-closed', 'tool call cancelled before dispatch')
+      throw new BridgeToolError('bridge-closed', 'tool call cancelled before dispatch', true)
     }
     const id = randomUUID()
     const expiresAt = Date.now() + timeoutMs
@@ -349,13 +352,13 @@ export class BridgeServer {
   }
 
   private beforeDispatch(conn: ReadyConnection, signal: AbortSignal, expiresAt: number, sessionId?: string, execution?: BrowserRunExecution): { reason: 'cancelled' | 'expired' | 'connection-closed'; error: BridgeToolError } | undefined {
-    if (signal.aborted) return { reason: 'cancelled', error: new BridgeToolError('bridge-closed', 'tool call cancelled before dispatch') }
-    if (this.closed || this.current !== conn || conn.ws.readyState !== WebSocket.OPEN) return { reason: 'connection-closed', error: new BridgeToolError('bridge-closed', 'extension connection changed before dispatch') }
-    if (Date.now() >= expiresAt) return { reason: 'expired', error: new BridgeToolError('timeout', 'browser action expired before dispatch') }
+    if (signal.aborted) return { reason: 'cancelled', error: new BridgeToolError('bridge-closed', 'tool call cancelled before dispatch', true) }
+    if (this.closed || this.current !== conn || conn.ws.readyState !== WebSocket.OPEN) return { reason: 'connection-closed', error: new BridgeToolError('bridge-closed', 'extension connection changed before dispatch', true) }
+    if (Date.now() >= expiresAt) return { reason: 'expired', error: new BridgeToolError('timeout', 'browser action expired before dispatch', true) }
     try {
       if (this.deps.runs?.executionFor(sessionId) !== execution) throw new Error('execution context changed')
     } catch {
-      return { reason: 'cancelled', error: new BridgeToolError('action-failed', 'Browser execution authority changed or a previous write requires reconciliation; no action was sent') }
+      return { reason: 'cancelled', error: new BridgeToolError('action-failed', 'Browser execution authority changed or a previous write requires reconciliation; no action was sent', true) }
     }
     return undefined
   }

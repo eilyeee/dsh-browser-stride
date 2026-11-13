@@ -25,6 +25,7 @@ import type { VisualObservation } from '@eilyeee/dsh-browser-stride/src/visual.t
 /** A settled action result. */
 export interface ActionResult {
   text: string
+  feedback?: { version: 1; state: 'observed' | 'dispatched' | 'readback-unconfirmed'; businessChange: 'not-verified' }
   designZoomStep?: DesignZoomStep
   /** Packaged controller metadata, never constructed by page-world scripts. */
   visual?: VisualObservation
@@ -144,10 +145,10 @@ function settleNote(settled: boolean): string {
 function elementOrThrow(ids: ElementIds, index: number): Element {
   const el = ids.elementByIndex(index)
   if (el === undefined) {
-    throw new ActionError('action-failed', `Element [${index}] does not exist; the page may have changed. Call browser_snapshot again to get current references.`)
+    throw new ActionError('element-stale', `Element [${index}] does not exist; the page may have changed. Call browser_snapshot again to get current references.`)
   }
   if (ids.isActionTargetCurrent?.(index) === false) {
-    throw new ActionError('action-failed', `Element [${index}] changed, disappeared or is not actionable. Call browser_snapshot again.`)
+    throw new ActionError('element-stale', `Element [${index}] changed, disappeared or is not actionable. Call browser_snapshot again.`)
   }
   return el
 }
@@ -155,7 +156,7 @@ function elementOrThrow(ids: ElementIds, index: number): Element {
 function referenceArg(args: Record<string, unknown>, ids: ElementIds, needsOptions = false): number {
   const index = ids.resolveReference(args.elementRef, needsOptions)
   if (index === undefined) {
-    throw new ActionError('action-failed', 'The element reference is missing, stale, or was not fully shown in the current observation. Call browser_snapshot again and use its elementRef. Update the bridge and extension together.')
+    throw new ActionError('element-stale', 'The element reference is missing, stale, or was not fully shown in the current observation. Call browser_snapshot again and use its elementRef. Update the bridge and extension together.')
   }
   return index
 }
@@ -167,7 +168,7 @@ function referenceStillCurrent(args: Record<string, unknown>, ids: ElementIds, i
 /** Error carrying a stable wire code. */
 export class ActionError extends Error {
   constructor(
-    readonly code: 'action-failed' | 'bad-args' | 'design-zoom-not-selected',
+    readonly code: 'element-stale' | 'action-failed' | 'bad-args' | 'design-zoom-not-selected',
     message: string,
   ) {
     super(message)
@@ -289,13 +290,14 @@ export function resetDeltaState(ids: ElementIds): void {
 }
 
 /** Attach the settled page change while retaining the full view as the next delta baseline. */
-function withPageDelta(text: string, ctx: ActionContext, settled = true): ActionResult {
+function withPageDelta(text: string, ctx: ActionContext, settled = true, state: 'observed' | 'dispatched' | 'readback-unconfirmed' = 'dispatched'): ActionResult {
+  const feedback = { version: 1 as const, state, businessChange: 'not-verified' as const }
   if (!settled) {
     resetDeltaState(ctx.ids)
-    return { text }
+    return { text, feedback }
   }
   const lastSnapshot = snapshotByRegistry.get(ctx.ids) ?? null
-  if (ctx.includePageDelta !== true || lastSnapshot === null) return { text }
+  if (ctx.includePageDelta !== true || lastSnapshot === null) return { text, feedback }
   const delta = lastSnapshot.url === location.href
   const view = buildSnapshot(ctx.ids, { delta, budget: ctx.budget }, delta ? lastSnapshot : null)
   snapshotByRegistry.set(ctx.ids, view)
@@ -303,6 +305,7 @@ function withPageDelta(text: string, ctx: ActionContext, settled = true): Action
   ctx.ids.publishObservation(view.observationId, rendered.targets, rendered.selects)
   return {
     text,
+    feedback,
     pageContent: rendered.text,
   }
 }
@@ -379,7 +382,7 @@ async function clickAction(args: Record<string, unknown>, ctx: ActionContext): P
   const settled = await waitForPageSettled(ACTION_SETTLE)
   if (el instanceof HTMLInputElement && (el.type === 'checkbox' || el.type === 'radio')) {
     const observed = el.isConnected ? (el.checked ? 'checked' : 'unchecked') : 'unavailable (element was removed)'
-    return withPageDelta(`Clicked [${index}]. Observed control state: ${observed}; this does not confirm a saved change.${settleNote(settled)}`, ctx, settled)
+    return withPageDelta(`Clicked [${index}]. Observed control state: ${observed}; this does not confirm a saved change.${settleNote(settled)}`, ctx, settled, el.isConnected ? 'observed' : 'readback-unconfirmed')
   }
   return withPageDelta(`Clicked [${index}].${settleNote(settled)}`, ctx, settled)
 }
@@ -473,13 +476,13 @@ async function typeAction(args: Record<string, unknown>, ctx: ActionContext): Pr
   if (isEditable(el)) {
     if (!typeIntoContentEditable(el, text, replace, stillCurrent)) {
       resetDeltaState(ctx.ids)
-      return { text: `Input to [${index}] may have partially changed the field, but the target changed during page events. Re-observe and check its state before continuing.` }
+      return { text: `Input to [${index}] may have partially changed the field, but the target changed during page events. Re-observe and check its state before continuing.`, feedback: { version: 1, state: 'readback-unconfirmed', businessChange: 'not-verified' } }
     }
   } else if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
     expectedValue = `${replace ? '' : el.value}${text}`
     if ((replace && !setNativeValue(el, '', stillCurrent)) || !setNativeValue(el, `${el.value}${text}`, stillCurrent)) {
       resetDeltaState(ctx.ids)
-      return { text: `Input to [${index}] may have partially changed the field, but the target changed during page events. Re-observe and check its state before continuing.` }
+      return { text: `Input to [${index}] may have partially changed the field, but the target changed during page events. Re-observe and check its state before continuing.`, feedback: { version: 1, state: 'readback-unconfirmed', businessChange: 'not-verified' } }
     }
   } else {
     throw new ActionError('action-failed', `Element [${index}] is not editable (${el.tagName.toLowerCase()}).`)
@@ -487,10 +490,10 @@ async function typeAction(args: Record<string, unknown>, ctx: ActionContext): Pr
   const settled = await waitForPageSettled(TYPE_SETTLE)
   if (expectedValue !== undefined && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)
     && (!el.isConnected || el.value !== expectedValue)) {
-    return withPageDelta(`Input was sent to [${index}], but its value could not be confirmed at readback. Observe again before continuing.${settleNote(settled)}`, ctx, settled)
+    return withPageDelta(`Input was sent to [${index}], but its value could not be confirmed at readback. Observe again before continuing.${settleNote(settled)}`, ctx, settled, 'readback-unconfirmed')
   }
   if (expectedValue !== undefined) {
-    return withPageDelta(`Entered ${text.length} characters into [${index}]. The field value was read back; this does not confirm a saved change.${settleNote(settled)}`, ctx, settled)
+    return withPageDelta(`Entered ${text.length} characters into [${index}]. The field value was read back; this does not confirm a saved change.${settleNote(settled)}`, ctx, settled, 'observed')
   }
   return withPageDelta(`Entered ${text.length} characters into [${index}].${settleNote(settled)}`, ctx, settled)
 }
@@ -520,9 +523,9 @@ async function selectAction(args: Record<string, unknown>, ctx: ActionContext): 
   }
   const settled = await waitForPageSettled(TYPE_SETTLE)
   if (!el.isConnected || !option.isConnected || el.selectedIndex !== optionIndex || !option.selected) {
-    return withPageDelta(`Selection was sent to [${index}], but could not be confirmed at readback. Observe again before continuing.${settleNote(settled)}`, ctx, settled)
+    return withPageDelta(`Selection was sent to [${index}], but could not be confirmed at readback. Observe again before continuing.${settleNote(settled)}`, ctx, settled, 'readback-unconfirmed')
   }
-  return withPageDelta(`Selected option ${optionIndex} in [${index}]. The control state was read back; this does not confirm a saved change.${settleNote(settled)}`, ctx, settled)
+  return withPageDelta(`Selected option ${optionIndex} in [${index}]. The control state was read back; this does not confirm a saved change.${settleNote(settled)}`, ctx, settled, 'observed')
 }
 
 /** Named control keys have layout-independent legacy codes used by Vue 2 widgets. */

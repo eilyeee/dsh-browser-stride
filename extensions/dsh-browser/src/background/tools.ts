@@ -9,6 +9,7 @@
  */
 
 import { DEFAULT_SNAPSHOT_MAX_CHARS } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
+import { parseToolFeedback } from '@eilyeee/dsh-browser-stride/src/tool-feedback.ts'
 import type { ToolError } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 import { parseElementRef } from '@eilyeee/dsh-browser-stride/src/contracts/ids.ts'
 import {
@@ -199,8 +200,8 @@ function contentScriptReceiverMissing(error: unknown): boolean {
   return error instanceof Error && error.message.includes('Receiving end does not exist')
 }
 
-function unavailable(message: string): ToolAnswer {
-  return { ok: false, error: { code: 'content-unavailable', message } }
+function unavailable(message: string, code: ToolError['code'] = 'content-unavailable'): ToolAnswer {
+  return { ok: false, error: { code, message } }
 }
 
 function tabMetadataSnapshot(
@@ -296,20 +297,20 @@ function approvalFailure(approval: ApprovalPrompt, authorization: Exclude<Approv
     case 'denied':
       return {
         ok: false,
-        error: { code: 'action-failed', message: `The user denied the browser approval request for "${approval.action}".` },
+        error: { code: 'approval-denied', message: `The user denied the browser approval request for "${approval.action}".` },
       }
     case 'unavailable':
       return {
         ok: false,
         error: {
-          code: 'action-failed',
+          code: 'approval-unavailable',
           message: `No browser side panel was available to receive or complete the approval request for "${approval.action}".`,
         },
       }
     case 'timed-out':
       return {
         ok: false,
-        error: { code: 'timeout', message: `The browser approval request for "${approval.action}" timed out before the user responded.` },
+        error: { code: 'approval-timeout', message: `The browser approval request for "${approval.action}" timed out before the user responded.` },
       }
     case 'cancelled':
       return {
@@ -518,7 +519,7 @@ async function dispatchOnce(
   if (frameId < 0) return { ok: false, error: { code: 'action-failed', message: 'frame must be a non-negative integer.' } }
   const frame = frames.find((candidate) => candidate.frameId === frameId)
   if (frame === undefined) {
-    return unavailable(`Frame ${frameId} does not exist or has navigated. Call browser_snapshot again.`)
+    return unavailable(`Frame ${frameId} does not exist or has navigated. Call browser_snapshot again.`, 'target-navigated')
   }
   // Each transport repeats this check after its own asynchronous preparation
   // and commits only immediately before delivering the page operation.
@@ -603,10 +604,12 @@ async function dispatchOnce(
   const candidatePageContent = requestPageDelta ? answerPageContent(response) : undefined
   const pageContent = candidatePageContent !== undefined && candidatePageContent.length <= deltaChars ? candidatePageContent : undefined
   const boundedStatus = text.length <= MAX_ACTION_STATUS_CHARS ? text : `${text.slice(0, MAX_ACTION_STATUS_CHARS - 1)}…`
+  const feedback = parseToolFeedback((response.result as { feedback?: unknown } | undefined)?.feedback)
   return {
     ok: true,
     result: {
       text: pageContent === undefined ? text : wrapActionDelta(boundedStatus, pageContent, frame, budget.maxChars),
+      ...(feedback === undefined ? {} : { feedback }),
     },
   }
 }
@@ -938,7 +941,7 @@ function validateElementTarget(call: ToolCall, tabId: number, frames: TabFrame[]
   const frame = frames.find((candidate) => candidate.frameId === frameId)
   const snapshotted = snapshotDocumentsByTab.get(tabId)?.get(frameId)
   if (frame === undefined || snapshotted === undefined || snapshotted !== frameDocumentKey(frame)) {
-    return unavailable('The element reference does not belong to the current document. Call browser_snapshot again for current frame and index values.')
+    return unavailable('The element reference does not belong to the current document. Call browser_snapshot again for current frame and index values.', 'target-navigated')
   }
   return undefined
 }

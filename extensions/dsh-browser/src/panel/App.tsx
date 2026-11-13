@@ -83,11 +83,12 @@ import {
 /** One rendered conversation row. */
 import {
   appendLiveRow,
-  completeLastTool,
+  completeToolResult,
   mergeHistoryRows,
   pendingQuestionFromFrame,
   resolvedQuestionFromFrame,
   rowFromEvent,
+  toolCallKey,
   settleToolRows,
   toolSummary,
   type Row,
@@ -1038,6 +1039,9 @@ export function App(): React.JSX.Element {
       return
     }
     if (payload.sessionId !== sessionRef.current) return
+    if (payload.event.type === 'tool/result') {
+      setRows((prev) => completeToolResult(prev, payload.event!, nextSeq()))
+    }
     const row = rowFromEvent(payload.event, locale)
     if (row !== null) {
       setRows((prev) => appendLiveRow(prev, row.kind, row.text, nextSeq(), row.images))
@@ -1046,12 +1050,10 @@ export function App(): React.JSX.Element {
     if (payload.event.type === 'tool/call') {
       setWorking(true)
       const summary = toolSummary(payload.event.data?.name ?? 'tool', payload.event.data?.arguments, locale)
-      setRows((prev) => appendLiveRow(prev, 'tool', summary, nextSeq()))
+      setRows((prev) => appendLiveRow(prev, 'tool', summary, nextSeq(), undefined, toolCallKey(payload.event!)))
       return
     }
     if (payload.event.type === 'tool/result') {
-      // 并入最后一行工具行：调用已完成（不新增行）。
-      setRows((prev) => completeLastTool(prev, nextSeq()))
       return
     }
   }
@@ -2315,7 +2317,7 @@ export function App(): React.JSX.Element {
           </div>
         )}
         {rows.map((row) => (
-          <div key={row.seq} className={`row ${row.kind}`} role={row.kind === 'failure' ? 'status' : undefined}>
+          <div key={row.seq} className={`row ${row.kind}`} role={row.kind === 'failure' || row.kind === 'feedback' ? 'status' : undefined}>
             {row.kind === 'assistant' && <span className="assistant-avatar"><img src={whaleUrl} alt={copy.app.assistant} /></span>}
             {row.kind === 'tool'
               ? <ToolActivity row={row} copy={copy} />

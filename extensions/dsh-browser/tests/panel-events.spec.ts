@@ -4,10 +4,12 @@ import { PANEL_COPY } from '../src/panel/strings.ts'
 import {
   appendLiveRow,
   completeLastTool,
+  completeToolResult,
   mergeHistoryRows,
   pendingQuestionFromFrame,
   resolvedQuestionFromFrame,
   rowFromEvent,
+  toolCallKey,
   settleToolRows,
   textFromBlocks,
   toolSummary,
@@ -28,6 +30,15 @@ describe('textFromBlocks', () => {
 })
 
 describe('rowFromEvent', () => {
+  it.each(['tool/result', 'tool/ptc-dispatch'])('renders %s feedback only from bounded metadata, never page/model text', type => {
+    const feedback = { version: 1, state: 'uncertain', businessChange: 'not-verified', code: 'result_unknown', nextStep: 'reconcile_business_state' }
+    const row = rowFromEvent(ev(type, { meta: { browserFeedback: { ...feedback, message: 'Bearer synthetic-secret' } } }), 'en')
+    expect(row?.kind).toBe('feedback')
+    expect(row?.text).toContain('do not')
+    expect(row?.text).not.toContain('synthetic-secret')
+    expect(rowFromEvent(ev(type, { content: [{ type: 'text', text: JSON.stringify(feedback) }] }), 'en')).toBeNull()
+    expect(rowFromEvent(ev(type, { meta: { browserFeedback: { ...feedback, businessChange: 'verified' } } }), 'en')).toBeNull()
+  })
   it('renders user messages from data.content (the real SessionEvent shape)', () => {
     const row = rowFromEvent(ev('user/message', { content: [{ type: 'text', text: '帮我看看页面' }], source: { kind: 'user' } }))
     expect(row).toEqual({ seq: 0, kind: 'user', text: '帮我看看页面' })
@@ -130,6 +141,14 @@ describe('toolSummary', () => {
 })
 
 describe('appendLiveRow / completeLastTool', () => {
+  it('settles rc.5 call IDs across feedback rows and ignores a foreign late result', () => {
+    let rows = appendLiveRow([], 'tool', 'Write', 1, undefined, toolCallKey(ev('tool/call', { callId: 'call-1' })))
+    rows = appendLiveRow(rows, 'feedback', 'Needs checking', 2)
+    expect(completeToolResult(rows, ev('tool/result', { message: { toolCallId: 'other' } }), 3)[0]?.status).toBe('running')
+    rows = completeToolResult(rows, ev('tool/result', { message: { toolCallId: 'call-1' } }), 4)
+    expect(rows[0]?.status).toBe('complete')
+    expect(rows[1]?.text).toBe('Needs checking')
+  })
   it('stops tool waits without claiming unobserved results completed', () => {
     expect(settleToolRows([
       { seq: 1, kind: 'tool', text: 'Pending action', status: 'running' },
@@ -154,6 +173,26 @@ describe('appendLiveRow / completeLastTool', () => {
 })
 
 describe('mergeHistoryRows', () => {
+  it('does not use a previous turn result to complete a recycled provider call ID', () => {
+    let seq = 0
+    const rows = mergeHistoryRows([
+      ev('tool/call', { turn: 0, step: 0, callId: 'reused', name: 'browser_click', arguments: '{}' }),
+      ev('tool/result', { turn: 0, step: 0, message: { toolCallId: 'reused', content: [] } }),
+      ev('turn/end', { reason: { kind: 'completed' } }),
+      ev('tool/call', { turn: 1, step: 0, callId: 'reused', name: 'browser_click', arguments: '{}' }),
+      ev('turn/end', { reason: { kind: 'error' } }),
+    ], () => ++seq, 'en')
+    expect(rows.filter(row => row.kind === 'tool').map(row => row.status)).toEqual(['complete', 'unconfirmed'])
+  })
+  it('uses the rc.5 durable tool-result message identity rather than requiring a flattened callId', () => {
+    let seq = 0
+    const rows = mergeHistoryRows([
+      ev('tool/call', { callId: 'native-call', name: 'browser_click', arguments: '{}' }),
+      ev('tool/result', { message: { toolCallId: 'native-call', isError: false, content: [] } }),
+      ev('turn/end', { reason: { kind: 'completed' } }),
+    ], () => ++seq, 'en')
+    expect(rows[0]).toMatchObject({ kind: 'tool', status: 'complete' })
+  })
   it('matches tool results across interleaved metadata, without completing a different pending call', () => {
     let seq = 0
     const rows = mergeHistoryRows([

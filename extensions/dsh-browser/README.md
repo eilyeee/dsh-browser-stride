@@ -18,6 +18,17 @@ Settings show Host, extension, DSH and wire versions. See the repository's [upda
 
 ## Development
 
+Matched development build 0.1.9 adds bounded operation feedback to native and
+nested browser results. The panel distinguishes an operation being sent from
+its page readback and from an unknown result. These states do not verify a
+business save. A known stale precondition permits a fresh observation and an
+alternative within existing access. After an uncertain write or unconfirmed
+field readback, the Agent can still observe but cannot issue another write in
+that turn; it must explain the uncertainty and ask the user. This supplements
+the existing ledger and does not add checkpoint recovery or automatic replay.
+Login or CAPTCHA handoff depends on the model's observations; this build does
+not provide a general authentication detector. Page text never grants access.
+
 From the repository root:
 
 ```sh

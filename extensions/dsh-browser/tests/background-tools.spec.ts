@@ -763,7 +763,7 @@ describe('dispatchToolCall', () => {
     expect(answer).toEqual({
       ok: false,
       error: {
-        code: 'action-failed',
+        code: 'approval-denied',
         message: 'The user denied the browser approval request for "browser_snapshot".',
       },
     })
@@ -783,7 +783,7 @@ describe('dispatchToolCall', () => {
     expect(answer).toEqual({
       ok: false,
       error: {
-        code: 'action-failed',
+        code: 'approval-unavailable',
         message: 'No browser side panel was available to receive or complete the approval request for "browser_press".',
       },
     })
@@ -799,7 +799,7 @@ describe('dispatchToolCall', () => {
     expect(answer).toEqual({
       ok: false,
       error: {
-        code: 'timeout',
+        code: 'approval-timeout',
         message: 'The browser approval request for "browser_press" timed out before the user responded.',
       },
     })

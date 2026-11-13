@@ -787,6 +787,15 @@ textarea:focus-visible {
   font-size: calc(12px * var(--ui-scale));
 }
 
+.row.feedback pre {
+  max-width: 100%;
+  padding: 7px 10px;
+  border-left: 3px solid var(--blue);
+  background: var(--blue-soft);
+  color: var(--muted);
+  font-size: calc(11.5px * var(--ui-scale));
+}
+
 .row.info pre {
   max-width: 92%;
   padding: 3px 8px;

@@ -99,6 +99,31 @@ describe('panel session transitions', () => {
     })
   }
 
+  it('settles a native tool result behind PTC feedback even when history refresh fails', async () => {
+    await renderConnected(null)
+    const original = rpc.getMockImplementation()!
+    rpc.mockImplementation(async (method, payload) => {
+      if (method === 'session.history') throw new Error('Synthetic history outage')
+      return original(method, payload)
+    })
+    const emit = (event: unknown, sid = 'session-current'): void => {
+      onEvent?.({ t: 'event', frame: { rpcId: 'nested-feedback', method: 'session/event', payload: { sessionId: sid, event } } })
+    }
+    await act(async () => {
+      emit({ type: 'turn/start', data: { turn: 0 } })
+      emit({ type: 'tool/call', data: { name: 'run_code', callId: 'root-call', arguments: '{}' } })
+      emit({ type: 'tool/ptc-dispatch', data: { meta: { browserFeedback: { version: 1, state: 'readback-unconfirmed', businessChange: 'not-verified' } } } })
+      emit({ type: 'tool/result', data: { message: { toolCallId: 'root-call', isError: false, content: [] } } })
+      emit({ type: 'turn/end', data: { turn: 0, reason: { kind: 'completed' } } })
+    })
+    expect(document.querySelectorAll('.row.feedback')).toHaveLength(1)
+    expect(document.querySelector('.row.feedback')?.textContent).toContain('not confirmed')
+    expect(document.querySelector('.tool-activity.unconfirmed')).toBeNull()
+    expect(document.querySelector('.tool-activity.complete')).not.toBeNull()
+    await act(async () => { emit({ type: 'tool/ptc-dispatch', data: { meta: { browserFeedback: { version: 1, state: 'uncertain', businessChange: 'not-verified' } } } }, 'session-saved') })
+    expect(document.querySelectorAll('.row.feedback')).toHaveLength(1)
+  })
+
   it.each(['delayed', 'rejected'] as const)('shows a live failed turn immediately with %s history and no prompt replay', async mode => {
     await renderConnected(null)
     const failure = { type: 'turn/end', seq: 4, data: { turn: 0, reason: {

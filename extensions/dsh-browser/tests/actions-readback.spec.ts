@@ -41,6 +41,7 @@ describe('basic form readback', () => {
     expect(input.value).toBe('')
     expect(result.text).toContain('could not be confirmed')
     expect(result.text).not.toContain('secret-test-value')
+    expect(result.feedback).toEqual({ version: 1, state: 'readback-unconfirmed', businessChange: 'not-verified' })
   })
 
   it('stops a replace operation when the target changes during its input event', async () => {

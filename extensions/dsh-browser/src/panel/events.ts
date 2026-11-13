@@ -10,14 +10,16 @@
 import { getUiLocale, type UiLocale } from '../i18n.ts'
 import { imageRefsFromBlocks, type ImageAttachmentRef } from './attachments.ts'
 import { PANEL_COPY } from './strings.ts'
+import { parseToolFeedback } from '@eilyeee/dsh-browser-stride/src/tool-feedback.ts'
 
 /** One rendered conversation row. */
 export interface Row {
   seq: number
-  kind: 'user' | 'assistant' | 'tool' | 'info' | 'failure'
+  kind: 'user' | 'assistant' | 'tool' | 'info' | 'failure' | 'feedback'
   text: string
   images?: ImageAttachmentRef[]
   status?: 'running' | 'complete' | 'unconfirmed'
+  pendingCallKeys?: string[]
 }
 
 /** Minimal view of a SessionEvent (payload in `data`). */
@@ -28,7 +30,7 @@ export interface SessionEventView {
   data?: {
     content?: unknown
     source?: { kind?: string }
-    message?: { content?: unknown; source?: { kind?: string } }
+    message?: { content?: unknown; source?: { kind?: string }; toolCallId?: string; isError?: boolean }
     turn?: number
     step?: number
     name?: string
@@ -36,6 +38,8 @@ export interface SessionEventView {
     callId?: string
     title?: unknown
     reason?: unknown
+    meta?: unknown
+    isError?: boolean
   }
 }
 
@@ -143,6 +147,16 @@ export function textFromBlocks(blocks: unknown): string {
 /** Map durable messages and failed turns to rows; tools are handled separately. */
 export function rowFromEvent(event: SessionEventView, locale: UiLocale = getUiLocale()): Row | null {
   switch (event.type) {
+    case 'tool/result':
+    case 'tool/ptc-dispatch': {
+      const meta = event.data?.meta
+      const feedback = parseToolFeedback(isRecord(meta) ? meta.browserFeedback : undefined)
+      if (feedback === undefined) return null
+      // Model/page text is never parsed as a UI instruction or status.
+      const copy = PANEL_COPY[locale].browserFeedback
+      return { seq: 0, kind: 'feedback', text: copy.states[feedback.state]
+        + (feedback.nextStep === undefined ? '' : ` ${copy.nextSteps[feedback.nextStep]}`) }
+    }
     case 'user/message': {
       // dsh 每轮把运行时常量上下文作为 source.kind='plugin' 的 user/message
       // 记入日志（如 <system-reminder> 注入内容）——它们不是用户消息，
@@ -206,13 +220,15 @@ export function appendLiveRow(
   text: string,
   seq: number,
   images?: ImageAttachmentRef[],
+  callKey?: string,
 ): Row[] {
   if (kind === 'tool') {
     const last = rows[rows.length - 1]
     if (last?.kind === 'tool') {
-      return [...rows.slice(0, -1), { seq, kind: 'tool', text: `${last.text} → ${text}`, status: 'running' }]
+      return [...rows.slice(0, -1), { seq, kind: 'tool', text: `${last.text} → ${text}`, status: 'running',
+        ...(callKey === undefined ? {} : { pendingCallKeys: [...last.pendingCallKeys ?? [], callKey] }) }]
     }
-    return [...rows, { seq, kind, text, status: 'running' }]
+    return [...rows, { seq, kind, text, status: 'running', ...(callKey === undefined ? {} : { pendingCallKeys: [callKey] }) }]
   }
   return [...rows, { seq, kind, text, ...(images === undefined || images.length === 0 ? {} : { images }) }]
 }
@@ -224,6 +240,22 @@ export function completeLastTool(rows: Row[], seq: number): Row[] {
     return [...rows.slice(0, -1), { ...last, seq, status: 'complete' }]
   }
   return rows
+}
+
+/** Settle the matching call even when a partial reply or PTC feedback follows it. */
+export function toolCallKey(event: SessionEventView): string | undefined {
+  const id = event.data?.message?.toolCallId ?? event.data?.callId
+  // Provider IDs need not be unique across requests or user turns.
+  return id === undefined ? undefined : JSON.stringify([event.data?.turn ?? null, event.data?.step ?? null, id])
+}
+export function completeToolResult(rows: Row[], event: SessionEventView, seq: number): Row[] {
+  const id = toolCallKey(event)
+  if (id === undefined) return completeLastTool(rows, seq)
+  return rows.map(row => {
+    if (row.kind !== 'tool' || !row.pendingCallKeys?.includes(id)) return row
+    const pendingCallKeys = row.pendingCallKeys.filter(value => value !== id)
+    return { ...row, seq, pendingCallKeys, status: pendingCallKeys.length === 0 ? 'complete' : 'running' }
+  })
 }
 
 /** A terminal turn stops presentation waits; it does not prove a tool result. */
@@ -241,40 +273,45 @@ export function mergeHistoryRows(
   // Results can arrive after metadata/messages have flushed a tool group.
   // Match native call identities across the entire authoritative history cut.
   const settledCalls = new Set(events.filter(event => event.type === 'tool/result')
-    .map(event => event.data?.callId).filter((id): id is string => typeof id === 'string'))
+    .map(toolCallKey).filter((id): id is string => typeof id === 'string'))
   let rows: Row[] = []
-  let pendingTool: { items: string[]; total: number; outstanding: number; anonymous: number } | null = null
+  let pendingTool: { items: string[]; total: number; outstanding: number; anonymous: number; ids: string[] } | null = null
   const flushTool = (): void => {
     if (pendingTool === null) return
     const shown = pendingTool.items.slice(0, 3)
     const label = pendingTool.total > shown.length
       ? PANEL_COPY[locale].tool.overflow(shown, pendingTool.total)
       : shown.join(' → ')
-    rows.push({ seq: nextSeq(), kind: 'tool', text: label, status: pendingTool.outstanding > 0 ? 'running' : 'complete' })
+    rows.push({ seq: nextSeq(), kind: 'tool', text: label, status: pendingTool.outstanding > 0 ? 'running' : 'complete',
+      ...(pendingTool.ids.length === 0 ? {} : { pendingCallKeys: [...pendingTool.ids] }) })
     pendingTool = null
   }
   for (const ev of events) {
     if (ev.type === 'tool/call') {
       const summary = toolSummary(ev.data?.name ?? 'tool', ev.data?.arguments, locale)
-      const callId = ev.data?.callId
+      const callId = toolCallKey(ev)
       const anonymous = typeof callId !== 'string' ? 1 : 0
       const outstanding = typeof callId === 'string' && settledCalls.has(callId) ? 0 : 1
-      if (pendingTool === null) pendingTool = { items: [summary], total: 1, outstanding, anonymous }
+      const ids = typeof callId === 'string' && outstanding > 0 ? [callId] : []
+      if (pendingTool === null) pendingTool = { items: [summary], total: 1, outstanding, anonymous, ids }
       else {
         pendingTool.items.push(summary)
         pendingTool.total += 1
         pendingTool.outstanding += outstanding
         pendingTool.anonymous += anonymous
+        pendingTool.ids.push(...ids)
       }
       continue
     }
     if (ev.type === 'tool/result') {
       // Legacy/test event views can omit callId. Such results can settle only
       // anonymous calls in their own group, never an identified pending call.
-      if (typeof ev.data?.callId !== 'string' && pendingTool !== null && pendingTool.anonymous > 0) {
+      if (typeof (ev.data?.message?.toolCallId ?? ev.data?.callId) !== 'string' && pendingTool !== null && pendingTool.anonymous > 0) {
         pendingTool.anonymous -= 1
         pendingTool.outstanding -= 1
       }
+      const feedback = rowFromEvent(ev, locale)
+      if (feedback !== null) { flushTool(); rows.push({ ...feedback, seq: nextSeq() }) }
       continue
     }
     flushTool()

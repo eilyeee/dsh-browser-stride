@@ -751,7 +751,7 @@ function selectedTargetIdentity(sessionId?: string): ToolTargetIdentity | undefi
   return tab == null ? undefined : { tabId: tab.tabId, windowId: tab.windowId, url: tab.url }
 }
 
-const pageAccessFailure = (): ToolAnswer => ({ ok: false, error: { code: 'content-unavailable', message: 'This page has not been authorized. Open it and click the DSH Stride toolbar icon to grant temporary access to this tab.' } })
+const pageAccessFailure = (): ToolAnswer => ({ ok: false, error: { code: 'permission-required', message: 'This page has not been authorized. Open it and click the DSH Stride toolbar icon to grant temporary access to this tab.' } })
 
 const staleTarget = (): ToolAnswer => ({ ok: false, error: { code: 'action-failed',
   message: 'The browser target or execution authority changed after this request arrived. Its result cannot be used; observe the selected page before a new action.' } })
@@ -1043,7 +1043,7 @@ async function ensureInitialTabBinding(sessionId?: string): Promise<boolean> {
 }
 
 function affinityFailure(kind: 'lost' | 'missing' | 'detached'): ToolAnswer {
-  if (kind === 'detached') return { ok: false, error: { code: 'action-failed', message: 'The user unbound this page. Browser tools cannot rebind it; the user must explicitly select a page in the extension.' } }
+  if (kind === 'detached') return { ok: false, error: { code: 'permission-required', message: 'The user unbound this page. Browser tools cannot rebind it; the user must explicitly select a page in the extension.' } }
   if (kind === 'lost') {
     return {
       ok: false,

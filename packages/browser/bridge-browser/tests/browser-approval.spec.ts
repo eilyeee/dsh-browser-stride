@@ -3,6 +3,29 @@ import { BrowserApprovalGate } from '../src/browser-approval.ts'
 import { BridgeToolError } from '../src/server.ts'
 
 describe('browser approval retry boundary', () => {
+  it('allows fresh observation and another method after a stale reference without applying an action', async () => {
+    const gate = new BrowserApprovalGate(), agent = {}
+    await expect(gate.request(agent, async () => { throw new BridgeToolError('element-stale', 'stale') }, 'browser_click')).rejects.toThrow('stale')
+    await expect(gate.request(agent, async () => 'fresh', 'browser_snapshot')).resolves.toBe('fresh')
+    await expect(gate.request(agent, async () => 'observed alternative', 'browser_click')).resolves.toBe('observed alternative')
+  })
+  it.each(['timeout', 'action-failed', 'content-unavailable'] as const)('blocks more writes after %s, retaining reads and Agent isolation', async code => {
+    const gate = new BrowserApprovalGate(), agent = {}, write = vi.fn(async () => 'unsafe')
+    await expect(gate.request(agent, async () => { throw new BridgeToolError(code, 'synthetic failure') }, 'browser_click')).rejects.toThrow('synthetic failure')
+    await expect(gate.request(agent, write, 'browser_click')).rejects.toThrow('unconfirmed result')
+    expect(write).not.toHaveBeenCalled()
+    await expect(gate.request(agent, async () => 'observed', 'browser_snapshot')).resolves.toBe('observed')
+    await expect(gate.request(agent, write, 'browser_click')).rejects.toThrow('unconfirmed result')
+    await expect(gate.request({}, write, 'browser_click')).resolves.toBe('unsafe')
+    gate.reset(agent)
+    await expect(gate.request(agent, async () => 'new user turn', 'browser_click')).resolves.toBe('new user turn')
+  })
+  it('also fences an unconfirmed successful field readback without claiming business success', async () => {
+    const gate = new BrowserApprovalGate(), agent = {}
+    await gate.request(agent, async () => ({ feedback: { version: 1, state: 'readback-unconfirmed', businessChange: 'not-verified' } }), 'browser_type')
+    await expect(gate.request(agent, async () => 'repeat', 'browser_type')).rejects.toThrow('Do not issue another write')
+    await expect(gate.request(agent, async () => 'readback', 'browser_get_text')).resolves.toBe('readback')
+  })
   it('releases only an authenticated no-selection failure for new observations or another method', async () => {
     const gate = new BrowserApprovalGate(), agent = {}, work = vi.fn(async () => 'fresh observation')
     let reject!: (error: Error) => void
@@ -53,6 +76,7 @@ describe('browser approval retry boundary', () => {
   it.each([
     ['timeout', 'The browser approval request for "browser_snapshot" timed out before the user responded.'],
     ['action-failed', 'No browser side panel was available to receive or complete the approval request for "browser_snapshot".'],
+    ['action-failed', 'The user denied the browser approval request for "browser_snapshot".'],
   ] as const)('stops %s approval retries without altering the failure code', async (code, message) => {
     const gate = new BrowserApprovalGate(), agent = {}, work = vi.fn(async () => 'read')
     await expect(gate.request(agent, async () => { throw new BridgeToolError(code, message) })).rejects.toMatchObject({ code, message: expect.stringContaining('send a new message') })
@@ -61,10 +85,10 @@ describe('browser approval retry boundary', () => {
     gate.reset(agent)
     await expect(gate.request(agent, work)).resolves.toBe('read')
   })
-  it('does not block on page timeouts, denied approvals or untrusted page errors', async () => {
+  it('does not block on read timeouts or untrusted page errors', async () => {
     const gate = new BrowserApprovalGate(), agent = {}
-    for (const error of [new BridgeToolError('timeout', 'browser_wait timed out'), new BridgeToolError('action-failed', 'The user denied the browser approval request for "browser_snapshot".'), new Error('The browser approval request for "browser_snapshot" timed out before the user responded.')]) {
-      await expect(gate.request(agent, async () => { throw error })).rejects.toBe(error)
+    for (const error of [new BridgeToolError('timeout', 'browser_wait timed out'), new Error('The browser approval request for "browser_snapshot" timed out before the user responded.')]) {
+      await expect(gate.request(agent, async () => { throw error }, 'browser_snapshot')).rejects.toBe(error)
       await expect(gate.request(agent, async () => 'ok')).resolves.toBe('ok')
     }
   })

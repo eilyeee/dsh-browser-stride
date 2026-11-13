@@ -108,6 +108,13 @@ export function isRunTabMutation(name: string): boolean { return TAB_TOOLS.has(n
 
 /** Error codes a tool call may settle with. Open set: consumers must tolerate unknown codes. */
 export type ToolErrorCode =
+  | 'write-blocked-unconfirmed'
+  | 'element-stale'
+  | 'target-navigated'
+  | 'permission-required'
+  | 'approval-denied'
+  | 'approval-unavailable'
+  | 'approval-timeout'
   | 'no-active-tab'
   | 'content-unavailable'
   | 'design-zoom-not-selected'

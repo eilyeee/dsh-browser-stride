@@ -13,7 +13,8 @@
  * current wire codes so the browser tools can adopt the taxonomy before the
  * whole protocol changes.
  *
- * These rules are not yet wired into the runtime.
+ * The runtime feedback adapter uses this catalog for bounded diagnostics.
+ * Full action-fact outcome and recovery integration remains separate.
  *
  * @module
  */

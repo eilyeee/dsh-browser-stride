@@ -21,6 +21,14 @@ package versions currently identify development builds, not supported releases.
 
 ### Added
 
+- Development build 0.1.9 records bounded browser-operation feedback for the
+  model and panel, including nested `run_code` results and restored history.
+  It distinguishes precondition failures, dispatched actions, page readback
+  and unknown results; none establishes a saved business change. Known stale
+  references can be replaced after a fresh observation within existing access.
+- Uncertain writes and unconfirmed field readback block further writes by the
+  same Agent in that turn while permitting observation. A new user turn does
+  not restore page grants or resolve an uncertain managed-run ledger entry.
 - Development build 0.1.7 lets the panel import authorized control-group page
   titles and URLs into unsaved task-material drafts. Imported roles remain
   unknown; document URLs are deduplicated and use the shared credential-URL
@@ -36,6 +44,9 @@ package versions currently identify development builds, not supported releases.
 
 ### Fixed
 
+- Tool history and live settlement use rc.5's `message.toolCallId`, including
+  when PTC feedback or partial replies separate the call and its result.
+  Received tool results no longer appear pending merely because of that shape.
 - Development build 0.1.8 shows failed Host turns in the conversation immediately
   and when restoring history. Fixed localized copy distinguishes structured
   HTTP 429 responses without displaying provider diagnostics. Earlier durable

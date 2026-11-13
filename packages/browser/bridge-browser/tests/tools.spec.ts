@@ -23,6 +23,20 @@ describe('registerBrowserTools', () => {
     return { ctx, bridge, requestTool, registered }
   }
 
+  it('projects bounded failure metadata and model feedback without diagnostic secrets', async () => {
+    const h = makeHarness(); registerBrowserTools(h.ctx, h.bridge, { toolTimeoutMs: 1000, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
+    const on = h.ctx.on as ReturnType<typeof vi.fn>
+    const hook = on.mock.calls.find(([name]) => name === 'tools/execute')![1]
+    const result = await hook({ name: 'browser_click' }, async () => ({ isError: true, error: { message: 'Bearer synthetic-secret', info: { name: 'BridgeToolError', code: 'element-stale' } }, content: [{ type: 'text', text: 'private diagnostic' }] }))
+    expect(result.isError).toBe(true)
+    expect(result.meta.browserFeedback).toMatchObject({ code: 'target_expired', state: 'not-applied', nextStep: 'reobserve' })
+    expect(JSON.stringify(result.content)).not.toContain('synthetic-secret')
+    expect(JSON.stringify(result.content)).not.toContain('private diagnostic')
+    const ordinary = { isError: false, value: { text: 'read' }, content: [{ type: 'text', text: 'read' }] }
+    expect(await hook({ name: 'browser_snapshot' }, async () => ordinary)).toBe(ordinary)
+    expect(await hook({ name: 'other_tool' }, async () => ordinary)).toBe(ordinary)
+  })
+
   it('blocks approval retries across browser tools until a new turn, without affecting another Agent', async () => {
     const h = makeHarness()
     const agent = { id: 'approval-session' }, other = { id: 'other-session' }
@@ -159,7 +173,7 @@ describe('registerBrowserTools', () => {
     const exec = { signal: new AbortController().signal }
     const result = await (tool.definition.execute as (args: unknown, e: { signal: AbortSignal }) => Promise<unknown>)({ elementRef: 'obs_test:3', frame: 7 }, exec)
     expect(requestTool).toHaveBeenCalledWith('browser_click', { elementRef: 'obs_test:3', frame: 7 }, exec.signal, 1_000)
-    expect(result).toEqual({ text: 'ok' })
+    expect(result).toMatchObject({ text: expect.stringContaining('businessChange'), feedback: { state: 'dispatched', businessChange: 'not-verified' } })
   })
 
   it('associates browser calls with the owning Agent session', async () => {
