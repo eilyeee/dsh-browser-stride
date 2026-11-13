@@ -2,6 +2,7 @@
 export const TASK_BRIEF_GET = 'bridge.taskBrief.get'
 export const TASK_BRIEF_SAVE = 'bridge.taskBrief.save'
 export const TASK_BRIEF_REVIEW = 'bridge.taskBrief.review'
+export const TASK_BRIEF_OPEN = 'bridge.taskBrief.open'
 export const MATERIAL_ROLES = ['unknown', 'requirement', 'design', 'api', 'reference'] as const
 export interface TaskMaterial { url: string; label: string; role: typeof MATERIAL_ROLES[number]; inferredRole?: Exclude<typeof MATERIAL_ROLES[number], 'unknown'> | undefined }
 export interface TaskCriterion { id: string; text: string }

@@ -15,7 +15,7 @@ import { lstat, readdir, rm } from 'node:fs/promises'
 import path from 'node:path'
 
 /** Stable failure codes surfaced to the panel. Open set: callers must tolerate growth. */
-export type SessionPurgeErrorCode = 'not-found' | 'running' | 'invalid-id' | 'internal'
+export type SessionPurgeErrorCode = 'not-found' | 'running' | 'invalid-id' | 'internal' | 'storage-unavailable'
 
 /** Error thrown by {@link purgeSessionFiles}; the server turns it into a wire error. */
 export class SessionPurgeError extends Error {

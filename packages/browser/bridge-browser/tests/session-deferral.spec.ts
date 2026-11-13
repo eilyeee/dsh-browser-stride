@@ -43,6 +43,19 @@ async function provisionalId(api: BrowserHostApi, rpcId = 'create-rpc'): Promise
 }
 
 describe('withSessionDeferral', () => {
+  it('retains a provisional Session for explicit notes without sending a prompt and preserves its project', async () => {
+    const { api, sessionCreate, sessionPrompt, sessionHistory } = apiHarness()
+    const wrapped = withSessionDeferral(api, true)
+    const result = await wrapped.call(request('session.create', { cwd: '/synthetic/project' }))
+    if (!result.ok) throw Error('create failed')
+    const sessionId = (result.value as { sessionId: string }).sessionId
+    await expect(wrapped.retainSession!(sessionId, new AbortController().signal)).resolves.toMatchObject({ ok: true })
+    expect(sessionCreate).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ payload: { cwd: '/synthetic/project', sessionId } }))
+    expect(sessionPrompt).not.toHaveBeenCalled()
+    await wrapped.call(request('session.history', { sessionId }))
+    expect(sessionHistory).toHaveBeenCalledOnce()
+  })
+
   afterEach(() => { vi.useRealTimers() })
 
   it('mints a provisional id without touching the Host', async () => {

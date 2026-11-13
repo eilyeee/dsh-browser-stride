@@ -1,12 +1,12 @@
 /**
- * Defer real session creation until the first prompt.
+ * Defer real session creation until the first prompt or explicit task-note save.
  *
  * The panel calls `session.create` as soon as it connects, but a session that
  * is opened and never used should leave zero trace in the store/GUI. This
  * wrapper answers `session.create` with a provisional id (minted locally,
  * nothing persisted), serves `session.history` for provisional ids as empty,
  * and materializes the real session — same id, original create payload — on
- * the first `session.prompt` for that id. Abandoned provisional ids are
+ * its first prompt or an explicit task-note save. Abandoned provisional ids are
  * pruned after {@link PROVISIONAL_TTL_MS}.
  *
  * Provisional sessions also answer `session.models` from the host-wide
@@ -43,7 +43,7 @@ interface ProvisionalEntry {
 /**
  * Wrap the gateway sessions API so `session.create` returns a provisional id
  * without creating anything; the real session materializes on the first
- * `session.prompt` for that id.
+ * `session.prompt` or explicit task-note save for that id.
  *
  * @param api - Gateway API implementation.
  * @param enabled - Whether deferral is active; false returns the API untouched.
@@ -72,6 +72,7 @@ export function withSessionDeferral(
     typeof payload.sessionId === 'string' ? payload.sessionId : `session-${crypto.randomUUID()}`
 
   async function materialize(sessionId: string, entry: ProvisionalEntry, signal: AbortSignal): Promise<HostRpcResult> {
+    signal.throwIfAborted()
     if (!entry.materialized) {
       const created = await api.call({
         rpcId: crypto.randomUUID(),
@@ -99,7 +100,23 @@ export function withSessionDeferral(
     return { ok: true, value: { sessionId } }
   }
 
+  async function retainSession(sessionId: string, signal: AbortSignal): Promise<HostRpcResult> {
+    signal.throwIfAborted()
+    const entry = provisional.get(sessionId)
+    if (entry === undefined) return api.call({ rpcId: crypto.randomUUID(), method: 'session.history', payload: { sessionId }, signal })
+    const existing = materializing.get(sessionId)
+    const pending = existing ?? materialize(sessionId, entry, signal)
+    if (existing === undefined) {
+      materializing.set(sessionId, pending)
+      void pending.then(() => { materializing.delete(sessionId) }, () => { materializing.delete(sessionId) })
+    }
+    const result = await pending
+    signal.throwIfAborted()
+    return result
+  }
+
   return {
+    retainSession,
     async call(call: HostRpcCall): Promise<HostRpcResult> {
       if (call.method === 'session.create') {
         if (!isRecord(call.payload)) {
@@ -151,18 +168,8 @@ export function withSessionDeferral(
       if (call.method !== 'session.prompt') return api.call(call)
       const sessionId = sessionIdOf(call.payload)
       if (sessionId === undefined) return api.call(call)
-      const entry = provisional.get(sessionId)
-      if (entry === undefined) return api.call(call)
-      const existing = materializing.get(sessionId)
-      const pending = existing ?? materialize(sessionId, entry, call.signal)
-      if (existing === undefined) {
-        materializing.set(sessionId, pending)
-        void pending.then(
-          () => { materializing.delete(sessionId) },
-          () => { materializing.delete(sessionId) },
-        )
-      }
-      const created = await pending
+      if (!provisional.has(sessionId)) return api.call(call)
+      const created = await retainSession(sessionId, call.signal)
       if (!created.ok) return created
       return api.call(call)
     },

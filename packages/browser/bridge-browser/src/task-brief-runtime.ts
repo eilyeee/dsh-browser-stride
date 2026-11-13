@@ -15,13 +15,28 @@ export function taskBriefMessage(brief: TaskBrief) {
   return createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'stride-task-notes', form: 'snapshot',
     sections: [{ name: 'stride-task-notes', text }] } })
 }
-export function registerTaskBrief(ctx: Context, store: TaskBriefStore): void {
+export function registerTaskBrief(ctx: Context, store: TaskBriefStore | undefined): void {
+  const notes = () => { if (store === undefined) throw new TaskBriefError('storage-unavailable'); return store }
   const versions = new WeakMap<object, number>()
+  const unavailable = new WeakSet<object>()
   ctx.on('agent/pre-step', async (payload, next) => {
     const decision = await next()
     if (decision.kind !== 'enter') return decision
-    const brief = store.get(String(payload.agent.id))
-    if (brief.version === 0 || (versions.get(payload.agent) === brief.version && !payload.messages.some(item => item.source.kind === 'user'))) return decision
+    let brief: TaskBrief
+    try { brief = notes().get(String(payload.agent.id)) }
+    catch {
+      versions.delete(payload.agent)
+      if (unavailable.has(payload.agent) && !payload.messages.some(item => item.source.kind === 'user')) return decision
+      unavailable.add(payload.agent)
+      ctx.logger?.warn('Task notes are unavailable; continuing without saved-note context')
+      const text = 'Saved task notes are currently unavailable. This does not mean they are empty, deleted or completed. '
+        + 'Do not rely on earlier saved-note snapshots as current. Plain conversation can continue. For work needing missing project, material or acceptance details, obtain them from current user instructions or ask the user. '
+        + 'Do not claim notes were read, saved or reviewed. Browser authorization, working-directory limits and uncertain-write fences are unchanged; never replay a save to recover notes.'
+      return { ...decision, messages: [...decision.messages, createUserMessage({ content: [{ type: 'text', text }],
+        source: { kind: 'stride-task-notes', form: 'snapshot', sections: [{ name: 'stride-task-notes', text }] } })] }
+    }
+    const recovered = unavailable.delete(payload.agent)
+    if (!recovered && (brief.version === 0 || (versions.get(payload.agent) === brief.version && !payload.messages.some(item => item.source.kind === 'user')))) return decision
     versions.set(payload.agent, brief.version)
     return { ...decision, messages: [...decision.messages, taskBriefMessage(brief)] }
   })
@@ -39,13 +54,14 @@ export function registerTaskBrief(ctx: Context, store: TaskBriefStore): void {
       const a = args as { action: string; version?: number; json?: string }
       const sid = exec.agent === undefined ? undefined : String(exec.agent.id)
       if (sid === undefined) throw new TaskBriefError('bad-request')
-      if (a.action === 'read') return { text: JSON.stringify(store.get(sid)) }
+      const current = notes()
+      if (a.action === 'read') return { text: JSON.stringify(current.get(sid)) }
       if (!Number.isSafeInteger(a.version) || typeof a.json !== 'string' || a.json.length > 40000) throw new TaskBriefError('bad-request')
       let input: unknown
       try { input = JSON.parse(a.json) } catch { throw new TaskBriefError('bad-request') }
-      const brief = a.action === 'record' ? await store.save(sid, a.version!, input as TaskBriefInput, 'model', exec.signal)
-        : a.action === 'report' ? await store.report(sid, a.version!, input, exec.signal)
-        : a.action === 'classify' ? await store.classify(sid, a.version!, input, exec.signal) : undefined
+      const brief = a.action === 'record' ? await current.save(sid, a.version!, input as TaskBriefInput, 'model', exec.signal)
+        : a.action === 'report' ? await current.report(sid, a.version!, input, exec.signal)
+        : a.action === 'classify' ? await current.classify(sid, a.version!, input, exec.signal) : undefined
       if (brief === undefined) throw new TaskBriefError('bad-request')
       return { text: JSON.stringify(brief) }
     },

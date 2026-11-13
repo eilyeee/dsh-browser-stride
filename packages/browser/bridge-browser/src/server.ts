@@ -56,7 +56,8 @@ import type { PairingStore } from './pairing.ts'
 import type { BrowserRunStore, BrowserRunExecution } from './run-store.ts'
 import { browserRunPanelRpc, browserRunPanelFailure, type RunPanelStore } from './run-panel.ts'
 import { TaskBriefError, taskBriefInputSchema, type TaskBriefStore } from './task-brief.ts'
-import { TASK_BRIEF_GET, TASK_BRIEF_SAVE, TASK_BRIEF_REVIEW } from './task-brief-contract.ts'
+import { TASK_BRIEF_GET, TASK_BRIEF_SAVE, TASK_BRIEF_REVIEW, TASK_BRIEF_OPEN } from './task-brief-contract.ts'
+import { briefSessionItems, openSessionBrief, saveSessionBrief } from './task-brief-sessions.ts'
 
 /**
  * Host management methods that must not be granted by browser pairing alone.
@@ -77,6 +78,7 @@ const PRIVILEGED_METHODS = new Set([
 /** Session mutations whose WebSocket arrival order is behaviorally significant. */
 const ORDERED_SESSION_METHODS = new Set([
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
+  TASK_BRIEF_GET, TASK_BRIEF_SAVE, TASK_BRIEF_OPEN, TASK_BRIEF_REVIEW,
   'session.prompt',
   'session.cancel',
 ])
@@ -518,6 +520,7 @@ export class BridgeServer {
           maxInteractiveItems: Math.min(this.deps.caps.maxInteractiveItems, frame.caps.maxInteractiveItems),
           ...(frame.caps.taskTargetLoss === true && this.deps.runs?.pauseLostTargetTask !== undefined ? { taskTargetLoss: true } : {}),
           ...(frame.caps.taskNotes === true && this.deps.briefs !== undefined ? { taskNotes: true } : {}),
+          ...(frame.caps.taskNotes === true && this.deps.caps.taskNotesUnavailable === true ? { taskNotesUnavailable: true } : {}),
           ...(this.deps.caps.release === undefined ? {} : { release: this.deps.caps.release }),
         }
         authenticating = true
@@ -639,7 +642,7 @@ export class BridgeServer {
     if (this.current !== conn || conn.abort.signal.aborted) return
     if (frame.method.startsWith('bridge.taskBrief.')) {
       try {
-        if (this.deps.briefs === undefined) throw new TaskBriefError('not-found')
+        if (this.deps.briefs === undefined) throw new TaskBriefError('storage-unavailable')
         const base = { sessionId: z.string().min(1).max(200) }
         const version = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
         let value
@@ -648,7 +651,10 @@ export class BridgeServer {
           value = this.deps.briefs.get(payload.sessionId)
         } else if (frame.method === TASK_BRIEF_SAVE) {
           const payload = z.strictObject({ ...base, version, input: taskBriefInputSchema }).parse(frame.payload)
-          value = await this.deps.briefs.save(payload.sessionId, payload.version, payload.input, 'user', conn.abort.signal)
+          value = await saveSessionBrief(this.deps.api, this.deps.briefs, payload.sessionId, payload.version, payload.input, conn.abort.signal)
+        } else if (frame.method === TASK_BRIEF_OPEN) {
+          const payload = z.strictObject(base).parse(frame.payload)
+          value = await openSessionBrief(this.deps.api, this.deps.briefs, payload.sessionId, conn.abort.signal)
         } else if (frame.method === TASK_BRIEF_REVIEW) {
           const payload = z.strictObject({ ...base, version, criterionId: z.string().min(1).max(200), confirmed: z.boolean() }).parse(frame.payload)
           value = await this.deps.briefs.review(payload.sessionId, payload.version, payload.criterionId, payload.confirmed, conn.abort.signal)
@@ -885,7 +891,8 @@ export class BridgeServer {
       if (frame.method === 'session.list' && result.ok && isRecord(result.value) && Array.isArray(result.value.items)) {
         const waiting = new Set(this.deps.runs?.list().filter(run => run.task !== undefined
           && !['completed', 'failed', 'stopped'].includes(run.state)).map(run => String(run.sessionId)))
-        result = { ok: true, value: { ...result.value, items: result.value.items.map(item =>
+        const items = briefSessionItems(result.value.items, this.deps.briefs, isRecord(frame.payload) && Object.keys(frame.payload).length === 0)
+        result = { ok: true, value: { ...result.value, items: items.map(item =>
           isRecord(item) && typeof item.sessionId === 'string' && waiting.has(item.sessionId) ? { ...item, blank: false } : item) } }
       }
       sendFrame(conn.ws, {

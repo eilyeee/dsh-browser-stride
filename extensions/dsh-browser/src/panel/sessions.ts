@@ -7,6 +7,7 @@ export interface SessionPickerEntry {
   updatedAt: number
   running: boolean
   blank: boolean
+  notesOnly?: boolean
   cwd?: string
   origin?: 'subagent'
   projections?: {

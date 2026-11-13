@@ -39,6 +39,8 @@ export interface HostEventFrame {
 /** API surface the WebSocket carrier needs from a dsh Host. */
 export interface BrowserHostApi {
   call(call: HostRpcCall): Promise<HostRpcResult>
+  /** Retain an already-created provisional Session without starting an Agent turn. */
+  retainSession?(sessionId: string, signal: AbortSignal): Promise<HostRpcResult>
   events(signal: AbortSignal): AsyncIterable<HostEventFrame>
   respond(rpcId: string, result: RespondResult, signal: AbortSignal): Promise<unknown>
 }

@@ -186,6 +186,8 @@ export interface BridgeCaps {
   designViewZoom?: boolean
   /** Session task notes and per-criterion reports; not execution authority. */
   taskNotes?: boolean
+  /** Host could not open the optional notes store; chat remains available. */
+  taskNotesUnavailable?: boolean
   /** Informational installed versions, independent of wire compatibility. */
   release?: { bridgeVersion: string; dshVersion: string }
 }
@@ -379,6 +381,8 @@ function isCaps(value: unknown): value is BridgeCaps {
     && (caps.layoutMetrics === undefined || typeof caps.layoutMetrics === 'boolean')
     && (caps.designViewZoom === undefined || typeof caps.designViewZoom === 'boolean')
     && (caps.taskNotes === undefined || typeof caps.taskNotes === 'boolean')
+    && (caps.taskNotesUnavailable === undefined || typeof caps.taskNotesUnavailable === 'boolean')
+    && !(caps.taskNotes === true && caps.taskNotesUnavailable === true)
     && (caps.release === undefined || (typeof caps.release === 'object' && caps.release !== null
       && ['bridgeVersion', 'dshVersion'].every(key => {
         const value = (caps.release as Record<string, unknown>)[key]

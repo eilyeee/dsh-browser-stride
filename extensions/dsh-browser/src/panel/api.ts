@@ -53,6 +53,7 @@ interface StatusMessage {
   caps: BridgeCaps | null
   connectionDisconnected?: boolean
   hasCredential?: boolean
+  hostIdentity?: string
 }
 
 interface EventMessage {
@@ -126,7 +127,7 @@ export interface PanelApi {
   onBrowserPairing(callback: (status: BrowserPairingStatus) => void): () => void
   rpc<T = unknown>(method: string, payload?: unknown): Promise<T>
   respond(rpcId: string, result: RespondResult): Promise<unknown>
-  onStatus(callback: (state: BridgeState, caps: BridgeCaps | null, connection?: { connectionDisconnected?: boolean; hasCredential?: boolean }) => void): () => void
+  onStatus(callback: (state: BridgeState, caps: BridgeCaps | null, connection?: { connectionDisconnected?: boolean; hasCredential?: boolean; hostIdentity?: string }) => void): () => void
   onEvent(callback: (frame: ServerFrame) => void): () => void
   onApprovalRequest(callback: (request: ApprovalRequest) => void): () => void
   onApprovalResolved(callback: (id: string) => void): () => void
@@ -225,8 +226,9 @@ export function connectPanel(): PanelApi {
         break
       case 'status':
         for (const listener of statusListeners) {
-          if (msg.connectionDisconnected === undefined && msg.hasCredential === undefined) listener(msg.state, msg.caps)
-          else listener(msg.state, msg.caps, { connectionDisconnected: msg.connectionDisconnected, hasCredential: msg.hasCredential })
+          if (msg.connectionDisconnected === undefined && msg.hasCredential === undefined && msg.hostIdentity === undefined) listener(msg.state, msg.caps)
+          else listener(msg.state, msg.caps, { connectionDisconnected: msg.connectionDisconnected, hasCredential: msg.hasCredential,
+            ...(typeof msg.hostIdentity === 'string' ? { hostIdentity: msg.hostIdentity } : {}) })
         }
         break
       case 'event':

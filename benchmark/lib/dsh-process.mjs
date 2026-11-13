@@ -56,6 +56,7 @@ export async function startDshBackend({
   startUrl,
   toolProbe,
   extraPatch,
+  deferSessionCreate = false,
 }) {
   const backendRoot = join(runtimeRoot, backend)
   const sessionRoot = join(backendRoot, 'sessions')
@@ -102,6 +103,7 @@ export async function startDshBackend({
       DSH_EXT_TOKEN: adminToken,
       DSH_PERMISSION_MODE: 'workspace-write',
       DSH_TELEMETRY_DISABLED: '1',
+      BENCHMARK_DEFER_SESSION_CREATE: deferSessionCreate ? '1' : '0',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })

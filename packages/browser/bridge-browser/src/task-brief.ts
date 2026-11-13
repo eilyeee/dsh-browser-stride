@@ -49,7 +49,7 @@ function specification(profile: string) {
 }
 type BriefDomain = Domain<ReturnType<typeof specification>>
 export class TaskBriefError extends Error {
-  constructor(readonly code: 'bad-request' | 'stale-version' | 'user-edited' | 'storage-unavailable' | 'closed' | 'cancelled' | 'not-found' | 'limit') { super(`Task notes: ${code}`) }
+  constructor(readonly code: 'bad-request' | 'stale-version' | 'user-edited' | 'storage-unavailable' | 'session-unavailable' | 'closed' | 'cancelled' | 'not-found' | 'limit') { super(`Task notes: ${code}`) }
 }
 export class TaskBriefStore {
   private tail: Promise<void> = Promise.resolve()
@@ -71,6 +71,12 @@ export class TaskBriefStore {
     const record = this.domain.table('briefs').get(sessionId)
     return structuredClone(record ?? { sessionId, version: 0, updatedAt: 0, userEdited: false,
       goal: '', projectPath: '', materials: [], criteria: [], progress: [] })
+  }
+  /** Saved metadata only; listing never creates Sessions or grants access. */
+  list(): TaskBrief[] {
+    if (this.closed) throw new TaskBriefError('closed')
+    if (this.faulted) throw new TaskBriefError('storage-unavailable')
+    return [...this.domain.table('briefs').entries()].map(([, value]) => structuredClone(value))
   }
   save(sessionId: string, version: number, input: TaskBriefInput, author: 'user' | 'model', signal?: AbortSignal): Promise<TaskBrief> {
     return this.mutate(sessionId, version, signal, old => {

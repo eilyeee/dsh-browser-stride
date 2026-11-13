@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { UiLocale } from '../i18n.ts'
 import type { PanelApi } from './api.ts'
+import { clearBriefDraft, readBriefDraft, writeBriefDraft } from './task-brief-drafts.ts'
 import { TASK_BRIEF_GET, TASK_BRIEF_SAVE, TASK_BRIEF_REVIEW, MATERIAL_ROLES,
   type TaskBrief, type TaskBriefInput } from '@eilyeee/dsh-browser-stride/src/task-brief-contract.ts'
 
@@ -10,6 +11,9 @@ const COPY = {
     save: '保存资料', reload: '重新载入', discard: '重新载入（放弃未保存修改）', saved: '已保存', loading: '正在读取…',
     error: '资料读取或保存失败。请重新载入后核对；过期版本不会覆盖现有资料。', empty: '还没有验收条件。可填写，或让模型根据本轮需求整理。',
     badInput: '请检查资料格式：材料需为不含凭据的 HTTP(S) 链接，最多 8 个；验收条件最多 16 条。', stale: '资料已被更新，请先重新载入核对。当前修改没有覆盖新记录。',
+    restored: '已保留未保存草稿。连接恢复后可继续编辑；保存时仍会检查资料版本。',
+    unavailable: '任务资料暂不可用，聊天可以继续。这不代表资料已清空；请检查 Host 存储，恢复后再读回核对。',
+    sessionUnavailable: '当前对话未能保留，资料尚未确认保存。草稿已保留，请重新连接后核对。',
     provenance: '以下是模型报告的进度和观察依据。核对后可确认；它不会改变托管任务的完成状态。',
     pending: '待实现', implemented: '模型报告已实现', blocked: '缺少条件', unverified: '尚未核验', observed: '模型已观察到', uncertain: '结果不明',
     confirmed: '用户已核验', confirm: '确认核验通过', undo: '撤销核验确认', next: '下一步', noEvidence: '尚无观察依据', export: '下载验收记录', inferred: '模型建议',
@@ -19,6 +23,9 @@ const COPY = {
     save: 'Save notes', reload: 'Reload', discard: 'Reload (discard unsaved edits)', saved: 'Saved', loading: 'Loading…',
     error: 'Could not read or save notes. Reload and check them; stale versions cannot overwrite existing notes.', empty: 'No acceptance criteria yet. Add them or ask the model to organize this task.',
     badInput: 'Check the input: up to 8 HTTP(S) links without credentials and 16 acceptance criteria.', stale: 'The notes changed. Reload and check them; your edits did not overwrite the newer record.',
+    restored: 'Unsaved draft retained. Continue editing after reconnecting; saving still checks the record version.',
+    unavailable: 'Task notes are unavailable; chat can continue. This does not mean notes were cleared. Check Host storage, then read back after recovery.',
+    sessionUnavailable: 'The conversation could not be retained, so saving notes was not confirmed. Your draft is retained; reconnect and check it.',
     provenance: 'Progress and evidence below are model reports. Confirm after reviewing; this does not change a managed task verdict.',
     pending: 'Pending', implemented: 'Model reports implemented', blocked: 'Missing conditions', unverified: 'Not checked', observed: 'Model observed', uncertain: 'Uncertain result',
     confirmed: 'User reviewed', confirm: 'Confirm review passed', undo: 'Undo review confirmation', next: 'Next step', noEvidence: 'No observation evidence yet', export: 'Download acceptance record', inferred: 'Model suggests',
@@ -26,6 +33,8 @@ const COPY = {
 } as const
 function errorMessage(error: unknown, locale: UiLocale): string {
   const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined
+  if (code === 'storage-unavailable') return COPY[locale].unavailable
+  if (code === 'session-unavailable') return COPY[locale].sessionUnavailable
   return code === 'bad-request' ? COPY[locale].badInput : code === 'stale-version' ? COPY[locale].stale : COPY[locale].error
 }
 function inputFrom(brief: TaskBrief): TaskBriefInput {
@@ -53,10 +62,12 @@ export function acceptanceMarkdown(brief: TaskBrief, locale: UiLocale): string {
     }),
   ].join('\n')
 }
-export function TaskBriefPanel({ api, sessionId, supported, connected, locale, onProjectChat, canStartProject = true }: {
+export function TaskBriefPanel({ api, sessionId, supported, connected, locale, onProjectChat, canStartProject = true, hostIdentity = 'panel', unavailable = false }: {
   api: Pick<PanelApi, 'rpc'>; sessionId: string | null; supported: boolean; connected: boolean; locale: UiLocale;
   onProjectChat: (brief: TaskBrief) => void
   canStartProject?: boolean
+  hostIdentity?: string
+  unavailable?: boolean
 }) {
   const c = COPY[locale]
   const [brief, setBrief] = useState<TaskBrief | null>(null)
@@ -71,14 +82,24 @@ export function TaskBriefPanel({ api, sessionId, supported, connected, locale, o
   const epoch = useRef(0)
   const versionRef = useRef(0)
   const readRef = useRef<() => Promise<void>>(async () => {})
+  const draftToken = useRef<object | undefined>(undefined)
   function apply(next: TaskBrief) {
+    if (sessionId !== null) clearBriefDraft(api, hostIdentity, sessionId, draftToken.current)
+    draftToken.current = undefined
     versionRef.current = next.version
     setBrief(next); setDraft(inputFrom(next)); setCriteriaText(next.criteria.map(item => item.text).join('\n'))
     dirtyRef.current = false; setDirty(false)
   }
   useEffect(() => {
+    const cached = sessionId === null ? undefined : readBriefDraft(api, hostIdentity, sessionId)
+    setBrief(cached?.brief ?? null); setDraft(cached?.input ?? null); setCriteriaText(cached?.criteriaText ?? '')
+    dirtyRef.current = cached !== undefined; setDirty(cached !== undefined)
+    draftToken.current = cached?.token; versionRef.current = cached?.brief.version ?? 0
+    setNotice(cached === undefined ? '' : c.restored)
+  }, [api, hostIdentity, sessionId, c.restored])
+  useEffect(() => {
     const generation = ++epoch.current
-    setBrief(null); setDraft(null); setNotice(''); setBusy(false); busyRef.current = false; dirtyRef.current = false; setDirty(false); versionRef.current = 0
+    setBusy(false); busyRef.current = false
     if (!supported || !connected || sessionId === null) return
     let loading = false
     async function read() {
@@ -87,20 +108,25 @@ export function TaskBriefPanel({ api, sessionId, supported, connected, locale, o
       try {
         const next = await api.rpc<TaskBrief>(TASK_BRIEF_GET, { sessionId })
         if (epoch.current === generation && !dirtyRef.current && !busyRef.current && next.version >= versionRef.current) apply(next)
-      } catch { if (epoch.current === generation) setNotice(c.error) }
+      } catch (error) { if (epoch.current === generation) setNotice(errorMessage(error, locale)) }
       finally { loading = false }
     }
     readRef.current = read
     void read()
     const timer = setInterval(() => { if (openRef.current) void read() }, 3000)
     return () => { epoch.current++; readRef.current = async () => {}; clearInterval(timer) }
-  }, [api, sessionId, supported, connected, c.error])
-  function edit(next: TaskBriefInput) { setDraft(next); dirtyRef.current = true; setDirty(true); setNotice('') }
+  }, [api, hostIdentity, sessionId, supported, connected, c.error])
+  function edit(next: TaskBriefInput, text = criteriaText) {
+    setDraft(next); dirtyRef.current = true; setDirty(true); setNotice('')
+    if (sessionId !== null && brief !== null) draftToken.current = writeBriefDraft(api, hostIdentity, sessionId, { brief, input: next, criteriaText: text })
+  }
   async function mutate(method: string, payload: object) {
     const generation = epoch.current
+    const submittedToken = draftToken.current
     setBusy(true); busyRef.current = true; setNotice('')
     try {
       const next = await api.rpc<TaskBrief>(method, payload)
+      if (method === TASK_BRIEF_SAVE && sessionId !== null) clearBriefDraft(api, hostIdentity, sessionId, submittedToken)
       if (epoch.current === generation) { apply(next); setNotice(c.saved) }
     } catch (error) { if (epoch.current === generation) setNotice(errorMessage(error, locale)) }
     finally { if (epoch.current === generation) { setBusy(false); busyRef.current = false } }
@@ -117,19 +143,21 @@ export function TaskBriefPanel({ api, sessionId, supported, connected, locale, o
     } catch (error) { if (epoch.current === generation) setNotice(errorMessage(error, locale)) }
     finally { if (epoch.current === generation) { setBusy(false); busyRef.current = false } }
   }
-  if (!supported || sessionId === null) return null
+  if ((!supported && !unavailable) || sessionId === null) return null
+  const editable = connected && supported
   return <details className="task-brief-panel" onToggle={event => { openRef.current = event.currentTarget.open; if (openRef.current) void readRef.current() }}>
     <summary>{c.title}</summary>
-    {brief === null || draft === null ? <p role="status">{notice || c.loading}</p> : <>
-      <label>{c.goal}<textarea aria-label={c.goal} value={draft.goal} maxLength={2000} disabled={busy || !connected}
+    {unavailable && <p role="status">{c.unavailable}</p>}
+    {brief === null || draft === null ? (!unavailable && <p role="status">{notice || c.loading}</p>) : <>
+      <label>{c.goal}<textarea aria-label={c.goal} value={draft.goal} maxLength={2000} disabled={busy || !editable}
         onChange={event => { edit({ ...draft, goal: event.target.value }) }} /></label>
-      <label>{c.project}<input aria-label={c.project} value={draft.projectPath} maxLength={1000} disabled={busy || !connected}
+      <label>{c.project}<input aria-label={c.project} value={draft.projectPath} maxLength={1000} disabled={busy || !editable}
         onChange={event => { edit({ ...draft, projectPath: event.target.value }) }} /></label>
       <p className="settings-note">{c.projectHint}</p>
-      {brief.projectPath && <button type="button" disabled={dirty || busy || !connected || !canStartProject} onClick={event => {
+      {brief.projectPath && <button type="button" disabled={dirty || busy || !editable || !canStartProject} onClick={event => {
         if (event.nativeEvent.isTrusted) onProjectChat(brief)
       }}>{c.newChat}</button>}
-      <fieldset disabled={busy || !connected}><legend>{c.materials}</legend>
+      <fieldset disabled={busy || !editable}><legend>{c.materials}</legend>
         {draft.materials.map((item, index) => <div className="task-material" key={index}>
           <input aria-label={`${c.label} ${index + 1}`} value={item.label} placeholder={c.label} maxLength={120}
             onChange={event => { edit({ ...draft, materials: draft.materials.map((item, at) => at === index ? { ...item, label: event.target.value } : item) }) }} />
@@ -147,14 +175,14 @@ export function TaskBriefPanel({ api, sessionId, supported, connected, locale, o
       {brief.materials.length > 0 && <ul>{brief.materials.map(item => <li key={item.url}>
         <a href={item.url} target="_blank" rel="noopener noreferrer">{item.label || item.url}</a> · {c.roles[item.role]}
       </li>)}</ul>}
-      <label>{c.criteria}<textarea aria-label={c.criteria} value={criteriaText} disabled={busy || !connected}
-        onChange={event => { setCriteriaText(event.target.value); edit({ ...draft, criteria: criteriaFromLines(event.target.value, draft.criteria) }) }} /></label>
+      <label>{c.criteria}<textarea aria-label={c.criteria} value={criteriaText} maxLength={6415} disabled={busy || !editable}
+        onChange={event => { setCriteriaText(event.target.value); edit({ ...draft, criteria: criteriaFromLines(event.target.value, draft.criteria) }, event.target.value) }} /></label>
       <div className="task-brief-actions">
-        <button type="button" disabled={!dirty || busy || !connected || draft.criteria.length > 16} onClick={() => {
+        <button type="button" disabled={!dirty || busy || !editable || draft.criteria.length > 16} onClick={() => {
           void mutate(TASK_BRIEF_SAVE, { sessionId, version: brief.version, input: draft })
         }}>{c.save}</button>
-        <button type="button" disabled={busy || !connected} onClick={() => { void mutate(TASK_BRIEF_GET, { sessionId }) }}>{dirty ? c.discard : c.reload}</button>
-        <button type="button" disabled={busy || dirty || !connected} onClick={() => { void exportRecord() }}>{c.export}</button>
+        <button type="button" disabled={busy || !editable} onClick={() => { void mutate(TASK_BRIEF_GET, { sessionId }) }}>{dirty ? c.discard : c.reload}</button>
+        <button type="button" disabled={busy || dirty || !editable} onClick={() => { void exportRecord() }}>{c.export}</button>
       </div>
       <p className="settings-note">{c.provenance}</p>
       {brief.criteria.length === 0 && <p>{c.empty}</p>}
@@ -164,7 +192,7 @@ export function TaskBriefPanel({ api, sessionId, supported, connected, locale, o
           <p>{progress ? `${c[progress.implementation]} · ${progress.userConfirmed ? c.confirmed : c[progress.observation]}` : `${c.pending} · ${c.unverified}`}</p>
           {progress?.evidence.length ? <ul>{progress.evidence.map((entry, index) => <li key={index}>{entry}</li>)}</ul> : <p>{c.noEvidence}</p>}
           {progress?.nextStep && <p>{c.next}: {progress.nextStep}</p>}
-          {progress?.implementation === 'implemented' && progress.observation === 'observed' && <button type="button" disabled={busy || dirty || !connected}
+          {progress?.implementation === 'implemented' && progress.observation === 'observed' && <button type="button" disabled={busy || dirty || !editable}
             onClick={event => { if (event.nativeEvent.isTrusted) void mutate(TASK_BRIEF_REVIEW, { sessionId, version: brief.version, criterionId: item.id, confirmed: !progress.userConfirmed }) }}>
             {progress.userConfirmed ? c.undo : c.confirm}</button>}
         </li>

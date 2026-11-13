@@ -6,7 +6,7 @@ import Storage from '@deepseek-ai/dsh-storage'
 import * as StorageJson from '@deepseek-ai/dsh-storage-json'
 import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { TaskBriefStore, taskBriefInputSchema, progressInputSchema } from '../src/task-brief.ts'
+import { TaskBriefStore, TaskBriefError, taskBriefInputSchema, progressInputSchema } from '../src/task-brief.ts'
 import { taskBriefMessage, registerTaskBrief } from '../src/task-brief-runtime.ts'
 
 const cleanups: Array<() => Promise<unknown>> = []
@@ -105,5 +105,43 @@ describe('session task notes and reports', () => {
     expect(decision.messages[0]?.source.kind).toBe('stride-task-notes')
     expect((await beforeStep({ agent: exec.agent, messages: [] }, enter) as { messages: unknown[] }).messages).toEqual([])
     expect((await beforeStep({ agent: { id: 's' }, messages: [] }, enter) as { messages: unknown[] }).messages).toHaveLength(1)
+  })
+  it('continues ordinary chat with an unavailable-context warning while notes tools still reject a storage fault', async () => {
+    const { store } = await setup()
+    const get = vi.spyOn(store, 'get').mockImplementation(() => { throw new TaskBriefError('storage-unavailable') })
+    const tools: Array<{ execute: (args: unknown, exec: unknown) => Promise<unknown> }> = []
+    let beforeStep!: (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>
+    const warn = vi.fn()
+    const ctx = { effect: (effect: () => unknown) => effect(), logger: { warn },
+      on: (_name: string, listener: typeof beforeStep) => { beforeStep = listener },
+      tools: { register: (tool: typeof tools[number]) => { tools.push(tool); return () => {} } },
+    } as unknown as Context
+    registerTaskBrief(ctx, store)
+    const agent = { id: 'ordinary-chat' }
+    const next = vi.fn(async () => ({ kind: 'enter', messages: [] }))
+    const result = await beforeStep({ agent, messages: [{ source: { kind: 'user' } }] }, next) as { kind: string; messages: Array<{ content: Array<{ text: string }> }> }
+    expect(result.kind).toBe('enter')
+    expect(result.messages[0]?.content[0]?.text).toContain('Saved task notes are currently unavailable')
+    expect(result.messages[0]?.content[0]?.text).toContain('uncertain-write fences are unchanged')
+    expect((await beforeStep({ agent, messages: [] }, next) as { messages: unknown[] }).messages).toEqual([])
+    await expect(tools[0]!.execute({ action: 'read' }, { agent })).rejects.toMatchObject({ code: 'storage-unavailable' })
+    get.mockRestore()
+    const recovered = await beforeStep({ agent, messages: [] }, next) as { messages: Array<{ content: Array<{ text: string }> }> }
+    expect(recovered.messages[0]?.content[0]?.text).toContain('"version":0')
+    const rejected = await beforeStep({ agent, messages: [] }, async () => ({ kind: 'reject' }))
+    expect(rejected).toEqual({ kind: 'reject' })
+  })
+  it('keeps the model step available if optional task-note storage could not open at startup', async () => {
+    let beforeStep!: (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>
+    const tools: Array<{ execute: (args: unknown, exec: unknown) => Promise<unknown> }> = []
+    const ctx = { effect: (effect: () => unknown) => effect(), logger: { warn: vi.fn() },
+      on: (_name: string, listener: typeof beforeStep) => { beforeStep = listener },
+      tools: { register: (tool: typeof tools[number]) => { tools.push(tool); return () => {} } },
+    } as unknown as Context
+    registerTaskBrief(ctx, undefined)
+    const agent = { id: 'plain-chat' }
+    const next = vi.fn(async () => ({ kind: 'enter', messages: [] }))
+    expect(await beforeStep({ agent, messages: [] }, next)).toMatchObject({ kind: 'enter' })
+    await expect(tools[0]!.execute({ action: 'read' }, { agent })).rejects.toMatchObject({ code: 'storage-unavailable' })
   })
 })

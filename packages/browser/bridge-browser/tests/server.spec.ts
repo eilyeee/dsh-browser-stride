@@ -13,7 +13,7 @@ import { createRunStorage } from './helpers/run-storage.ts'
 import { newBrowserTask } from '../src/task-contract.ts'
 import { asSessionId } from '../src/contracts/ids.ts'
 import { BRIDGE_TASK_PAGE_PREPARE_METHOD, BRIDGE_TASK_PAGE_CANCEL_METHOD } from '../src/protocol.ts'
-import type { TaskBriefStore } from '../src/task-brief.ts'
+import { TaskBriefStore } from '../src/task-brief.ts'
 
 const TOKEN = 'deadbeefdeadbeefdeadbeefdeadbeef'
 
@@ -935,6 +935,57 @@ describe('recorded tool dispatch', () => {
 })
 
 describe('BridgeServer', () => {
+  it('reports unavailable notes to new peers without blocking ordinary RPCs or advertising support to older peers', async () => {
+    const h = await startBridge({ caps: { ...CAPS, taskNotesUnavailable: true } })
+    harnesses.push(h)
+    const client = await connect(h.url)
+    send(client.ws, { t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: TOKEN, caps: { ...CAPS, taskNotes: true } })
+    await waitFor(() => client.frames.some(frame => frame.t === 'hello.ok'))
+    expect(client.frames.find(frame => frame.t === 'hello.ok')).toMatchObject({ caps: { taskNotesUnavailable: true } })
+    expect(client.frames.find(frame => frame.t === 'hello.ok')).not.toHaveProperty('caps.taskNotes')
+    expect(await taskRpc(client, 'bridge.taskBrief.get', { sessionId: 's' })).toMatchObject({ ok: false, error: { code: 'storage-unavailable' } })
+    expect(await taskRpc(client, 'session.prompt', { sessionId: 's', mode: 'queue', content: [] })).toMatchObject({ ok: true })
+    const older = await connect(h.url)
+    send(older.ws, { t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: TOKEN, caps: CAPS })
+    await waitFor(() => older.frames.some(frame => frame.t === 'hello.ok'))
+    expect(older.frames.find(frame => frame.t === 'hello.ok')).not.toHaveProperty('caps.taskNotesUnavailable')
+    older.ws.close()
+    client.ws.close()
+  })
+
+  it('finishes saving notes before a prompt in the same conversation, without blocking other conversations', async () => {
+    const fixture = await createRunStorage()
+    storageFixtures.push(fixture)
+    const briefs = await TaskBriefStore.open(fixture.ctx.storageDomain, 'ordered-notes')
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const retainSession = vi.fn(async () => { await gate; return { ok: true as const, value: {} } })
+    const observed: Array<{ sessionId: string; goal: string }> = []
+    const call = vi.fn(async (request: Parameters<BrowserHostApi['call']>[0]) => {
+      const sessionId = (request.payload as { sessionId: string }).sessionId
+      observed.push({ sessionId, goal: briefs.get(sessionId).goal })
+      return { ok: true as const, value: {} }
+    })
+    const h = await startBridge({ briefs, api: hostApi({ retainSession, call }) })
+    harnesses.push(h)
+    const client = await connect(h.url)
+    send(client.ws, { t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: TOKEN, caps: { ...CAPS, taskNotes: true } })
+    await waitFor(() => client.frames.some(frame => frame.t === 'hello.ok'))
+    try {
+      send(client.ws, { t: 'rpc', id: 'save-first', method: 'bridge.taskBrief.save', payload: { sessionId: 's', version: 0,
+        input: { goal: 'Saved before prompt', projectPath: '', materials: [], criteria: [] } } })
+      send(client.ws, { t: 'rpc', id: 'prompt-after-save', method: 'session.prompt', payload: { sessionId: 's', mode: 'queue', content: [] } })
+      await waitFor(() => retainSession.mock.calls.length === 1)
+      await taskRpc(client, 'session.prompt', { sessionId: 'other', mode: 'queue', content: [] })
+      expect(observed).toEqual([{ sessionId: 'other', goal: '' }])
+      release()
+      await waitFor(() => client.frames.some(frame => frame.t === 'rpc.result' && frame.id === 'prompt-after-save'))
+      expect(observed.at(-1)).toEqual({ sessionId: 's', goal: 'Saved before prompt' })
+      expect(client.frames.filter(frame => frame.t === 'rpc.result' && ['save-first', 'prompt-after-save'].includes(frame.id)).map(frame => frame.id))
+        .toEqual(['save-first', 'prompt-after-save'])
+    } finally { release(); client.ws.close(); await briefs.close() }
+  })
+
   it('negotiates notes independently of release metadata and keeps their RPCs out of Host management', async () => {
     const value = { sessionId: 'notes-session', version: 1 }
     const briefs = { get: vi.fn(() => value), save: vi.fn(async () => value), review: vi.fn(async () => value) } as unknown as TaskBriefStore

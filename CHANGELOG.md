@@ -7,6 +7,28 @@ package versions currently identify development builds, not supported releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- Development build 0.1.6 retains the real Session before an explicit task-note
+  save, without sending a prompt. Notes saved before the first message remain
+  discoverable after restart. Legacy orphan notes appear in extension history;
+  explicit selection restores an idle default-workspace Session, never a
+  workspace from saved metadata or invented messages. Same-connection note
+  mutations and prompts preserve their arrival order per Session.
+- Unsaved task-note drafts survive reconnects and settings/conversation switches
+  in the same panel lifetime, isolated by Host and Session. The original version
+  is retained for conflict checks; drafts are not auto-submitted or persisted
+  across full panel/browser reloads. Unpairing and successful deletion clear
+  the relevant draft cache.
+- Task-note read/write faults no longer block ordinary Agent steps. A startup
+  notes fault leaves the browser bridge available with an explicit panel error.
+  Model guidance treats missing notes as unavailable, not empty or completed;
+  browser authorization and uncertain-write fences remain unchanged. Session
+  deletion refuses unavailable note storage. Isolated continuity checks now use
+  the product's default deferred creation, cover pre-prompt saves and restarts,
+  and inject write/startup faults only into temporary storage. Benchmark suite 21
+  records the changed model-facing fault guidance and validation semantics.
+
 ### Added
 
 - Development build 0.1.5 adds session task notes for a project path, up to eight

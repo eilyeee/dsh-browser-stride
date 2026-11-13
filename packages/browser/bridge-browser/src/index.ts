@@ -173,15 +173,15 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     throw new Error('bridge-browser: DSH storageDomain service is required for browser run records')
   }
   const runs = await BrowserRunStore.open(storage, resolved.pairingProfile)
-  let briefs: TaskBriefStore
+  let briefs: TaskBriefStore | undefined
   try { briefs = await TaskBriefStore.open(storage, resolved.pairingProfile) }
-  catch (error) { await runs.close(); throw error }
+  catch { ctx.logger.warn('Task notes could not be opened; the browser bridge will continue without saved task notes') }
   const lifetime: { server?: BridgeServer; requests?: PairingRequests; tasks?: BrowserTaskRuntime } = {}
   // Cordis disposes separate effects concurrently. Keep this ordering inside
   // one effect so receipt writes drain before their storage domain closes.
   ctx.effect(() => async () => {
     try { await lifetime.tasks?.close(); await lifetime.requests?.close(); await lifetime.server?.close() }
-    finally { try { await briefs.close() } finally { await runs.close() } }
+    finally { try { await briefs?.close() } finally { await runs.close() } }
   }, 'bridge-browser: server and durable records')
   ctx.provide('browserRuns', runs)
   const tokenRes = await resolveToken(resolved.token)
@@ -195,7 +195,7 @@ function mountBridge(
   tokenRes: Awaited<ReturnType<typeof resolveToken>>,
   hostApi: BrowserHostApi,
   runs: BrowserRunStore,
-  briefs: TaskBriefStore,
+  briefs: TaskBriefStore | undefined,
   lifetime: { server?: BridgeServer; requests?: PairingRequests; tasks?: BrowserTaskRuntime },
 ): void {
   // Workspace grouping wraps the gateway create; session deferral wraps the
@@ -284,7 +284,21 @@ function mountBridge(
         if (!archived.ok) throw new Error(archived.error.message)
       },
     }
-    try { await runs.purgeSession(sessionId, async () => { await purgeSessionFiles(deps, sessionId); await briefs.purge(sessionId) }) }
+    try {
+      if (briefs === undefined) throw new SessionPurgeError('storage-unavailable', 'Task notes are unavailable; restore storage before deleting this Session')
+      let savedBrief
+      try { savedBrief = briefs.get(sessionId) }
+      catch { throw new SessionPurgeError('storage-unavailable', 'Task notes are unavailable; restore storage before deleting this Session') }
+      if (savedBrief.version > 0) {
+        const existing = await api.call({ rpcId: randomUUID(), method: 'session.history', payload: { sessionId }, signal: new AbortController().signal })
+        if (!existing.ok && ['not-found', 'session/not-found'].includes(existing.error.code)) {
+          await runs.purgeSession(sessionId, () => briefs!.purge(sessionId))
+          return
+        }
+        if (!existing.ok) throw new SessionPurgeError('storage-unavailable', 'Session history is unavailable; restore storage before deleting this Session')
+      }
+      await runs.purgeSession(sessionId, async () => { await purgeSessionFiles(deps, sessionId); await briefs.purge(sessionId) })
+    }
     catch (error) {
       if ((error instanceof BrowserRunStoreError || error instanceof DispatchLedgerError) && error.code === 'session-busy') {
         throw new SessionPurgeError('running', 'refusing to purge a session with unfinished browser work; stop it first')
@@ -306,6 +320,7 @@ function mountBridge(
       layoutMetrics: true,
       designViewZoom: true,
       release: bridgeRelease(),
+      ...(briefs === undefined ? { taskNotesUnavailable: true } : {}),
       snapshotMaxChars: resolved.snapshotMaxChars,
       maxInteractiveItems: resolved.maxInteractiveItems,
     },
@@ -314,7 +329,7 @@ function mountBridge(
     dispatches: runs.dispatches,
     runs,
     tasks,
-    briefs,
+    ...(briefs === undefined ? {} : { briefs }),
   })
   lifetime.server = server
 

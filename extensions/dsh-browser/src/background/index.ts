@@ -460,7 +460,7 @@ function disarmBridgeKeepalive(): void {
 
 function broadcastStatus(): void {
   const payload = { type: 'status', state: bridge?.state ?? ('stopped' as BridgeState), caps,
-    connectionDisconnected, hasCredential: settings.token !== '' }
+    connectionDisconnected, hasCredential: settings.token !== '', ...(activeBridgeUrl === undefined ? {} : { hostIdentity: activeBridgeUrl }) }
   for (const port of panelPorts) {
     try { port.postMessage(payload) } catch { /* port already closed */ }
   }
@@ -2282,7 +2282,7 @@ chrome.runtime.onConnect.addListener((port) => {
         broadcastPageAccess()
         try {
           port.postMessage({ type: 'status', state: bridge?.state ?? ('stopped' as BridgeState), caps,
-            connectionDisconnected, hasCredential: settings.token !== '' })
+            connectionDisconnected, hasCredential: settings.token !== '', ...(activeBridgeUrl === undefined ? {} : { hostIdentity: activeBridgeUrl }) })
           port.postMessage({ type: 'tab-affinity', state: tabAffinity.snapshot() })
           const statusWindowId = panelWindows.get(port)
           if (statusWindowId !== undefined) {

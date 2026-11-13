@@ -144,6 +144,7 @@ export interface PanelCopy {
     openSessions: string
     sessions: string
     newSession: string
+    notesOnly: string
     sessionPickerLoading: string
     sessionPickerEmpty: string
     deleteSession: string
@@ -398,6 +399,7 @@ const EN: PanelCopy = {
     openSessions: 'Session history',
     sessions: 'Sessions',
     newSession: 'New chat',
+    notesOnly: 'Saved task notes',
     sessionPickerLoading: 'Loading…',
     sessionPickerEmpty: 'No past sessions yet',
     deleteSession: 'Delete session',
@@ -652,6 +654,7 @@ const ZH: PanelCopy = {
     openSessions: '历史会话',
     sessions: '会话',
     newSession: '新对话',
+    notesOnly: '已保存任务资料',
     sessionPickerLoading: '加载中…',
     sessionPickerEmpty: '暂无历史会话',
     deleteSession: '删除会话',

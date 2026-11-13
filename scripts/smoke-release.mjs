@@ -11,7 +11,8 @@ import { createRequire } from 'node:module'
 import { waitForDsh } from '../benchmark/lib/dsh-client.mjs'
 import { issuePairingCode } from '../benchmark/lib/pairing.mjs'
 const repoRoot = resolve(import.meta.dirname, '..'), input = process.argv.indexOf('--dir')
-const folder = input < 0 ? join(repoRoot, '.stride-private/releases/0.1.5') : resolve(process.argv[input + 1])
+const currentVersion = JSON.parse(await readFile(join(repoRoot, 'package.json'), 'utf8')).version
+const folder = input < 0 ? join(repoRoot, '.stride-private/releases', currentVersion) : resolve(process.argv[input + 1])
 const versions = JSON.parse(await readFile(join(folder, 'versions.json'), 'utf8'))
 const sums = (await readFile(join(folder, 'SHA256SUMS'), 'utf8')).trim().split('\n')
 for (const line of sums) {

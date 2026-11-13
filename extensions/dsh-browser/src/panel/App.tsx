@@ -18,7 +18,8 @@ import { connectPanel, PanelRpcError, type PanelApi, type PanelSettings, type Pa
 import { renderMarkdown } from './markdown.ts'
 import { TaskBriefPanel } from './TaskBriefPanel.tsx'
 import { VersionStatus } from './VersionStatus.tsx'
-import { TASK_BRIEF_SAVE, type TaskBrief } from '@eilyeee/dsh-browser-stride/src/task-brief-contract.ts'
+import { TASK_BRIEF_SAVE, TASK_BRIEF_OPEN, type TaskBrief } from '@eilyeee/dsh-browser-stride/src/task-brief-contract.ts'
+import { clearBriefDraft, clearBriefDrafts } from './task-brief-drafts.ts'
 import whaleUrl from '../../assets/icons/deepseek-256.png'
 import type { ApprovalDecision, ApprovalRequest } from '../security/approval.ts'
 import { getUiLocale } from '../i18n.ts'
@@ -603,6 +604,7 @@ export function App(): React.JSX.Element {
   const [pageAccess, setPageAccess] = useState<PageAccessStatus>({ activeGranted: false, controlledGranted: false, controlledTabId: null, revocableTabId: null })
   useEffect(() => api.onPageAccess(setPageAccess), [api])
   const [hasConnectionCredential, setHasConnectionCredential] = useState(false)
+  const [taskBriefHost, setTaskBriefHost] = useState('panel')
   useEffect(() => api.onBrowserPairing(status => setPairingStatus(current =>
     current.phase === 'idle' && status.error === 'connection-lost' ? current : status)), [api])
   const [rows, setRows] = useState<Row[]>([])
@@ -792,9 +794,13 @@ export function App(): React.JSX.Element {
     const offStatus = api.onStatus((next, nextCaps, connection) => {
       setState(next)
       setCaps(nextCaps)
+      if (typeof connection?.hostIdentity === 'string') setTaskBriefHost(connection.hostIdentity)
       if (typeof connection?.hasCredential === 'boolean') setHasConnectionCredential(connection.hasCredential)
       if (typeof connection?.connectionDisconnected === 'boolean') {
-        if (connection.connectionDisconnected && !disconnectedRef.current) setSettings(current => current === null ? current : { ...current, token: '' })
+        if (connection.connectionDisconnected && !disconnectedRef.current) {
+          clearBriefDrafts(api)
+          setSettings(current => current === null ? current : { ...current, token: '' })
+        }
         disconnectedRef.current = connection.connectionDisconnected
       }
       const previous = lastStateRef.current
@@ -1382,6 +1388,7 @@ export function App(): React.JSX.Element {
     if (sessionSwitchBlocked || sessionChangingRef.current) return
     const transition = beginSessionTransition()
     try {
+      if (entry.notesOnly === true) await api.rpc(TASK_BRIEF_OPEN, { sessionId: entry.sessionId })
       await api.setActiveSession(entry.sessionId)
       if (sessionTransitionRef.current !== transition) return
       const runtime = sessionRuntimeRef.current.snapshot(entry.sessionId, entry.running)
@@ -1406,6 +1413,7 @@ export function App(): React.JSX.Element {
     if (!window.confirm(copy.app.deleteSessionConfirm(title))) return
     try {
       await api.rpc(BRIDGE_SESSION_PURGE_METHOD, { sessionId: entry.sessionId })
+      clearBriefDraft(api, taskBriefHost, entry.sessionId)
       setSessionList((prev) => prev.filter((item) => item.sessionId !== entry.sessionId))
       if (sessionRef.current === entry.sessionId) {
         setShowSessionPicker(false)
@@ -2228,7 +2236,7 @@ export function App(): React.JSX.Element {
       <VersionStatus caps={caps} locale={locale} />
       <ControlGroupStatus state={tabAffinity} pages={pageAccess.pages ?? []} copy={copy} onSelect={selectGroupPage} />
       <TaskBriefPanel api={api} sessionId={sessionRef.current} supported={caps?.taskNotes === true} connected={state === 'connected'} locale={locale}
-        canStartProject={!sessionSwitchBlocked} onProjectChat={brief => { void startNewSession(brief) }} />
+        unavailable={caps?.taskNotesUnavailable === true} hostIdentity={taskBriefHost} canStartProject={!sessionSwitchBlocked} onProjectChat={brief => { void startNewSession(brief) }} />
       {showSessionPicker && (
         <section className="session-picker" aria-label={copy.app.sessions}>
           <div className="session-picker-head">
@@ -2249,11 +2257,13 @@ export function App(): React.JSX.Element {
                     return (
                       <li key={entry.sessionId}>
                         <button disabled={sessionSwitchBlocked}
+                          data-session-id={entry.sessionId}
                           aria-current={entry.sessionId === sessionRef.current ? 'true' : undefined}
                           onClick={() => { void resumeSession(entry) }}>
                           <span className="session-title" title={title}>{title}</span>
                           <span className="session-meta">
                             <span className="session-time">{new Date(entry.updatedAt).toLocaleString()}</span>
+                            {entry.notesOnly === true && <span>{copy.app.notesOnly}</span>}
                             {entry.cwd !== undefined && <span className="session-cwd" title={entry.cwd}>{entry.cwd}</span>}
                           </span>
                         </button>
