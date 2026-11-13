@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import type { UiLocale } from '../i18n.ts'
 import type { PanelApi } from './api.ts'
 import { clearBriefDraft, readBriefDraft, writeBriefDraft } from './task-brief-drafts.ts'
+import type { AffinityTab } from '../background/tab-affinity.ts'
+import { availableMaterialPages, materialFromPage, matchingMaterialPages } from './task-materials.ts'
 import { TASK_BRIEF_GET, TASK_BRIEF_SAVE, TASK_BRIEF_REVIEW, MATERIAL_ROLES,
   type TaskBrief, type TaskBriefInput } from '@eilyeee/dsh-browser-stride/src/task-brief-contract.ts'
 
@@ -14,6 +16,11 @@ const COPY = {
     restored: '已保留未保存草稿。连接恢复后可继续编辑；保存时仍会检查资料版本。',
     unavailable: '任务资料暂不可用，聊天可以继续。这不代表资料已清空；请检查 Host 存储，恢复后再读回核对。',
     sessionUnavailable: '当前对话未能保留，资料尚未确认保存。草稿已保留，请重新连接后核对。',
+    fromGroup: '从控制分组添加材料', addPage: '添加页面', addedPage: '已加入草稿，保存后模型才能读取。材料用途由模型结合内容判断。',
+    noPages: '没有可添加的页面。请先在目标页面点击 DSH Stride 图标授权；已添加的页面不会重复列出。',
+    limit: '最多添加 8 份材料。请先移除不再使用的材料。', usePage: '使用已有页面', currentPage: '当前使用',
+    selectedPage: '已选用此页，下一条消息可使用它。尚未发送消息。', selectionFailed: '未能选用材料页面。页面可能已关闭、导航或撤销授权，请在控制分组中重新核对。',
+    external: '在新标签页打开；控制前需点击扩展图标授权',
     provenance: '以下是模型报告的进度和观察依据。核对后可确认；它不会改变托管任务的完成状态。',
     pending: '待实现', implemented: '模型报告已实现', blocked: '缺少条件', unverified: '尚未核验', observed: '模型已观察到', uncertain: '结果不明',
     confirmed: '用户已核验', confirm: '确认核验通过', undo: '撤销核验确认', next: '下一步', noEvidence: '尚无观察依据', export: '下载验收记录', inferred: '模型建议',
@@ -26,6 +33,11 @@ const COPY = {
     restored: 'Unsaved draft retained. Continue editing after reconnecting; saving still checks the record version.',
     unavailable: 'Task notes are unavailable; chat can continue. This does not mean notes were cleared. Check Host storage, then read back after recovery.',
     sessionUnavailable: 'The conversation could not be retained, so saving notes was not confirmed. Your draft is retained; reconnect and check it.',
+    fromGroup: 'Add materials from the control group', addPage: 'Add page', addedPage: 'Added to the draft. Save before the model can read it. The model determines its role from the content.',
+    noPages: 'No pages to add. Authorize the intended page using the DSH Stride toolbar icon first; materials already added are excluded.',
+    limit: 'Up to 8 materials. Remove an unused material first.', usePage: 'Use existing page', currentPage: 'Currently selected',
+    selectedPage: 'Page selected for your next message. No message was sent.', selectionFailed: 'Could not select the material page. It may have closed, navigated or lost authorization. Check the control group again.',
+    external: 'Opens a new tab; authorize it using the extension icon before controlling it',
     provenance: 'Progress and evidence below are model reports. Confirm after reviewing; this does not change a managed task verdict.',
     pending: 'Pending', implemented: 'Model reports implemented', blocked: 'Missing conditions', unverified: 'Not checked', observed: 'Model observed', uncertain: 'Uncertain result',
     confirmed: 'User reviewed', confirm: 'Confirm review passed', undo: 'Undo review confirmation', next: 'Next step', noEvidence: 'No observation evidence yet', export: 'Download acceptance record', inferred: 'Model suggests',
@@ -62,12 +74,17 @@ export function acceptanceMarkdown(brief: TaskBrief, locale: UiLocale): string {
     }),
   ].join('\n')
 }
-export function TaskBriefPanel({ api, sessionId, supported, connected, locale, onProjectChat, canStartProject = true, hostIdentity = 'panel', unavailable = false }: {
+export function TaskBriefPanel({ api, sessionId, supported, connected, locale, onProjectChat, canStartProject = true, hostIdentity = 'panel', unavailable = false,
+  pages = [], selectedTabId, onSelectPage, canSelectPage = true }: {
   api: Pick<PanelApi, 'rpc'>; sessionId: string | null; supported: boolean; connected: boolean; locale: UiLocale;
   onProjectChat: (brief: TaskBrief) => void
   canStartProject?: boolean
   hostIdentity?: string
   unavailable?: boolean
+  pages?: AffinityTab[]
+  selectedTabId?: number
+  onSelectPage?: (page: AffinityTab) => Promise<void>
+  canSelectPage?: boolean
 }) {
   const c = COPY[locale]
   const [brief, setBrief] = useState<TaskBrief | null>(null)
@@ -143,8 +160,19 @@ export function TaskBriefPanel({ api, sessionId, supported, connected, locale, o
     } catch (error) { if (epoch.current === generation) setNotice(errorMessage(error, locale)) }
     finally { if (epoch.current === generation) { setBusy(false); busyRef.current = false } }
   }
+  async function selectPage(page: AffinityTab) {
+    if (onSelectPage === undefined || busyRef.current || !canSelectPage || !connected) return
+    const generation = epoch.current
+    busyRef.current = true; setBusy(true); setNotice('')
+    try {
+      await onSelectPage(page)
+      if (epoch.current === generation) setNotice(c.selectedPage)
+    } catch { if (epoch.current === generation) setNotice(c.selectionFailed) }
+    finally { if (epoch.current === generation) { busyRef.current = false; setBusy(false) } }
+  }
   if ((!supported && !unavailable) || sessionId === null) return null
   const editable = connected && supported
+  const addablePages = draft === null ? [] : availableMaterialPages(pages, draft.materials)
   return <details className="task-brief-panel" onToggle={event => { openRef.current = event.currentTarget.open; if (openRef.current) void readRef.current() }}>
     <summary>{c.title}</summary>
     {unavailable && <p role="status">{c.unavailable}</p>}
@@ -158,6 +186,17 @@ export function TaskBriefPanel({ api, sessionId, supported, connected, locale, o
         if (event.nativeEvent.isTrusted) onProjectChat(brief)
       }}>{c.newChat}</button>}
       <fieldset disabled={busy || !editable}><legend>{c.materials}</legend>
+        <details className="task-material-picker"><summary>{c.fromGroup}</summary>
+          {draft.materials.length >= 8 ? <p>{c.limit}</p> : <div role="group" aria-label={c.fromGroup}>
+            {addablePages.length === 0 && <p>{c.noPages}</p>}
+            {addablePages.map(page => <button key={page.tabId} type="button" title={page.url}
+              onClick={() => {
+                const material = materialFromPage(page)
+                if (material === undefined || draft.materials.length >= 8) return
+                edit({ ...draft, materials: [...draft.materials, material] }); setNotice(c.addedPage)
+              }}>{c.addPage}: {materialFromPage(page)!.label || page.url}</button>)}
+          </div>}
+        </details>
         {draft.materials.map((item, index) => <div className="task-material" key={index}>
           <input aria-label={`${c.label} ${index + 1}`} value={item.label} placeholder={c.label} maxLength={120}
             onChange={event => { edit({ ...draft, materials: draft.materials.map((item, at) => at === index ? { ...item, label: event.target.value } : item) }) }} />
@@ -172,9 +211,20 @@ export function TaskBriefPanel({ api, sessionId, supported, connected, locale, o
         </div>)}
         <button type="button" disabled={draft.materials.length >= 8} onClick={() => { edit({ ...draft, materials: [...draft.materials, { url: '', label: '', role: 'unknown' }] }) }}>{c.add}</button>
       </fieldset>
-      {brief.materials.length > 0 && <ul>{brief.materials.map(item => <li key={item.url}>
-        <a href={item.url} target="_blank" rel="noopener noreferrer">{item.label || item.url}</a> · {c.roles[item.role]}
-      </li>)}</ul>}
+      {brief.materials.length > 0 && <ul className="task-material-links">{brief.materials.map(item => {
+        const matches = matchingMaterialPages(item.url, pages)
+        return <li key={item.url}>
+          {matches.length > 0 && onSelectPage !== undefined ? <>
+            <span>{item.label || item.url}</span>
+            {matches.map(page => <button key={page.tabId} type="button" title={page.url} data-material-tab-id={page.tabId}
+              aria-pressed={selectedTabId === page.tabId} disabled={busy || !connected || !canSelectPage || selectedTabId === page.tabId}
+              onClick={event => { if (event.nativeEvent.isTrusted) void selectPage(page) }}>
+              {selectedTabId === page.tabId ? c.currentPage : c.usePage}{matches.length > 1 ? `: ${page.title || page.url} (${page.tabId})` : ''}
+            </button>)}
+          </> : <a href={item.url} target="_blank" rel="noopener noreferrer" title={c.external}>{item.label || item.url}</a>}
+          {' · '}{c.roles[item.role]}
+        </li>
+      })}</ul>}
       <label>{c.criteria}<textarea aria-label={c.criteria} value={criteriaText} maxLength={6415} disabled={busy || !editable}
         onChange={event => { setCriteriaText(event.target.value); edit({ ...draft, criteria: criteriaFromLines(event.target.value, draft.criteria) }, event.target.value) }} /></label>
       <div className="task-brief-actions">

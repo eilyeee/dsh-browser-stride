@@ -15,6 +15,12 @@
 .task-brief-panel button:disabled { cursor: default; opacity: .5; }
 .task-brief-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .task-material { display: grid; gap: 6px; margin-bottom: 12px; }
+.task-material-picker { margin: 4px 0 12px; }
+.task-material-picker [role="group"] { display: grid; gap: 6px; margin-top: 8px; }
+.task-material-picker button { text-align: left; overflow-wrap: anywhere; }
+.task-material-links { padding-left: 20px; }
+.task-material-links li { margin: 8px 0; }
+.task-material-links button { margin: 4px; }
 .task-criteria { padding-left: 20px; }
 .task-criteria > li { margin-top: 12px; }
 .task-criteria p { margin: 5px 0; }

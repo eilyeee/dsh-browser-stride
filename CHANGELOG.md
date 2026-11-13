@@ -7,6 +7,21 @@ package versions currently identify development builds, not supported releases.
 
 ## [Unreleased]
 
+### Added
+
+- Development build 0.1.7 lets the panel import authorized control-group page
+  titles and URLs into unsaved task-material drafts. Imported roles remain
+  unknown; document URLs are deduplicated and use the shared credential-URL
+  validation. Importing metadata does not save notes, change targets or start
+  the model.
+- Saved materials offer explicit existing-page selection for exact authorized
+  document matches, including separate choices for multiple copies. Native
+  selection rechecks the expected URL, pending navigation, page grant and
+  conversation revision before binding. It creates no tab and does not reload
+  the page. Unmatched links retain ordinary new-tab behavior and require page
+  authorization before control. The optional field stays within the extension's
+  panel/worker messages; the Host wire version and model tools are unchanged.
+
 ### Fixed
 
 - Development build 0.1.6 retains the real Session before an explicit task-note

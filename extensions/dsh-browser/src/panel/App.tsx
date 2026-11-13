@@ -1881,6 +1881,13 @@ export function App(): React.JSX.Element {
     await api.rebindTabAffinity({ tabId, revision: tabAffinity.revision, sessionId: sessionRef.current })
   }
 
+  async function selectMaterialPage(page: AffinityTab): Promise<void> {
+    if (tabAffinity === null || sessionRef.current === null || sessionSwitchBlocked || state !== 'connected') {
+      throw new Error('Material page selection is unavailable')
+    }
+    await api.rebindTabAffinity({ tabId: page.tabId, expectedUrl: page.url, revision: tabAffinity.revision, sessionId: sessionRef.current })
+  }
+
   function addTrustedOrigin(): void {
     const origin = normalizeWebOrigin(trustedOriginInput)
     if (origin === null) return
@@ -2236,7 +2243,8 @@ export function App(): React.JSX.Element {
       <VersionStatus caps={caps} locale={locale} />
       <ControlGroupStatus state={tabAffinity} pages={pageAccess.pages ?? []} copy={copy} onSelect={selectGroupPage} />
       <TaskBriefPanel api={api} sessionId={sessionRef.current} supported={caps?.taskNotes === true} connected={state === 'connected'} locale={locale}
-        unavailable={caps?.taskNotesUnavailable === true} hostIdentity={taskBriefHost} canStartProject={!sessionSwitchBlocked} onProjectChat={brief => { void startNewSession(brief) }} />
+        unavailable={caps?.taskNotesUnavailable === true} hostIdentity={taskBriefHost} canStartProject={!sessionSwitchBlocked} onProjectChat={brief => { void startNewSession(brief) }}
+        pages={pageAccess.pages ?? []} selectedTabId={tabAffinity?.controlled?.tabId} onSelectPage={selectMaterialPage} canSelectPage={!sessionSwitchBlocked && tabAffinity !== null} />
       {showSessionPicker && (
         <section className="session-picker" aria-label={copy.app.sessions}>
           <div className="session-picker-head">

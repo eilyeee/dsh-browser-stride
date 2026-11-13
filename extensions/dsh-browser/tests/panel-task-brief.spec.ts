@@ -12,6 +12,63 @@ const brief: TaskBrief = { sessionId: 's', version: 1, updatedAt: 1, userEdited:
     evidence: ['Synthetic backend readback'], nextStep: '', userConfirmed: false }] }
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals() })
 describe('task notes panel', () => {
+  it('imports an authorized page only into the draft and saves an unknown role without opening or selecting it', async () => {
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+    document.body.innerHTML = '<div id="test"></div>'
+    const url = 'https://wiki.example/view?pageId=42&space=TEST'
+    const pages = [{ tabId: 1, windowId: 1, title: 'Synthetic requirements', url },
+      { tabId: 2, windowId: 1, title: 'Duplicate copy', url: 'https://wiki.example/view?space=TEST&pageId=42' },
+      { tabId: 3, windowId: 1, title: 'Private URL', url: url + '&token=synthetic' }]
+    const onSelectPage = vi.fn()
+    const rpc = vi.fn(async (method: string, payload: unknown) => method.endsWith('.save')
+      ? { ...brief, ...(payload as { input: object }).input, version: 2 } : brief)
+    const api = { rpc: async <T,>(method: string, payload: unknown) => await rpc(method, payload) as T }
+    const root = createRoot(document.querySelector('#test')!)
+    try {
+      await act(async () => root.render(createElement(TaskBriefPanel, { api, sessionId: 's', supported: true, connected: true,
+        locale: 'en', pages, onSelectPage, onProjectChat: vi.fn() })))
+      const picker = document.querySelector('.task-material-picker')!
+      expect(picker.querySelectorAll('button')).toHaveLength(1)
+      await act(async () => { picker.querySelector('button')!.click() })
+      expect(picker.querySelectorAll('button')).toHaveLength(0)
+      expect(onSelectPage).not.toHaveBeenCalled()
+      expect(rpc).toHaveBeenCalledTimes(1)
+      expect(document.querySelector('select')?.value).toBe('unknown')
+      await act(async () => { [...document.querySelectorAll('button')].find(b => b.textContent === 'Save notes')!.click() })
+      expect(rpc).toHaveBeenLastCalledWith('bridge.taskBrief.save', expect.objectContaining({ input: expect.objectContaining({
+        materials: [{ url, label: 'Synthetic requirements', role: 'unknown' }],
+      }) }))
+      expect(document.querySelector('.task-material-links a')).toBeNull()
+      expect(document.querySelectorAll('[data-material-tab-id]')).toHaveLength(2)
+      // Page selection requires a trusted native click, unlike editing a draft.
+      await act(async () => { document.querySelector<HTMLButtonElement>('[data-material-tab-id]')!.click() })
+      expect(onSelectPage).not.toHaveBeenCalled()
+    } finally { await act(async () => root.unmount()) }
+  })
+
+  it('keeps the eight-material limit and withdraws revoked matches without choosing another page', async () => {
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+    document.body.innerHTML = '<div id="test"></div>'
+    const materials = Array.from({ length: 8 }, (_, i) => ({ url: `https://wiki.example/view?pageId=${i}`, label: `Material ${i}`, role: 'unknown' as const }))
+    const rpc = vi.fn(async (_method: string, _payload: unknown) => ({ ...brief, materials }))
+    const api = { rpc: async <T,>(method: string, payload: unknown) => await rpc(method, payload) as T }
+    const onSelectPage = vi.fn(), root = createRoot(document.querySelector('#test')!)
+    const render = async (pages: Array<{ tabId: number; windowId: number; url: string; title: string }>) => {
+      await act(async () => root.render(createElement(TaskBriefPanel, { api, sessionId: 's', supported: true, connected: true,
+        locale: 'en', pages, onSelectPage, onProjectChat: vi.fn(), canSelectPage: false })))
+    }
+    try {
+      await render([{ tabId: 1, windowId: 1, url: materials[0]!.url, title: 'Synthetic page' }])
+      expect(document.querySelector('.task-material-picker')!.textContent).toContain('Up to 8 materials')
+      expect(document.querySelector<HTMLButtonElement>('[data-material-tab-id]')!.disabled).toBe(true)
+      await render([])
+      expect(document.querySelector('[data-material-tab-id]')).toBeNull()
+      expect(document.querySelectorAll('.task-material-links a')).toHaveLength(8)
+      expect(onSelectPage).not.toHaveBeenCalled()
+      expect(rpc).toHaveBeenCalledTimes(1)
+    } finally { await act(async () => root.unmount()) }
+  })
+
   it('explains unavailable storage without loading forever or sending note requests', async () => {
     Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
     document.body.innerHTML = '<div id="test"></div>'

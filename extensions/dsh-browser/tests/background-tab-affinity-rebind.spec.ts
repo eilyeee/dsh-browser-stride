@@ -49,6 +49,7 @@ function tab(tabId: number): chrome.tabs.Tab {
 function mockChrome() {
   const onConnect = chromeEvent<[chrome.runtime.Port]>()
   const query = vi.fn(async () => [tab(1)])
+  const get = vi.fn(async (tabId: number) => tab(tabId))
   vi.stubGlobal('chrome', {
     alarms: {
       create: vi.fn(),
@@ -82,7 +83,7 @@ function mockChrome() {
       },
     },
     tabs: {
-      get: vi.fn(async (tabId: number) => tab(tabId)),
+      get,
       query,
       sendMessage: vi.fn(async () => {}),
       onActivated: chromeEvent<[{ tabId: number; windowId: number }]>(),
@@ -100,7 +101,7 @@ function mockChrome() {
       onRemoved: chromeEvent<[number]>(),
     },
   } as unknown as typeof chrome)
-  return { onConnect, query }
+  return { onConnect, query, get }
 }
 
 async function connectPanelForTest() {
@@ -125,6 +126,31 @@ afterEach(() => {
 })
 
 describe('background tab-affinity rebind protocol', () => {
+  it.each(['different-document', 'pending-navigation', 'invalid-url', 'no-tab', 'revoked'])('refuses stale material selection: %s', async kind => {
+    const h = await connectPanelForTest()
+    h.onMessage.emit({ type: 'session.active', sessionId: 'material-session', isNew: true })
+    const state = () => h.postMessage.mock.calls.map(([m]) => m).filter(m => m.type === 'tab-affinity').at(-1).state
+    await vi.waitFor(() => expect(state().controlled?.tabId).toBe(1))
+    if (kind === 'pending-navigation') h.get.mockResolvedValue({ ...tab(2), pendingUrl: 'https://example.com/other' })
+    h.onMessage.emit({ type: 'tab-affinity.rebind', id: 'material', sessionId: 'material-session', revision: state().revision,
+      ...(kind === 'no-tab' ? {} : { tabId: kind === 'revoked' ? 99 : 2 }),
+      expectedUrl: kind === 'invalid-url' ? 42 : kind === 'different-document' ? 'https://example.com/other' : `https://example.com/${kind === 'revoked' ? 99 : 2}` })
+    await vi.waitFor(() => expect(h.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity.rebind.result', id: 'material', ok: false })))
+    expect(state().controlled?.tabId).toBe(1)
+  })
+
+  it('reuses the exact authorized material without navigating it, tolerating query order', async () => {
+    const h = await connectPanelForTest()
+    h.onMessage.emit({ type: 'session.active', sessionId: 'material-session', isNew: true })
+    const state = () => h.postMessage.mock.calls.map(([m]) => m).filter(m => m.type === 'tab-affinity').at(-1).state
+    await vi.waitFor(() => expect(state().controlled?.tabId).toBe(1))
+    h.get.mockResolvedValue({ ...tab(2), url: 'https://example.com/2?b=2&a=1' })
+    h.onMessage.emit({ type: 'tab-affinity.rebind', id: 'material', sessionId: 'material-session', revision: state().revision,
+      tabId: 2, expectedUrl: 'https://example.com/2?a=1&b=2' })
+    await vi.waitFor(() => expect(h.postMessage).toHaveBeenCalledWith({ type: 'tab-affinity.rebind.result', id: 'material', ok: true }))
+    expect(state().controlled?.tabId).toBe(2)
+  })
+
   it('does not acknowledge unbinding when durable revocation storage fails', async () => {
     const h = await connectPanelForTest()
     h.onMessage.emit({ type: 'session.active', sessionId: 'selected', isNew: true })

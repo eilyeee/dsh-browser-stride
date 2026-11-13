@@ -136,7 +136,7 @@ export interface PanelApi {
   onSessionResumeHint(callback: (sessionId: string | null) => void): () => void
   respondToApproval(id: string, decision: ApprovalDecision): Promise<void>
   retargetRun(payload: { runId: string; sessionId: string; expectedVersion: number; controlRevision: number; affinityRevision: number; start?: boolean; task?: boolean; newPageUrl?: string }): Promise<void>
-  rebindTabAffinity(selection?: { tabId: number; revision: number; sessionId: string | null }): Promise<void>
+  rebindTabAffinity(selection?: { tabId: number; revision: number; sessionId: string | null; expectedUrl?: string }): Promise<void>
   unbindTabAffinity(revision: number, sessionId: string | null): Promise<void>
   /** Clear all selection state, or only the exact selection supplied. */
   clearSelection(selection?: PageSelection): Promise<void>

@@ -93,7 +93,7 @@ import {
   type AffinityTab,
 } from './tab-affinity.ts'
 import { bindOpenedTabAffinity } from './open-tab-binding.ts'
-import { reuseAuthorizedTab } from './open-tab-reuse.ts'
+import { pageUrlKey, reuseAuthorizedTab } from './open-tab-reuse.ts'
 import { FocusedWindowTracker } from './focused-window.ts'
 import { SelectionTracker, type SelectionSource } from './selection.ts'
 import { parsePageSelection, parseSelectionCapture } from '../selection.ts'
@@ -1229,11 +1229,16 @@ async function refreshSessionSnapshot(sessionId: string): Promise<void> {
 }
 
 /** Select an authorized group member after a fresh native check. Legacy panels may name the active authorized tab. */
-async function rebindTabAffinityToActive(signal: AbortSignal, sessionId?: string, selected?: { tabId: number; current: () => boolean }): Promise<void> {
+async function rebindTabAffinityToActive(signal: AbortSignal, sessionId?: string, selected?: { tabId: number; current: () => boolean; expectedUrl?: string }): Promise<void> {
   await abortable(Promise.all([affinityReady, pageSessionContexts.ready]).then(() => undefined), signal)
   const tab = selected === undefined ? await syncActiveTab(undefined, signal) : await abortable(chrome.tabs.get(selected.tabId), signal)
   throwIfRebindAborted(signal)
   if (selected !== undefined && !selected.current()) throw new TabAffinityRebindError('stale-binding', 'The selected group page changed. Choose it again.')
+  if (selected?.expectedUrl !== undefined && (pageUrlKey(tab?.url) !== pageUrlKey(selected.expectedUrl)
+    || (tab?.pendingUrl !== undefined && pageUrlKey(tab.pendingUrl) !== pageUrlKey(selected.expectedUrl)))) {
+    throw new TabAffinityRebindError('stale-binding', getUiLocale() === 'zh'
+      ? '材料页面已导航到其他地址，请重新选择。' : 'The material page has navigated. Choose it again.')
+  }
   const summary = tab === undefined ? null : summarizeTab(tab)
   if (summary === null) {
     throw new TabAffinityRebindError('no-active-tab', getUiLocale() === 'zh'
@@ -2172,7 +2177,7 @@ chrome.runtime.onConnect.addListener((port) => {
         break
       }
       case 'tab-affinity.rebind': {
-        const request = message as { id?: unknown; sessionId?: unknown; tabId?: unknown; revision?: unknown }
+        const request = message as { id?: unknown; sessionId?: unknown; tabId?: unknown; revision?: unknown; expectedUrl?: unknown }
         if (typeof request.id !== 'string') break
         const requestId = request.id
         const rebindSessionId = validSessionId(request.sessionId) ?? panelActiveSessions.get(port)
@@ -2191,10 +2196,13 @@ chrome.runtime.onConnect.addListener((port) => {
         tabAffinityRebinds.set(requestId, { controller, timer })
         const selection = request.tabId === undefined ? undefined : {
           tabId: request.tabId as number,
+          ...(typeof request.expectedUrl === 'string' ? { expectedUrl: request.expectedUrl } : {}),
           current: () => panelPorts.has(port) && panelActiveSessions.get(port) === rebindSessionId
             && tabAffinity.focusedSession() === (rebindSessionId ?? null) && tabAffinity.snapshot().revision === request.revision,
         }
-        if (selection !== undefined && (!Number.isSafeInteger(selection.tabId) || selection.tabId < 0)) {
+        if ((selection !== undefined && (!Number.isSafeInteger(selection.tabId) || selection.tabId < 0))
+          || (request.expectedUrl !== undefined && (selection === undefined || typeof request.expectedUrl !== 'string'
+            || request.expectedUrl.length > 2000 || pageUrlKey(request.expectedUrl) === undefined))) {
           controller.abort(new TabAffinityRebindError('stale-binding', 'Invalid control-group page.'))
         }
         void rebindTabAffinityToActive(controller.signal, rebindSessionId, selection).then(

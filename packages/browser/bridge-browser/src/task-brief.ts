@@ -1,21 +1,12 @@
 import { defineDomain, domainTable, type DomainFacility, type Domain } from '@deepseek-ai/dsh-storage-domain'
 import { z } from 'zod'
-import type { TaskBrief, TaskBriefInput } from './task-brief-contract.ts'
+import { safeMaterialUrl, type TaskBrief, type TaskBriefInput } from './task-brief-contract.ts'
 export * from './task-brief-contract.ts'
 
 const id = z.string().min(1).max(200).refine(value => value.trim() === value)
 const counter = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
 const text = (max: number) => z.string().trim().max(max).refine(value =>
   !/\bBearer\s+\S+|\b(?:api[_-]?key|access[_-]?token|password)\s*[:=]\s*\S+/i.test(value), 'Do not store credentials in task notes')
-export function safeMaterialUrl(value: string): boolean {
-  try {
-    const url = new URL(value)
-    return value === value.trim() && !/[\u0000-\u0020\u007f]/.test(value)
-      && ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password
-      && ![...url.searchParams.keys()].some(key => /^(?:token|access_token|api[_-]?key|password|authorization)$/i.test(key))
-      && !/[?&#](?:token|access_token|api[_-]?key|password|authorization)=/i.test(url.hash)
-  } catch { return false }
-}
 export const taskBriefInputSchema = z.strictObject({
   goal: text(2000), projectPath: text(1000),
   materials: z.array(z.strictObject({ url: z.string().max(2000).refine(safeMaterialUrl), label: text(120),

@@ -124,7 +124,7 @@ export function apply(ctx){
   await host.close(); host = await startDshBackend(config)
   await restoreHistory()
   const draftPanel = browser.panel.locator('.task-brief-panel')
-  if (!await draftPanel.evaluate(element => element.open)) await draftPanel.locator('summary').click()
+  if (!await draftPanel.evaluate(element => element.open)) await draftPanel.locator(':scope > summary').click()
   await goal.waitFor({ state: 'visible' })
   assert.equal(await goal.inputValue(), 'Synthetic retained unsaved draft')
   assert.equal((await rpc('bridge.taskBrief.get', { sessionId })).goal, 'Synthetic notes saved before the first prompt')
@@ -139,21 +139,45 @@ export function apply(ctx){
   phase = 'history-chat-without-page'
   await browser.panel.reload(); await restoreHistory(); await chat('STRIDE_HISTORY_OK')
   phase = 'notes-and-evidence'
+  const materialPage = await browser.context.newPage(); await materialPage.goto(site.url)
+  await browser.panel.evaluate(() => { window.__dshBenchmarkPort ??= chrome.runtime.connect({ name: 'dsh-panel' }) })
+  await browser.bindSession(sessionId, materialPage)
   const input = { goal: 'Read the synthetic page title and report the observed evidence without edits', projectPath: root,
     materials: [{ url: site.url, label: 'Synthetic task material', role: 'unknown' }], criteria: [{ id: 'title', text: 'Read the synthetic page title' }] }
-  const saved = await rpc('bridge.taskBrief.save', { sessionId, version: (await rpc('bridge.taskBrief.get', { sessionId })).version, input })
+  const saved = await rpc('bridge.taskBrief.save', { sessionId, version: (await rpc('bridge.taskBrief.get', { sessionId })).version, input: { ...input, materials: [] } })
   assert.equal(saved.userEdited, true)
+  const notesDisclosure = browser.panel.locator('.task-brief-panel')
+  if (!await notesDisclosure.evaluate(element => element.open)) await notesDisclosure.locator(':scope > summary').click()
+  await wait(async () => await notesDisclosure.getByRole('textbox', { name: '本轮目标', exact: true }).inputValue() === input.goal, 'saved notes displayed')
+  const picker = browser.panel.locator('.task-material-picker')
+  await picker.locator('summary').click()
+  await picker.getByRole('button', { name: '添加页面: 本地设置测试', exact: true }).click()
+  assert.equal((await rpc('bridge.taskBrief.get', { sessionId })).materials.length, 0, 'Importing metadata does not auto-save')
+  assert.equal(await notesDisclosure.locator('.task-material select').inputValue(), 'unknown')
+  await notesDisclosure.getByRole('button', { name: '保存资料', exact: true }).click()
+  await wait(async () => (await rpc('bridge.taskBrief.get', { sessionId })).materials[0]?.url === site.url, 'material imported through UI')
+  const otherPage = await browser.context.newPage(); await otherPage.goto(site.url + '?other=1')
+  await otherPage.evaluate(() => { document.title = 'Other synthetic reference' })
+  await browser.bindSession(sessionId, otherPage)
+  const materialTabId = await browser.worker.evaluate(async url => (await chrome.tabs.query({})).find(tab => tab.url === url)?.id, site.url)
+  await materialPage.evaluate(() => { window.__strideMaterialReuseProof = 'same-document' })
+  const beforeReuse = await browser.worker.evaluate(async () => ({ tabs: (await chrome.tabs.query({})).length,
+    grants: (await chrome.storage.session.get('dshPageAccess')).dshPageAccess.grants.map(grant => ({ tabId: grant.tabId, nonce: grant.nonce })) }))
+  await notesDisclosure.getByRole('button', { name: '使用已有页面', exact: true }).click()
+  await wait(async () => (await affinity()).controlledTabId === materialTabId, 'native material selection')
+  assert.equal(await materialPage.evaluate(() => window.__strideMaterialReuseProof), 'same-document', 'Selecting a material does not reload it')
+  const afterReuse = await browser.worker.evaluate(async () => ({ tabs: (await chrome.tabs.query({})).length,
+    grants: (await chrome.storage.session.get('dshPageAccess')).dshPageAccess.grants.map(grant => ({ tabId: grant.tabId, nonce: grant.nonce })) }))
+  assert.deepEqual(afterReuse, beforeReuse, 'Selecting materials creates no tab and grants no new access')
+  await otherPage.close()
   let reportVerified = false
   if (realModel) {
-    const page = await browser.context.newPage(); await page.goto(site.url)
-    await browser.panel.evaluate(() => { window.__dshBenchmarkPort ??= chrome.runtime.connect({ name: 'dsh-panel' }) })
-    await browser.bindSession(sessionId, page)
     await send('继续本轮需求。先读取 browser_task_notes，观察已授权的合成页面标题，再用 browser_task_notes 的 report 记录 title 条件，提供实际读回依据。不要修改页面、文件或已保存资料；报告不等于用户核验。完成后回复 STRIDE_REPORT_OK。', 'STRIDE_REPORT_OK')
     const reported = await rpc('bridge.taskBrief.get', { sessionId })
     assert.equal(reported.progress[0]?.criterionId, 'title'); assert.equal(reported.progress[0]?.observation, 'observed')
     assert.equal(reported.progress[0]?.userConfirmed, false)
     assert.ok(reported.progress[0]?.evidence.some(value => value.includes('本地设置测试')))
-    await browser.panel.locator('.task-brief-panel > summary').click()
+    if (!await notesDisclosure.evaluate(element => element.open)) await notesDisclosure.locator(':scope > summary').click()
     await browser.panel.getByRole('button', { name: '确认核验通过', exact: true }).waitFor({ state: 'visible' })
     const downloadReady = browser.panel.waitForEvent('download')
     await browser.panel.getByRole('button', { name: '下载验收记录', exact: true }).click()
@@ -178,7 +202,7 @@ export function apply(ctx){
   assert.ok(await host.client.rpc('session.history', { sessionId }))
   phase = 'explicit-project-conversation'
   const disclosure = browser.panel.locator('.task-brief-panel')
-  if (!await disclosure.evaluate(element => element.open)) await disclosure.locator('summary').click()
+  if (!await disclosure.evaluate(element => element.open)) await disclosure.locator(':scope > summary').click()
   await browser.panel.getByRole('button', { name: '从此项目新建对话', exact: true }).click()
   await wait(async () => { const focused = (await affinity())?.focusedSessionId; return typeof focused === 'string' && focused !== sessionId }, 'new project conversation')
   const projectSession = (await affinity()).focusedSessionId
@@ -215,7 +239,7 @@ export function apply(ctx){
   host = await startDshBackend(config)
   await restoreHistory()
   const failureNotice = browser.panel.locator('.task-brief-panel')
-  if (!await failureNotice.evaluate(element => element.open)) await failureNotice.locator('summary').click()
+  if (!await failureNotice.evaluate(element => element.open)) await failureNotice.locator(':scope > summary').click()
   await failureNotice.getByText('任务资料暂不可用，聊天可以继续。', { exact: false }).waitFor({ state: 'visible' })
   const deletion = await rawRpc('bridge.session.purge', { sessionId })
   assert.equal(deletion.ok, false); assert.equal(deletion.error.code, 'storage-unavailable')
@@ -232,7 +256,8 @@ export function apply(ctx){
     notesWriteFailureDoesNotBlockChat: true, notesStartupFailureDoesNotBlockBridge: true, unavailableNotesPreventPartialDeletion: true, repairedNotesReadable: true,
     chatWithoutPage: true, chatAfterTabClose: true, historicalChat: true, workerRestart: true, hostRestart: true,
     notesSurviveHostRestart: true, modelReportAndNativeReview: reportVerified, acceptanceExport: reportVerified,
-    explicitProjectConversation: true, installedVersionsShown: true, narrowPanel: true, syntheticPageUnchanged: true, userHostUntouched: true }
+    explicitProjectConversation: true, installedVersionsShown: true, narrowPanel: true, groupPageImportedAsUnknownDraft: true,
+    nativeMaterialSelectionWithoutNewTabOrGrantOrReload: true, syntheticPageUnchanged: true, userHostUntouched: true }
   await writeFile(join(artifacts, realModel ? 'real-model.json' : 'result.json'), JSON.stringify(summary, null, 2) + '\n', { mode: 0o600 })
   console.log(JSON.stringify(summary))
 } catch (error) {
