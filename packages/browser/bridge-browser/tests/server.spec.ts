@@ -142,6 +142,37 @@ async function taskRpc(h: { ws: WebSocket; frames: BridgeFrame[] }, method: stri
 }
 
 describe('recorded tool dispatch', () => {
+  it.each(['browser_click_at', 'browser_measure_layout', 'browser_set_design_zoom'])('reports unsupported %s before sending or recording an action', async name => {
+    const h = await connectedLedger()
+    expect(() => h.bridge.requestTool(name, {}, new AbortController().signal))
+      .toThrowError(expect.objectContaining({ code: 'content-unavailable', notDispatched: true }))
+    expect(h.frames.some(frame => frame.t === 'tool.call')).toBe(false)
+    expect(h.ledger.list()).toEqual([])
+  })
+
+  it('keeps missing managed execution distinct from an action with an unknown result', async () => {
+    const h = await connectedLedger(true)
+    const queued = await h.storage.store.create({ sessionId: asSessionId('missing-execution'), requiredCriteriaIds: ['saved'] })
+    await h.storage.store.transition(queued.runId, queued.version, 'running')
+    expect(() => h.bridge.requestTool('browser_click', {}, new AbortController().signal, 1000, 'missing-execution'))
+      .toThrowError(expect.objectContaining({ code: 'action-failed', notDispatched: true }))
+    expect(h.frames.some(frame => frame.t === 'tool.call')).toBe(false)
+    expect(h.ledger.list()).toEqual([])
+  })
+
+  it('marks a forbidden run tab mutation as unsent without weakening run authority', async () => {
+    const h = await connectedLedger(true)
+    const queued = await h.storage.store.create({ sessionId: asSessionId('forbidden-tab-mutation'), requiredCriteriaIds: ['saved'] })
+    const run = await h.storage.store.transition(queued.runId, queued.version, 'running')
+    await h.storage.store.withExecution(run.runId, 0, async () => {
+      expect(() => h.bridge.requestTool('browser_close_tab', { tabId: 1 }, new AbortController().signal))
+        .toThrowError(expect.objectContaining({ code: 'execution-denied', notDispatched: true }))
+    })
+    expect(h.frames.some(frame => frame.t === 'tool.call')).toBe(false)
+    expect(h.ledger.list()).toEqual([])
+    expect(h.storage.store.get(run.runId)).toEqual(run)
+  })
+
   it('omits the new persisted pause reason for an older compatible panel', async () => {
     const h = await connectedLedger(true, true, { tasks: { selectTarget: vi.fn(), approval: vi.fn() } })
     const run = await h.storage.store.create({ sessionId: asSessionId('legacy-pause-reason'), requiredCriteriaIds: ['task-goal'], task: newBrowserTask('Synthetic task') })
@@ -560,7 +591,8 @@ describe('recorded tool dispatch', () => {
         const replacement = await connect(h.url, undefined, false)
         send(replacement.ws, { t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: TOKEN, caps: CAPS })
         await waitFor(() => replacement.frames.some(frame => frame.t === 'hello.ok'))
-        expect(() => h.bridge.requestTool('browser_snapshot', {}, new AbortController().signal)).toThrow('older connection')
+        expect(() => h.bridge.requestTool('browser_snapshot', {}, new AbortController().signal))
+          .toThrowError(expect.objectContaining({ code: 'execution-denied', notDispatched: true, message: expect.stringContaining('older connection') }))
         expect(h.ledger.list()).toHaveLength(3)
       })
     })
@@ -834,7 +866,7 @@ describe('recorded tool dispatch', () => {
   it.each(['prepare', 'markSent'] as const)('does not send when %s fails', async method => {
     const h = await connectedLedger()
     vi.spyOn(h.ledger, method).mockRejectedValueOnce(new Error('synthetic storage failure'))
-    await expect(h.bridge.requestTool('browser_click', {}, new AbortController().signal)).rejects.toMatchObject({ code: 'internal' })
+    await expect(h.bridge.requestTool('browser_click', {}, new AbortController().signal)).rejects.toMatchObject({ code: 'internal', notDispatched: true })
     expect(h.frames.some(frame => frame.t === 'tool.call')).toBe(false)
   })
 
@@ -1497,7 +1529,7 @@ describe('BridgeServer', () => {
     ws.close()
   })
 
-  it('propagates extension-reported tool errors', async () => {
+  it.each(['action-failed', 'execution-denied'] as const)('does not trust an extension-reported %s error to prove dispatch did not occur', async code => {
     const h = await startBridge()
     harnesses.push(h)
     const { ws, frames } = await connect(h.url)
@@ -1506,9 +1538,10 @@ describe('BridgeServer', () => {
     const result = h.bridge.requestTool('browser_navigate', { url: 'https://x' }, new AbortController().signal)
     await waitFor(() => frames.some((f) => f.t === 'tool.call'))
     const call = frames.find((f) => f.t === 'tool.call') as Extract<BridgeFrame, { t: 'tool.call' }>
-    send(ws, { t: 'tool.result', id: call.id, action: call.action, ok: false, error: { code: 'action-failed', message: 'blocked' } })
+    ws.send(JSON.stringify({ t: 'tool.result', id: call.id, action: call.action, ok: false,
+      error: { code, message: 'No action was sent', name: 'BrowserNotDispatchedError', notDispatched: true } }))
     await expect(result).rejects.toBeInstanceOf(BridgeToolError)
-    await expect(result).rejects.toMatchObject({ code: 'action-failed', message: 'blocked' })
+    await expect(result).rejects.toMatchObject({ code, message: 'No action was sent', name: 'BridgeToolError', notDispatched: false })
     ws.close()
   })
 
@@ -1520,7 +1553,7 @@ describe('BridgeServer', () => {
     await waitFor(() => first.frames.some((f) => f.t === 'hello.ok'))
     const pending = h.bridge.requestTool('browser_click', {}, new AbortController().signal)
     // Attach the assertion eagerly: the replacement below settles it before the final await.
-    const pendingAssertion = expect(pending).rejects.toMatchObject({ code: 'bridge-closed' })
+    const pendingAssertion = expect(pending).rejects.toMatchObject({ code: 'bridge-closed', notDispatched: false })
     await waitFor(() => first.frames.some((f) => f.t === 'tool.call'))
 
     const second = await connect(h.url)

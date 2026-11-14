@@ -29,6 +29,10 @@ the existing ledger and does not add checkpoint recovery or automatic replay.
 Login or CAPTCHA handoff depends on the model's observations; this build does
 not provide a general authentication detector. Page text never grants access.
 
+Development build 0.1.10 also distinguishes Host-proven refusals before dispatch
+from unknown results after dispatch. Existing approval and run restrictions
+remain in force; an unsent refusal does not reconcile any earlier write.
+
 From the repository root:
 
 ```sh

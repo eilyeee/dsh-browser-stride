@@ -44,6 +44,11 @@ package versions currently identify development builds, not supported releases.
 
 ### Fixed
 
+- Development build 0.1.10 preserves Host-proven unsent refusals through
+  capability, execution-context and durable-preparation failures and local
+  design-view guidance. These no longer imply that the current write may have
+  reached the page. This does not clear earlier unknown writes or bypass an
+  approval/run boundary; extension-reported text cannot establish this fact.
 - Tool history and live settlement use rc.5's `message.toolCallId`, including
   when PTC feedback or partial replies separate the call and its result.
   Received tool results no longer appear pending merely because of that shape.

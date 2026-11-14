@@ -20,11 +20,11 @@ export class BrowserApprovalGate {
       state = { blocked: false }
       this.states.set(agent, state)
     }
-    if (state?.blocked) throw new BridgeToolError('approval-unavailable', APPROVAL_RETRY_GUIDANCE)
+    if (state?.blocked) throw new BridgeToolError('approval-unavailable', APPROVAL_RETRY_GUIDANCE, true)
     const readOnly = toolName !== undefined && (isReadOnlyBrowserTool(toolName) || toolName === 'browser_read_design_styles')
     if (state?.designView !== undefined) throw new BridgeToolError('content-unavailable', state.designView === 'pending'
       ? 'Design-view preparation is in progress. Wait for its result before other browser calls.'
-      : DESIGN_VIEW_RETRY_GUIDANCE)
+      : DESIGN_VIEW_RETRY_GUIDANCE, true)
     if (state?.uncertainWrite && !readOnly) throw new BridgeToolError('write-blocked-unconfirmed', UNCERTAIN_WRITE_GUIDANCE, true)
     const preparesDesign = toolName === 'browser_set_design_zoom'
     if (preparesDesign && state !== undefined) state.designView = 'pending'
@@ -50,11 +50,11 @@ export class BrowserApprovalGate {
         || (error.code === 'action-failed' && /^No browser side panel was available to receive or complete the approval request for "[^"]+"\.$/.test(error.message))
       )) {
         if (state !== undefined) state.blocked = true
-        throw new BridgeToolError(error.code, `${error.message} ${APPROVAL_RETRY_GUIDANCE}`)
+        throw new BridgeToolError(error.code, `${error.message} ${APPROVAL_RETRY_GUIDANCE}`, error.notDispatched)
       }
       if (preparesDesign) throw new BridgeToolError(error instanceof BridgeToolError ? error.code : 'content-unavailable',
         (error instanceof Error ? error.message : 'Design zoom could not be confirmed.') + ' '
-        + (recoverable ? DESIGN_VIEW_RECOVERY_GUIDANCE : DESIGN_VIEW_RETRY_GUIDANCE))
+        + (recoverable ? DESIGN_VIEW_RECOVERY_GUIDANCE : DESIGN_VIEW_RETRY_GUIDANCE), error instanceof BridgeToolError && error.notDispatched)
       throw error
     }
   }

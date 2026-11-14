@@ -3,6 +3,31 @@ import { BrowserApprovalGate } from '../src/browser-approval.ts'
 import { BridgeToolError } from '../src/server.ts'
 
 describe('browser approval retry boundary', () => {
+  it('permits another method after a Host-proven unsent refusal, while retaining unknown-write protection', async () => {
+    const gate = new BrowserApprovalGate(), agent = {}, write = vi.fn(async () => 'alternative')
+    await expect(gate.request(agent, async () => { throw new BridgeToolError('content-unavailable', 'Unsupported capability', true) }, 'browser_click_at')).rejects.toThrow('Unsupported capability')
+    await expect(gate.request(agent, write, 'browser_click')).resolves.toBe('alternative')
+    await expect(gate.request(agent, async () => { throw new BridgeToolError('timeout', 'lost reply') }, 'browser_click')).rejects.toThrow('lost reply')
+    await expect(gate.request(agent, write, 'browser_click')).rejects.toMatchObject({ code: 'write-blocked-unconfirmed', notDispatched: true })
+    expect(write).toHaveBeenCalledOnce()
+  })
+
+  it.each([true, false])('retains Host dispatch knowledge through design failure guidance: unsent=%s', async notDispatched => {
+    const gate = new BrowserApprovalGate(), agent = {}
+    await expect(gate.request(agent, async () => { throw new BridgeToolError('content-unavailable', 'Unavailable view', notDispatched) }, 'browser_set_design_zoom'))
+      .rejects.toMatchObject({ notDispatched, message: expect.stringContaining('enlarge the design view manually') })
+    await expect(gate.request(agent, async () => 'not reached', 'browser_snapshot'))
+      .rejects.toMatchObject({ notDispatched: true })
+  })
+
+  it('does not accept an unsent claim from an arbitrary error', async () => {
+    const gate = new BrowserApprovalGate(), agent = {}, write = vi.fn(async () => 'unsafe')
+    const fake = Object.assign(new Error('no action sent'), { code: 'content-unavailable', notDispatched: true })
+    await expect(gate.request(agent, async () => { throw fake }, 'browser_click')).rejects.toBe(fake)
+    await expect(gate.request(agent, write, 'browser_click')).rejects.toThrow('unconfirmed result')
+    expect(write).not.toHaveBeenCalled()
+  })
+
   it('allows fresh observation and another method after a stale reference without applying an action', async () => {
     const gate = new BrowserApprovalGate(), agent = {}
     await expect(gate.request(agent, async () => { throw new BridgeToolError('element-stale', 'stale') }, 'browser_click')).rejects.toThrow('stale')

@@ -100,6 +100,7 @@ export class BridgeToolError extends HarnessError {
   constructor(
     code: ToolErrorCode,
     message: string,
+    /** Host-proven dispatch fact, never copied from a page or wire error. */
     readonly notDispatched = false,
   ) {
     super(message, code)
@@ -258,10 +259,10 @@ export class BridgeServer {
   ): Promise<unknown> {
     let execution: BrowserRunExecution | undefined
     try { execution = this.deps.runs?.executionFor(sessionId) }
-    catch { throw new BridgeToolError('action-failed', 'Browser run execution context is missing, expired or not permitted to dispatch. Re-establish the run context before further actions.') }
+    catch { throw new BridgeToolError('action-failed', 'Browser run execution context is missing, expired or not permitted to dispatch. Re-establish the run context before further actions.', true) }
     if (execution !== undefined) {
-      if (isRunTabMutation(name)) throw new BridgeToolError('execution-denied', 'Run-bound tab creation, follow and close are unavailable. Pause the task and use its selected-page continuation control.')
-      if (this.deps.dispatches === undefined) throw new BridgeToolError('internal', 'Run-scoped browser dispatch requires a durable ledger')
+      if (isRunTabMutation(name)) throw new BridgeToolError('execution-denied', 'Run-bound tab creation, follow and close are unavailable. Pause the task and use its selected-page continuation control.', true)
+      if (this.deps.dispatches === undefined) throw new BridgeToolError('internal', 'Run-scoped browser dispatch requires a durable ledger', true)
       sessionId = execution.sessionId
       signal = AbortSignal.any([signal, execution.signal])
     }
@@ -270,13 +271,13 @@ export class BridgeServer {
       throw new BridgeToolError('bridge-closed', 'no browser extension is connected to the bridge', true)
     }
     if ((name === 'browser_screenshot' || name === 'browser_click_at') && !conn.visualViewport) {
-      throw new BridgeToolError('content-unavailable', 'Visual browser tools require an updated Chrome extension and Host Bridge.')
+      throw new BridgeToolError('content-unavailable', 'Visual browser tools require an updated Chrome extension and Host Bridge.', true)
     }
     if (name === 'browser_measure_layout' && !conn.layoutMetrics) {
-      throw new BridgeToolError('content-unavailable', 'Layout measurement requires an updated extension and Host Bridge.')
+      throw new BridgeToolError('content-unavailable', 'Layout measurement requires an updated extension and Host Bridge.', true)
     }
     if (name === 'browser_set_design_zoom' && !conn.designViewZoom) {
-      throw new BridgeToolError('content-unavailable', 'Design zoom requires an updated extension and Host Bridge.')
+      throw new BridgeToolError('content-unavailable', 'Design zoom requires an updated extension and Host Bridge.', true)
     }
     const targetBinding = execution !== undefined && isPageBrowserTool(name) ? this.expectedRunTarget(execution, conn) : undefined
     // A caller that already aborted must not dispatch: the abort listener
@@ -289,7 +290,7 @@ export class BridgeServer {
     const expiresAt = Date.now() + timeoutMs
     let copied: Record<string, unknown>
     try { copied = JSON.parse(canonicalize(args)) as Record<string, unknown> }
-    catch { throw new BridgeToolError('bad-args', 'browser arguments must be plain JSON data') }
+    catch { throw new BridgeToolError('bad-args', 'browser arguments must be plain JSON data', true) }
     if (this.deps.dispatches === undefined) {
       const actionId = makeActionId()
       const requestDigest = createHash('sha256').update(toolCommandMaterial({ actionId, name, args: copied,
@@ -303,7 +304,7 @@ export class BridgeServer {
     const pin = this.runTargets.get(execution.runId)
     if (pin === undefined || pin.controlRevision < execution.controlRevision) return
     if (pin.controlRevision !== execution.controlRevision || pin.sessionId !== execution.sessionId || pin.connectionId !== conn.connectionId) {
-      throw new BridgeToolError('execution-denied', 'The run target belongs to an older connection or control revision. Establish a new trusted execution revision before continuing.')
+      throw new BridgeToolError('execution-denied', 'The run target belongs to an older connection or control revision. Establish a new trusted execution revision before continuing.', true)
     }
     return pin.id
   }
@@ -346,7 +347,7 @@ export class BridgeServer {
       }
     } catch (error) {
       if (error instanceof BridgeToolError) throw error
-      throw new BridgeToolError('internal', 'browser dispatch could not be durably recorded; no action was sent')
+      throw new BridgeToolError('internal', 'browser dispatch could not be durably recorded; no action was sent', true)
     }
     return this.sendTool(conn, id, name, args, signal, expiresAt, action, sessionId, execution, targetBinding)
   }

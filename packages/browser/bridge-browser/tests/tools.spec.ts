@@ -350,4 +350,14 @@ describe('registerBrowserTools', () => {
     const output = tool.definition.output as { render: (args: unknown, value: unknown) => unknown }
     expect(output.render({}, { text: 'hello' })).toEqual([{ type: 'text', text: 'hello' }])
   })
+
+  it.each(['internal', 'content-unavailable', 'execution-denied', 'action-failed'])('keeps a Host-unsent %s refusal distinct from a delivered failure', async code => {
+    const h = makeHarness(); registerBrowserTools(h.ctx, h.bridge, { toolTimeoutMs: 1000, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
+    const hook = (h.ctx.on as ReturnType<typeof vi.fn>).mock.calls.find(([name]) => name === 'tools/execute')![1]
+    for (const [name, state] of [['BrowserNotDispatchedError', 'not-applied'], ['BridgeToolError', 'uncertain']]) {
+      const result = await hook({ name: 'browser_click' }, async () => ({ isError: true,
+        error: { message: 'No action was sent', info: { name, code } }, content: [] }))
+      expect(result.meta.browserFeedback).toMatchObject({ state, businessChange: 'not-verified' })
+    }
+  })
 })
