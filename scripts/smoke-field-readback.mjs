@@ -14,15 +14,17 @@ import {startDshBackend} from '../benchmark/lib/dsh-process.mjs'
 import {startExtensionBrowser} from '../benchmark/lib/extension-browser.mjs'
 import {within} from '../benchmark/lib/extension-connection.mjs'
 import {parseMarkedModelReport} from '../benchmark/lib/model-report.mjs'
-import {FIELD_READBACK_CASES,READONLY_FIELD_CASES,startFieldReadbackSite} from './fixtures/field-readback-site.mjs'
+import {FIELD_READBACK_CASES,READONLY_FIELD_CASES,EDITOR_READBACK_CASES,startFieldReadbackSite} from './fixtures/field-readback-site.mjs'
 
 const repo=resolve(import.meta.dirname,'..'),require=createRequire(join(repo,'package.json'))
 const bridgeRequire=createRequire(join(repo,'packages/browser/bridge-browser/package.json'))
 const cli=join(dirname(require.resolve('@deepseek-ai/dsh/package.json')),'lib/bin.js')
 const root=await mkdtemp(join(tmpdir(),'stride-field-readback-')),home=join(root,'home')
 const version=JSON.parse(await readFile(join(repo,'package.json'),'utf8')).version,realModel=process.env.STRIDE_REAL_MODEL==='1'
-const readonlyOnly=process.argv.includes('--readonly-only'),cases=readonlyOnly?READONLY_FIELD_CASES:FIELD_READBACK_CASES
-const base=join(repo,'.stride-private/validation/field-readback',version),label=(realModel?'real-model':'scripted')+(readonlyOnly?'-readonly':'')
+const readonlyOnly=process.argv.includes('--readonly-only'),editorOnly=process.argv.includes('--editor-only')
+assert.ok(!(readonlyOnly&&editorOnly),'Choose one scenario subset')
+const scope=readonlyOnly?'readonly-only':editorOnly?'editor-only':'all',cases=readonlyOnly?READONLY_FIELD_CASES:editorOnly?EDITOR_READBACK_CASES:FIELD_READBACK_CASES
+const base=join(repo,'.stride-private/validation/field-readback',version),label=(realModel?'real-model':'scripted')+(readonlyOnly?'-readonly':editorOnly?'-editor':'')
 await mkdir(base,{recursive:true});const artifacts=await mkdtemp(join(base,label+'-'))
 await writeFile(join(base,label+'.json'),JSON.stringify({passed:false,status:'in-progress',evidenceDirectory:artifacts.slice(base.length+1)})+'\n',{mode:0o600})
 const env={...process.env,DSH_HOME:home,DSH_TELEMETRY_DISABLED:'1'}
@@ -31,7 +33,8 @@ const summaries=[],programs={}
 const findRef=String.raw`function ref(view,label){const line=view.text.split('\n').find(line=>line.includes(label));const value=line?.match(/ref=(obs_[a-f0-9-]+:\d+)/)?.[1];if(!value)throw Error('Missing observed '+label);return value;}`
 for(const kind of FIELD_READBACK_CASES){
   const select=kind.startsWith('select'),positive=kind.endsWith('-ok')
-  const edit=`tools.${select?'browser_select':'browser_type'}({elementRef:ref(before,${JSON.stringify(select?'select "Field"':kind.startsWith('editor')?'textbox "Field"':kind.startsWith('textarea')?'textarea "Field"':'input "Field"')}),${select?'optionIndex:1':"text:'accepted',replace:true"}})`
+  const text=kind==='editor-multiline-ok'?'first\nsecond':'accepted',replace=kind!=='editor-append-ok'
+  const edit=`tools.${select?'browser_select':'browser_type'}({elementRef:ref(before,${JSON.stringify(select?'select "Field"':kind.startsWith('editor')?'textbox "Field"':kind.startsWith('textarea')?'textarea "Field"':'input "Field"')}),${select?'optionIndex:1':`text:${JSON.stringify(text)},replace:${replace}`}})`
   if(kind.includes('readonly')){
     programs[kind]=findRef+`const before=await tools.browser_snapshot({});let refused=false;try{await ${edit}}catch{refused=true}if(!refused)throw Error('Readonly field was edited');
 const note=await tools.browser_snapshot({});await tools.browser_type({elementRef:ref(note,'input "Note"'),text:'accepted',replace:true});
@@ -93,8 +96,8 @@ export const inject=['llm','tools','agents'];export function apply(ctx){${realMo
     })
     try{
       const readonly=kind.includes('readonly'),positive=kind.endsWith('-ok')||readonly,select=kind.startsWith('select')
-      const task=readonly?'先读取 Field 的只读状态，保持其原值，只将可写的 Note 替换为 accepted 并保存。本轮目标是保存 Note，不能强制修改只读 Field。':`将 Field ${select?'选择为 Large':'替换为 accepted'}，再保存。`
-      const prompt=realModel?`仅操作当前已授权本地合成页，${task}不要操作文件、其他网站或恢复权限。工具提示写入未确认时停止后续写入，只读核对并报告；不自动重试。最后返回 JSON：{"marker":"FIELD_MODEL_DONE","goalReached":true或false,"reason":"实际观察依据和未确认项"}。`:'FIELD_CASE='+kind
+      const task=readonly?'先读取 Field 的只读状态，保持其原值，只将可写的 Note 替换为 accepted 并保存。本轮目标是保存 Note，不能强制修改只读 Field。':kind==='editor-append-ok'?'在 Field 当前原文末尾追加 accepted，保留原文，再保存。':kind==='editor-multiline-ok'?'将 Field 替换为两行纯文本：第一行 first，第二行 second，再保存。':`将 Field ${select?'选择为 Large':'替换为 accepted'}，再保存。`
+      const prompt=realModel?`仅操作当前已授权本地合成页，${task}${positive&&EDITOR_READBACK_CASES.includes(kind)?'用一次输入提交完整文本（包含所需换行），只保存一次。':''}不要操作文件、其他网站或恢复权限。工具提示写入未确认时停止后续写入，只读核对并报告；不自动重试。最后返回 JSON：{"marker":"FIELD_MODEL_DONE","goalReached":true或false,"reason":"实际观察依据和未确认项"}。`:'FIELD_CASE='+kind
       cancelTimer=setTimeout(()=>{void host.client.rpc('session.cancel',{sessionId}).catch(()=>{});finish('test-timeout')},realModel?240000:45000)
       const input=browser.panel.locator('.composer textarea');await input.fill(prompt);await input.press('Enter')
       const reason=await within(done,realModel?245000:50000,'field turn')
@@ -109,7 +112,8 @@ export const inject=['llm','tools','agents'];export function apply(ctx){${realMo
       if(!positive&&!realModel)assert.ok(feedback.some(f=>f.state==='not-applied'&&f.code==='result_unknown'),'Fresh Save reference must be refused by the Host write fence')
       const saves=site.state().saves.filter(row=>row.case===kind)
       assert.equal(saves.length,positive?1:0)
-      if(positive){assert.equal(saves[0].value,readonly?(select?'Small':'old'):(select?'Large':'accepted'));assert.equal(calls.filter(c=>c.name==='browser_click').length,1)}
+      if(kind==='editor-retarget'){assert.equal(await browser.target.locator('#other').innerText(),'untouched');assert.equal(await browser.target.locator('#field').innerText(),'old')}
+      if(positive){assert.equal(saves[0].value,readonly?(select?'Small':'old'):kind==='editor-append-ok'?'oldaccepted':kind==='editor-multiline-ok'?'first\nsecond':(select?'Large':'accepted'));assert.equal(calls.filter(c=>c.name==='browser_click').length,1)}
       let fieldEvents
       if(readonly){
         assert.equal(saves[0].note,'accepted');fieldEvents=await browser.target.evaluate(()=>window.fieldEvents)
@@ -130,7 +134,7 @@ export const inject=['llm','tools','agents'];export function apply(ctx){${realMo
   }
   await browser.panel.setViewportSize({width:360,height:800});assert.ok(await browser.panel.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1))
   await browser.panel.screenshot({path:join(artifacts,'panel.png')})
-  const summary={passed:true,version,scope:readonlyOnly?'readonly-only':'all',realHost:true,isolatedChrome:true,browserVersion:browser.browserVersion,scriptedModel:!realModel,realModel,cases:summaries,originalHostUntouched:true,evidenceDirectory:artifacts.slice(base.length+1),hostBundleSha256:createHash('sha256').update(await readFile(join(repo,'packages/browser/bridge-browser/lib/index.js'))).digest('hex'),contentBundleSha256:createHash('sha256').update(await readFile(join(repo,'extensions/dsh-browser/dist/content.js'))).digest('hex')}
+  const summary={passed:true,version,scope,realHost:true,isolatedChrome:true,browserVersion:browser.browserVersion,scriptedModel:!realModel,realModel,cases:summaries,originalHostUntouched:true,evidenceDirectory:artifacts.slice(base.length+1),hostBundleSha256:createHash('sha256').update(await readFile(join(repo,'packages/browser/bridge-browser/lib/index.js'))).digest('hex'),contentBundleSha256:createHash('sha256').update(await readFile(join(repo,'extensions/dsh-browser/dist/content.js'))).digest('hex')}
   await writeFile(join(artifacts,'result.json'),JSON.stringify(summary,null,2)+'\n',{mode:0o600});await writeFile(join(base,label+'.json'),JSON.stringify(summary,null,2)+'\n',{mode:0o600});console.log(JSON.stringify(summary))
 }catch(error){
   await writeFile(join(artifacts,'failure-events.json'),JSON.stringify(events,null,2)+'\n',{mode:0o600})

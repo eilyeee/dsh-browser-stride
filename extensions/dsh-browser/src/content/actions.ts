@@ -291,10 +291,10 @@ export function resetDeltaState(ids: ElementIds): void {
 }
 
 /** A partial field edit is not undone by retiring its observation. */
-function unconfirmedFieldTarget(index: number, ctx: ActionContext): ActionResult {
+function unconfirmedFieldTarget(index: number, ctx: ActionContext, reason = 'the target changed during page events'): ActionResult {
   resetDeltaState(ctx.ids)
   return {
-    text: `Field [${index}] may have partially changed, but the target changed during page events. Re-observe and check its state before continuing.`,
+    text: `Field [${index}] may have partially changed, but ${reason}. Re-observe and check its state before continuing.`,
     feedback: { version: 1, state: 'readback-unconfirmed', businessChange: 'not-verified' },
   }
 }
@@ -425,8 +425,15 @@ function editingHost(el: HTMLElement): HTMLElement | null {
  * @returns true when the element can receive rich-text input.
  */
 function isEditable(el: Element): el is HTMLElement {
-  return el instanceof HTMLElement && (el.isContentEditable || editingHost(el) !== null)
+  return el instanceof HTMLElement && (typeof el.isContentEditable === 'boolean' ? el.isContentEditable : editingHost(el) !== null)
 }
+
+/** Rendered plain text only; formatting and business persistence remain unverified. */
+function editorText(host: HTMLElement): string {
+  const text = typeof host.innerText === 'string' ? host.innerText : host.textContent ?? ''
+  return normalizeEditorText(text)
+}
+function normalizeEditorText(text: string): string { return text.replace(/\r\n?/g, '\n').replace(/\u00a0/g, ' ') }
 
 /**
  * Insert text into a rich-text host through the browser's editing pipeline.
@@ -434,35 +441,44 @@ function isEditable(el: Element): el is HTMLElement {
  * Editors such as Lexical, Draft.js and ProseMirror keep their own document
  * model and reconcile away foreign DOM writes, so assigning `textContent`
  * silently reverts and the caller's success report becomes a lie.
- * `execCommand('insertText')` is deprecated but remains the only path that
- * produces the `beforeinput`/`input` sequence those editors listen for. Hosts
- * without it keep the direct-write fallback.
+ * `execCommand('insertText')` uses the browser's editing pipeline. The bridge
+ * offers a synthetic cancelable beforeinput because the command does not
+ * consistently emit it (MDN: Web/API/Document/execCommand). Hosts without the
+ * command keep the direct-write fallback. A present command that fails or
+ * throws is never followed by another write: it may have been cancelled or
+ * partially applied by the editor.
  *
- * @param el - element addressed by the action.
+ * @param host - the verified editable host.
  * @param text - text to insert.
  * @param replace - whether to replace the host's current contents.
  */
-function typeIntoContentEditable(el: HTMLElement, text: string, replace: boolean, stillCurrent: () => boolean): boolean {
-  // `isEditable` already refused a disabled island, so a null host here means
-  // the element is editable without the attribute; address it directly.
-  const host = editingHost(el) ?? el
+function typeIntoContentEditable(host: HTMLElement, text: string, replace: boolean, stillCurrent: () => boolean): boolean {
   host.focus()
-  if (!stillCurrent()) return false
-  const selection = host.ownerDocument.getSelection()
-  if (selection !== null) {
-    const range = host.ownerDocument.createRange()
-    range.selectNodeContents(host)
-    // A caret collapsed to the end appends; a full selection is replaced by insertText.
-    if (!replace) range.collapse(false)
-    selection.removeAllRanges()
-    selection.addRange(range)
-  }
   const doc = host.ownerDocument
+  if (!stillCurrent() || doc.activeElement !== host) return false
+  const selection = doc.getSelection()
+  if (selection === null) return false
+  const range = doc.createRange()
+  range.selectNodeContents(host)
+  // A caret collapsed to the end appends; a full selection is replaced by insertText.
+  if (!replace) range.collapse(false)
+  selection.removeAllRanges()
+  selection.addRange(range)
+  const boundary = { start: range.startContainer, from: range.startOffset, end: range.endContainer, to: range.endOffset }
+  // execCommand does not consistently emit beforeinput across browsers. Offer
+  // cancellation explicitly and never suppress any browser-emitted event.
+  if (!host.dispatchEvent(new InputEvent('beforeinput', {
+    inputType: 'insertText', data: text, bubbles: true, cancelable: true, composed: true,
+  }))) return false
+  if (!stillCurrent() || doc.activeElement !== host || selection.rangeCount !== 1) return false
+  const current = selection.getRangeAt(0)
+  if (current.startContainer !== boundary.start || current.startOffset !== boundary.from
+    || current.endContainer !== boundary.end || current.endOffset !== boundary.to) return false
   if (typeof doc.execCommand === 'function') {
     try {
-      if (doc.execCommand('insertText', false, text)) return stillCurrent()
+      return doc.execCommand('insertText', false, text) && stillCurrent()
     } catch {
-      // Fall through to the direct-write path below.
+      return false
     }
   }
   if (replace) host.textContent = ''
@@ -478,14 +494,18 @@ async function typeAction(args: Record<string, unknown>, ctx: ActionContext): Pr
   const replace = args.replace === true
   const el = elementOrThrow(ctx.ids, index)
   if (isFieldReadOnly(el)) throw new ActionError('field-readonly', `Field [${index}] is read-only for direct editing. Do not force this edit; choose another writable control or ask the user.`)
+  const editableHost = !(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) && isEditable(el)
+    ? editingHost(el) ?? el : undefined
   const stillCurrent = (): boolean => referenceStillCurrent(args, ctx.ids, index)
     && !isFieldReadOnly(el)
     && (!(el instanceof HTMLInputElement) || TYPABLE_INPUT_TYPES.has(el.type))
+    && (editableHost === undefined || (isEditable(el) && (editingHost(el) ?? el) === editableHost))
   let expectedValue: string | undefined
   if (!stillCurrent()) throw new ActionError('action-failed', `Element [${index}] is read-only or does not support text input.`)
-  if (isEditable(el)) {
-    if (!typeIntoContentEditable(el, text, replace, stillCurrent)) {
-      return unconfirmedFieldTarget(index, ctx)
+  if (editableHost !== undefined) {
+    expectedValue = normalizeEditorText((replace ? '' : editorText(editableHost)) + text)
+    if (!typeIntoContentEditable(editableHost, text, replace, stillCurrent)) {
+      return unconfirmedFieldTarget(index, ctx, 'the editor did not confirm the input command')
     }
   } else if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
     expectedValue = `${replace ? '' : el.value}${text}`
@@ -497,6 +517,9 @@ async function typeAction(args: Record<string, unknown>, ctx: ActionContext): Pr
   }
   const settled = await waitForPageSettled(TYPE_SETTLE)
   if (!stillCurrent()) return unconfirmedFieldTarget(index, ctx)
+  if (editableHost !== undefined && editorText(editableHost) !== expectedValue) {
+    return withPageDelta(`Input was sent to [${index}], but the editor text could not be confirmed at readback. Observe again before continuing.${settleNote(settled)}`, ctx, settled, 'readback-unconfirmed')
+  }
   if (expectedValue !== undefined && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)
     && (!el.isConnected || el.value !== expectedValue)) {
     return withPageDelta(`Input was sent to [${index}], but its value could not be confirmed at readback. Observe again before continuing.${settleNote(settled)}`, ctx, settled, 'readback-unconfirmed')

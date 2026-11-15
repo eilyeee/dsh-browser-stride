@@ -49,6 +49,14 @@ package versions currently identify development builds, not supported releases.
 
 ### Fixed
 
+- Development build 0.1.13 reads back the rendered plain text of rich-text
+  inputs, marking rollback or mismatch unconfirmed. A present editing command
+  that rejects or throws is never followed by a direct DOM write; only an
+  absent command retains that fallback. A cancelable synthetic beforeinput is
+  offered first; focused selection and editing-host identity are rechecked,
+  and native inputs nested in editable regions keep their native value path.
+  Plain-text readback does not verify editor formatting, framework state or a
+  business save. Benchmark suite 23 separates these feedback semantics.
 - Development build 0.1.12 refuses direct edits to native or ARIA readonly
   fields, including native single-selects. A field that becomes readonly during
   editing retains the unconfirmed-result fence. An initially readonly field is

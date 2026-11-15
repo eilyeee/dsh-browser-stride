@@ -12,12 +12,13 @@ import type { ElementIds } from '../src/content/ids.ts'
 const BUDGET = { maxItems: 20, maxForms: 10, maxChars: 2_000 }
 
 function idsFor(element: Element): ElementIds {
-  return { elementByIndex: vi.fn(() => element), resolveReference: (ref: string) => Number(ref.split(':')[1]) } as unknown as ElementIds
+  return { elementByIndex: vi.fn(() => element), resolveReference: (ref: string) => Number(ref.split(':')[1]), clearObservation: vi.fn() } as unknown as ElementIds
 }
 
 function host(html = ''): HTMLElement {
   const el = document.createElement('div')
   el.setAttribute('contenteditable', 'true')
+  el.tabIndex = 0
   el.innerHTML = html
   document.body.append(el)
   return el
@@ -28,8 +29,8 @@ function host(html = ''): HTMLElement {
  *
  * A stub that just returns `true` cannot distinguish "the command ran" from
  * "the editor accepted the input", which is the exact failure this fix exists
- * to correct. This one replaces the current selection and emits the
- * `beforeinput`/`input` sequence, so the resulting DOM is the observable proof.
+ * to correct. This one replaces the current selection and emits input; the
+ * content script offers beforeinput separately. The DOM is the observable proof.
  *
  * @param accept - when false, simulates a host that refuses the command.
  * @returns the `execCommand` spy.
@@ -44,7 +45,6 @@ function stubEditingPipeline(accept = true): ReturnType<typeof vi.fn> {
     const node = container instanceof HTMLElement ? container : container.parentElement
     const editable = node?.closest('[contenteditable]:not([contenteditable="false"])')
     if (!(editable instanceof HTMLElement)) return false
-    editable.dispatchEvent(new Event('beforeinput', { bubbles: true, cancelable: true }))
     range.deleteContents()
     range.insertNode(document.createTextNode(value))
     editable.dispatchEvent(new Event('input', { bubbles: true }))
@@ -166,13 +166,14 @@ describe('typing into rich-text editors', () => {
     expect(el.textContent).toBe('plain')
   })
 
-  it('falls back to the direct write when execCommand reports failure', async () => {
+  it('does not force a direct write when an available execCommand reports failure', async () => {
     const el = host()
     stubEditingPipeline(false)
 
-    await runAction('browser_type', { elementRef: 'obs_test:3', text: 'plain' }, { ids: idsFor(el), budget: BUDGET })
+    const result = await runAction('browser_type', { elementRef: 'obs_test:3', text: 'plain' }, { ids: idsFor(el), budget: BUDGET })
 
-    expect(el.textContent).toBe('plain')
+    expect(el.textContent).toBe('')
+    expect(result.feedback).toMatchObject({ state: 'readback-unconfirmed' })
   })
 })
 

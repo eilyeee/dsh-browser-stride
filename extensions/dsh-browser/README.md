@@ -44,6 +44,15 @@ without stopping edits to other writable fields; a field locked after partial
 editing keeps the uncertainty fence. Readonly text inputs used as picker
 triggers can still be clicked to open their intended menu.
 
+Development build 0.1.13 verifies rich-text edits by reading their rendered
+plain text. Rollback or mismatch keeps the unconfirmed-write fence. A failed
+or throwing editing command is not retried with direct DOM replacement; that
+fallback is limited to hosts without the command. Text readback normalizes
+line endings and editing-space variants, and verifies neither formatting nor
+framework or business persistence.
+
+Before a rich-text edit, the bridge offers a cancelable synthetic beforeinput and checks focus/selection again. Browser-emitted events remain available to the page.
+
 From the repository root:
 
 ```sh
