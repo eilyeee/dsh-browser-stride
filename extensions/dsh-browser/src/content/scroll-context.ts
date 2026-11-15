@@ -1,6 +1,7 @@
 /** Vertical user-scrollable context for an observed control, excluding the viewport. */
+import { composedParent } from './dom-tree.ts'
 export function nearestScrollContainer(element: Element): HTMLElement | undefined {
-  for (let node: Element | null = element; node !== null; node = node.parentElement) {
+  for (let node: Element | null = element; node !== null; node = composedParent(node)) {
     if (!(node instanceof HTMLElement) || node === document.body || node === document.documentElement
       || node === document.scrollingElement) continue
     const style = getComputedStyle(node)

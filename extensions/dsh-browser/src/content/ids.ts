@@ -12,6 +12,7 @@
 import { accessibleName, isVisible } from './extract.ts'
 import { isControlDisabled, optionContextIdentity } from './custom-options.ts'
 import { nearestScrollContainer } from './scroll-context.ts'
+import { composedParent, shadowContextIdentity } from './dom-tree.ts'
 import { parseElementRef, type ObservationId } from '@eilyeee/dsh-browser-stride/src/contracts/ids.ts'
 
 /** Attribute written on every inventoried element (observable numbering). */
@@ -119,6 +120,13 @@ export class ElementIds {
     this.observation = undefined
   }
 
+  /** Focus inside a component is not a substitute for an exposed control reference. */
+  isObservedActionTarget(element: Element): boolean {
+    const index = this.idByElement.get(element)
+    return index !== undefined && this.observation?.url === location.href
+      && this.observation.targets.has(index) && this.isActionTargetCurrent(index)
+  }
+
   /** Resolve a reference only in the current observation and same document URL. */
   resolveReference(value: unknown, needsOptions = false): number | undefined {
     if (typeof value !== 'string') return undefined
@@ -142,7 +150,7 @@ export class ElementIds {
 }
 
 function ancestorsOpaque(el: Element): boolean {
-  for (let parent = el.parentElement; parent !== null; parent = parent.parentElement) {
+  for (let parent = composedParent(el); parent !== null; parent = composedParent(parent)) {
     if (getComputedStyle(parent).opacity === '0') return false
   }
   return true
@@ -158,6 +166,7 @@ function actionIdentity(el: Element): string | undefined {
     || (el instanceof HTMLInputElement && ['button', 'submit', 'reset', 'image'].includes(el.type))
     ? el.value : null
   const identity = JSON.stringify([
+    shadowContextIdentity(el),
     el.tagName, el.getAttribute('role'), el.getAttribute('type'), el.getAttribute('name'),
     el.getAttribute('href'), el instanceof HTMLAnchorElement ? [
       el.href, el.target, el.rel, el.getAttribute('download'), el.getAttribute('ping'),

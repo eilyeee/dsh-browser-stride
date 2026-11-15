@@ -10,11 +10,12 @@
  * @module
  */
 
-import { accessibleName, collectInteractive, isInViewport, isVisible, mainText, pageText, truncate } from './extract.ts'
+import { accessibleName, collectInteractiveDetails, isInViewport, isVisible, mainText, pageText, truncate } from './extract.ts'
 import { ElementIds, SELECT_OPTION_LIMIT } from './ids.ts'
 import { isSensitiveField, maskValue } from './privacy.ts'
 import { customOptionSelected, isControlDisabled, isElementUiOption, isFieldReadOnly } from './custom-options.ts'
 import { scrollContext } from './scroll-context.ts'
+import { closestComposed, composedParent } from './dom-tree.ts'
 import { makeElementRef, makeObservationId, type ObservationId } from '@eilyeee/dsh-browser-stride/src/contracts/ids.ts'
 
 /** Role label per element kind (model-facing vocabulary). */
@@ -119,7 +120,7 @@ export interface SnapshotView {
   /** true when the inventory was renumbered (model should re-read ids). */
   reindexed: boolean
   /** Budget accounting: characters cut from main text and items/forms dropped by count caps. */
-  truncated: { mainChars: number; itemsDropped: number; formsDropped: number }
+  truncated: { mainChars: number; itemsDropped: number; formsDropped: number; openTreeLimited?: boolean }
   /** 总预算（渲染封顶用）。 */
   budgetChars: number
 }
@@ -168,7 +169,7 @@ function hrefHeadline(href: string): string {
  * @returns true when no ancestor fades the subtree out.
  */
 function ancestorsRendered(el: Element): boolean {
-  for (let node = el.parentElement; node !== null; node = node.parentElement) {
+  for (let node = composedParent(el); node !== null; node = composedParent(node)) {
     if (getComputedStyle(node).opacity === '0') return false
   }
   return true
@@ -208,7 +209,7 @@ function openDialogTest(): (dialog: Element) => boolean {
  * @returns the owning open dialog, or null.
  */
 function openDialogOf(el: Element, isOpen: (dialog: Element) => boolean): Element | null {
-  const dialog = el.closest('[role="dialog"], [aria-modal="true"]')
+  const dialog = closestComposed(el, '[role="dialog"], [aria-modal="true"]')
   return dialog !== null && isOpen(dialog) ? dialog : null
 }
 
@@ -228,7 +229,8 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
   const region = options.region !== undefined && options.region !== '' ? options.region : undefined
   const regionEl = region === undefined ? null : document.querySelector(region)
   if (region !== undefined && regionEl === null) throw new Error('The requested snapshot region does not exist; choose another selector.')
-  const elements = collectInteractive(document)
+  const collected = collectInteractiveDetails(document)
+  const elements = collected.elements
   const { added, removed } = ids.assign(elements)
   // A renumbering is only meaningful relative to a previous snapshot: the
   // first snapshot on a fresh document always adds everything.
@@ -242,7 +244,7 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
     inViewport: isInViewport(element),
     inDialog: openDialogOf(element, isOpenDialog) !== null,
     // Options are often portalled to body, outside their owning modal.
-    inPopup: isElementUiOption(element) || element.closest('[role="listbox"]') !== null,
+    inPopup: isElementUiOption(element) || closestComposed(element, '[role="listbox"]') !== null,
   }))
   const ordered = [...elementViews].sort((a, b) =>
     Number(b.inPopup && b.inViewport) - Number(a.inPopup && a.inViewport)
@@ -373,6 +375,7 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
     reindexed,
     truncated: {
       mainChars: main.truncated,
+      ...(collected.limited ? { openTreeLimited: true } : {}),
       itemsDropped: Math.max(0, elements.length - options.budget.maxItems),
       formsDropped: Math.max(0, formElements.length - options.budget.maxForms),
     },
@@ -443,6 +446,7 @@ function renderForm(form: FormFieldView, includeIdentity: boolean, observationId
 
 function appendTruncationNotes(lines: string[], view: SnapshotView): void {
   const notes: string[] = []
+  if (view.truncated.openTreeLimited === true) notes.push('Open DOM traversal limit reached; inventory is incomplete')
   if (view.truncated.mainChars > 0) notes.push(`Main content truncated by ${view.truncated.mainChars} characters`)
   if (view.truncated.itemsDropped > 0) notes.push(`${view.truncated.itemsDropped} additional elements omitted`)
   if (view.truncated.formsDropped > 0) notes.push(`${view.truncated.formsDropped} additional form fields omitted`)
@@ -451,12 +455,12 @@ function appendTruncationNotes(lines: string[], view: SnapshotView): void {
 
 function snapshotScope(view: SnapshotView): string {
   const textScope = view.region === undefined ? 'page main content' : `selector ${JSON.stringify(view.region)}`
-  return `Text scope: ${textScope}; control inventory: current frame.`
+  return `Text scope: ${textScope}; control inventory: current frame. Controls include open shadow roots; prose/CSS stay document-scoped.`
 }
 
 function snapshotLimits(view: SnapshotView): string {
   const optionsOmitted = view.forms.filter((form) => form.optionsTruncated).length
-  return `Snapshot limits: ${view.truncated.mainChars} main characters, ${view.truncated.itemsDropped} controls, ${view.truncated.formsDropped} fields, and options from ${optionsOmitted} selects omitted by collection limits; other inaccessible content may also be missing.`
+  return `Snapshot limits: ${view.truncated.mainChars} main characters, ${view.truncated.itemsDropped} controls, ${view.truncated.formsDropped} fields, and options from ${optionsOmitted} selects omitted by collection limits${view.truncated.openTreeLimited === true ? '; open DOM traversal limit reached' : ''}; closed roots and other inaccessible content may be missing.`
 }
 
 export function renderSnapshot(view: SnapshotView, delta: boolean, maxChars: number = view.budgetChars): string {

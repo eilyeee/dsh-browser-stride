@@ -12,7 +12,7 @@
 
 import { pageText, truncate } from './extract.ts'
 import { SELECT_OPTION_LIMIT, type ElementIds } from './ids.ts'
-import { isFieldReadOnly } from './custom-options.ts'
+import { isControlDisabled, isFieldReadOnly } from './custom-options.ts'
 import type { SnapshotBudget } from './snapshot.ts'
 import { buildSnapshot, renderSnapshotDetails } from './snapshot.ts'
 import { visualViewportState } from './visual.ts'
@@ -188,7 +188,7 @@ function setNativeValue(input: HTMLInputElement | HTMLTextAreaElement, value: st
   } else {
     setter.call(input, value)
   }
-  input.dispatchEvent(new Event('input', { bubbles: true }))
+  input.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
   if (!stillCurrent()) return false
   input.dispatchEvent(new Event('change', { bubbles: true }))
   return stillCurrent()
@@ -496,6 +496,9 @@ async function typeAction(args: Record<string, unknown>, ctx: ActionContext): Pr
   if (isFieldReadOnly(el)) throw new ActionError('field-readonly', `Field [${index}] is read-only for direct editing. Do not force this edit; choose another writable control or ask the user.`)
   const editableHost = !(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) && isEditable(el)
     ? editingHost(el) ?? el : undefined
+  if (editableHost?.getRootNode() instanceof ShadowRoot) {
+    throw new ActionError('bad-args', 'Rich-text editing inside a shadow root is not supported. Do not force or retry this edit.')
+  }
   const stillCurrent = (): boolean => referenceStillCurrent(args, ctx.ids, index)
     && !isFieldReadOnly(el)
     && (!(el instanceof HTMLInputElement) || TYPABLE_INPUT_TYPES.has(el.type))
@@ -543,7 +546,7 @@ async function selectAction(args: Record<string, unknown>, ctx: ActionContext): 
     throw new ActionError('bad-args', 'The option is unavailable or was not included in the snapshot.')
   }
   el.selectedIndex = optionIndex
-  el.dispatchEvent(new Event('input', { bubbles: true }))
+  el.dispatchEvent(new Event('input', { bubbles: true, composed: true }))
   const stillCurrent = (): boolean => referenceStillCurrent(args, ctx.ids, index, true) && !isFieldReadOnly(el)
   if (!stillCurrent()) {
     return unconfirmedFieldTarget(index, ctx)
@@ -574,7 +577,13 @@ async function pressAction(args: Record<string, unknown>, ctx: ActionContext): P
   if (key === '' || key.length > 64 || /[\u0000-\u001f\u007f]/u.test(key)) {
     throw new ActionError('bad-args', 'key must be a non-empty KeyboardEvent.key value of at most 64 characters without control characters.')
   }
-  const target = document.activeElement instanceof HTMLElement ? document.activeElement : document.body
+  let active = document.activeElement
+  while (active?.shadowRoot?.activeElement != null) active = active.shadowRoot.activeElement
+  const target = active instanceof HTMLElement ? active : document.body
+  if (target.getRootNode() instanceof ShadowRoot && !ctx.ids.isObservedActionTarget(target)) {
+    throw new ActionError('element-stale', 'The focused shadow control was not exposed by the current observation. Take a fresh snapshot before sending keys.')
+  }
+  if (isControlDisabled(target)) throw new ActionError('bad-args', 'The focused control is disabled or inert; re-observe before sending keys.')
   const control = Object.hasOwn(CONTROL_KEYS, key) ? CONTROL_KEYS[key] : undefined
   const init: KeyboardEventInit = { key, bubbles: true, cancelable: true,
     ...(control === undefined ? {} : { code: control[0], keyCode: control[1], which: control[1] }) }

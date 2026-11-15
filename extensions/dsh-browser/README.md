@@ -1,5 +1,14 @@
 # Browser extension
 
+Development build 0.1.15 includes native controls inside open Shadow DOM in
+snapshots. Internal labels stay scoped to their tree; hidden, disabled, readonly
+and inert host/slot boundaries still apply. A control moved between components
+needs a new reference. Recognizable sensitive values are masked, including copies
+in document text; if bounded inspection is incomplete the text is withheld.
+Text prose and CSS selectors remain document-scoped. Closed roots and shadow-root
+rich-text editing are not supported. Synthetic keys target the focused internal
+control without guaranteeing native keyboard behavior.
+
 Development build 0.1.14 adds vertical container scrolling: `browser_scroll`
 accepts an optional current control `elementRef` and scrolls only the nearest
 container captured with that observation. Snapshot items show `scroll-container`

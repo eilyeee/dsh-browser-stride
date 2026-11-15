@@ -11,6 +11,7 @@
 
 import { redactSensitivePageText } from './privacy.ts'
 import { ELEMENT_UI_OPTION_SELECTOR } from './custom-options.ts'
+import { composedParent, queryOpenRoots } from './dom-tree.ts'
 
 /** Every element type the model may be asked to operate on. */
 const INTERACTIVE_SELECTOR = [
@@ -48,7 +49,7 @@ export function isVisible(el: Element): boolean {
   if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false
   // Opacity is not inherited. Portalled/closing widgets can leave their
   // children with a rectangle even when the entire popup is faded out.
-  for (let parent = el.parentElement; parent !== null; parent = parent.parentElement) {
+  for (let parent = composedParent(el); parent !== null; parent = composedParent(parent)) {
     const ancestor = getComputedStyle(parent)
     if (ancestor.display === 'none' || ancestor.opacity === '0') return false
   }
@@ -107,16 +108,19 @@ export function accessibleName(el: Element, maxChars: number = MAX_ITEM_NAME_CHA
   if (ariaLabel !== null && ariaLabel.trim() !== '') return truncate(clean(ariaLabel), maxChars).text
 
   const labelledBy = el.getAttribute('aria-labelledby')
+  const root = el.getRootNode()
   if (labelledBy !== null) {
-    const ref = document.getElementById(labelledBy.split(/\s+/)[0] ?? '')
-    const refText = ref?.textContent
-    if (refText !== undefined && refText.trim() !== '') return truncate(clean(refText), maxChars).text
+    const refs = [...new Set(labelledBy.trim().split(/\s+/))]
+      .map(id => root instanceof Document || root instanceof ShadowRoot ? root.getElementById(id)?.textContent ?? '' : '')
+      .filter(text => text.trim() !== '')
+    if (refs.length > 0) return truncate(clean(refs.join(' ')), maxChars).text
   }
 
   const labelable = el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement
   if (labelable) {
     if (el.id !== '') {
-      const label = el.ownerDocument.querySelector<HTMLLabelElement>(`label[for="${cssEscape(el.id)}"]`)
+      const label = root instanceof Document || root instanceof ShadowRoot
+        ? root.querySelector<HTMLLabelElement>(`label[for="${cssEscape(el.id)}"]`) : null
       const labelText = label?.textContent
       if (labelText !== undefined && labelText.trim() !== '') return truncate(clean(labelText), maxChars).text
     }
@@ -159,14 +163,13 @@ function cssEscape(value: string): string {
  * @returns the interactive inventory.
  */
 export function collectInteractive(root: Document | Element): Element[] {
-  const seen = new Set<Element>()
-  const result: Element[] = []
-  for (const el of root.querySelectorAll(INTERACTIVE_SELECTOR)) {
-    if (seen.has(el)) continue
-    seen.add(el)
-    if (isVisible(el)) result.push(el)
-  }
-  return result
+  return collectInteractiveDetails(root).elements
+}
+
+/** A partial scan must remain distinguishable from an empty page. */
+export function collectInteractiveDetails(root: Document | Element): { elements: Element[]; limited: boolean } {
+  const found = queryOpenRoots(root, INTERACTIVE_SELECTOR)
+  return { elements: found.elements.filter(isVisible), limited: found.limited }
 }
 
 /**

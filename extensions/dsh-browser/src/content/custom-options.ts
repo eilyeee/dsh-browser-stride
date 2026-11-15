@@ -1,4 +1,5 @@
 /** Observed DOM adapters only; these selectors never grant page access. */
+import { closestComposed } from './dom-tree.ts'
 export const ELEMENT_UI_OPTION_SELECTOR = '.el-select-dropdown .el-select-dropdown__list > li.el-select-dropdown__item'
 
 export function isElementUiOption(element: Element): boolean {
@@ -7,14 +8,14 @@ export function isElementUiOption(element: Element): boolean {
 
 /** Native and ARIA controls share this check with the narrow Element UI adapter. */
 export function isControlDisabled(element: Element): boolean {
-  return element.matches(':disabled') || element.closest('[inert], [aria-disabled="true"]') !== null
+  return element.matches(':disabled') || closestComposed(element, '[inert], [aria-disabled="true"]') !== null
     || (isElementUiOption(element) && element.classList.contains('is-disabled'))
 }
 
 /** Direct field edits respect the same readonly state reported by snapshots. */
 export function isFieldReadOnly(element: Element): boolean {
   return ((element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) && element.readOnly)
-    || element.closest('[aria-readonly="true"]') !== null
+    || closestComposed(element, '[aria-readonly="true"]') !== null
 }
 
 export function customOptionSelected(element: Element): boolean | undefined {
@@ -32,7 +33,7 @@ let nextPopupId = 1
 export function optionContextIdentity(element: Element): readonly unknown[] | null {
   const elementUi = isElementUiOption(element)
   if (!elementUi && element.getAttribute('role') !== 'option') return null
-  const popup = elementUi ? element.closest('.el-select-dropdown') : element.closest('[role="listbox"]')
+  const popup = closestComposed(element, elementUi ? '.el-select-dropdown' : '[role="listbox"]')
   let popupId: number | null = null
   if (popup !== null) {
     popupId = popupIds.get(popup) ?? nextPopupId++

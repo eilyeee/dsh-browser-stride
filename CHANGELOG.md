@@ -26,6 +26,16 @@ package versions currently identify development builds, not supported releases.
 
 ### Added
 
+- Development build 0.1.15 discovers native controls in accessible open shadow
+  roots, including nested components. Labels resolve within their own tree;
+  visibility, disabled/readonly checks and scroll contexts include hosts and
+  assigned slots. Moving a node between components invalidates its reference.
+  Native input notifications cross the host, and synthetic keys reach the
+  focused internal control. Traversal is bounded; incomplete discovery is
+  reported and uncertain sensitive-text inspection withholds page text.
+  Body prose and CSS selectors remain document-scoped, closed roots remain
+  inaccessible, and shadow-root rich-text edits are explicitly refused.
+  Wire version 4 is unchanged; benchmark suite 25 records the expanded view.
 - Development build 0.1.14 adds optional observation-bound vertical container
   scrolling to `browser_scroll`. A current control reference selects only its
   previously observed nearest scroll container; reaching its boundary never

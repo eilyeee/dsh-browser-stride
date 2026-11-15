@@ -9,6 +9,8 @@
  * @module
  */
 
+import { closestComposed, composedParent, queryOpenRoots } from './dom-tree.ts'
+
 /** Name/id/aria-label fragments that mark a field as sensitive. */
 const SENSITIVE_PATTERNS = [
   /password/i,
@@ -61,8 +63,8 @@ const MAX_REDACTION_TEXT = 250_000
 
 /** Hide recognized field values that also occur in ordinary extracted page text. */
 export function redactSensitivePageText(root: Element, text: string): string {
-  for (let ancestor = root.parentElement?.closest(FIELD_SELECTOR) ?? null; ancestor !== null;
-    ancestor = ancestor.parentElement?.closest(FIELD_SELECTOR) ?? null) {
+  for (let parent = composedParent(root), ancestor = parent === null ? null : closestComposed(parent, FIELD_SELECTOR); ancestor !== null;
+    parent = composedParent(ancestor), ancestor = parent === null ? null : closestComposed(parent, FIELD_SELECTOR)) {
     // A selector can point to part of a sensitive editable, whose full value
     // need not appear in the returned substring.
     if (isSensitiveField(ancestor)) return text === '' ? '' : '••••'
@@ -70,9 +72,11 @@ export function redactSensitivePageText(root: Element, text: string): string {
   // The requested region can contain a copy of a field's value even when the
   // field itself is elsewhere on the page, so inspect the enclosing tree.
   const tree = root.getRootNode()
-  const scope: ParentNode = tree instanceof Document || tree instanceof ShadowRoot ? tree : root
+  const scope = root.isConnected ? root.ownerDocument : tree instanceof Document || tree instanceof ShadowRoot ? tree : root
   const includeScope = scope instanceof Element && scope.matches(FIELD_SELECTOR)
-  const descendants = scope.querySelectorAll(FIELD_SELECTOR)
+  const scan = queryOpenRoots(scope, FIELD_SELECTOR)
+  if (scan.limited) return '[Sensitive page text withheld: open DOM traversal limit reached.]'
+  const descendants = scan.elements
   if (descendants.length + Number(includeScope) > MAX_REDACTION_FIELDS) return '[Sensitive page text withheld: too many fields to inspect safely.]'
   const fields = [...(includeScope ? [scope as Element] : []), ...descendants]
   const fragments = new Set<string>()
