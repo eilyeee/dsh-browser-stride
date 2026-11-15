@@ -49,6 +49,12 @@ package versions currently identify development builds, not supported releases.
 
 ### Fixed
 
+- Development build 0.1.11 marks partial select changes as unconfirmed when
+  page event handlers change the control or its options. Input, textarea,
+  rich-text and select actions also recheck target identity after settling.
+  These results retire old references and reach the existing Host write fence,
+  allowing observation while preventing further writes in that turn. They do
+  not undo an edit or establish business persistence.
 - Development build 0.1.10 preserves Host-proven unsent refusals through
   capability, execution-context and durable-preparation failures and local
   design-view guidance. These no longer imply that the current write may have

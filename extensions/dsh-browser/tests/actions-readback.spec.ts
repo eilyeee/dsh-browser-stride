@@ -112,7 +112,45 @@ describe('basic form readback', () => {
     const result = await runAction('browser_select', { elementRef, optionIndex: 1 }, { ids, budget })
     expect(change).not.toHaveBeenCalled()
     expect(result.text).toContain('may have partially changed')
+    expect(result.feedback).toEqual({ version: 1, state: 'readback-unconfirmed', businessChange: 'not-verified' })
     await expect(runAction('browser_select', { elementRef, optionIndex: 0 }, { ids, budget })).rejects.toThrow('stale')
+  })
+
+  it('marks a selection whose target changes during change as unconfirmed', async () => {
+    document.body.innerHTML = '<select aria-label="Size"><option>Small</option><option>Large</option></select>'
+    const select = document.querySelector('select')!
+    select.addEventListener('change', () => { select.setAttribute('aria-label', 'Different record') })
+    const ids = new ElementIds()
+    const snapshot = await runAction('browser_snapshot', {}, { ids, budget })
+    const elementRef = observedRef(snapshot, ids, select)
+    const result = await runAction('browser_select', { elementRef, optionIndex: 1 }, { ids, budget })
+    expect(select.selectedIndex).toBe(1)
+    expect(result.feedback).toEqual({ version: 1, state: 'readback-unconfirmed', businessChange: 'not-verified' })
+    await expect(runAction('browser_select', { elementRef, optionIndex: 0 }, { ids, budget })).rejects.toThrow('stale')
+    expect((await runAction('browser_snapshot', {}, { ids, budget })).text).toContain('Different record')
+  })
+
+  it.each([
+    '<input aria-label="Field">',
+    '<textarea aria-label="Field"></textarea>',
+    '<div contenteditable="true" tabindex="0" aria-label="Field"></div>',
+    '<select aria-label="Field"><option>Small</option><option>Large</option></select>',
+  ])('does not confirm a field whose identity changes while settling: %s', async markup => {
+    document.body.innerHTML = markup
+    const field = document.body.firstElementChild as HTMLElement
+    field.addEventListener('input', () => { queueMicrotask(() => { field.setAttribute('aria-label', 'Different record') }) })
+    const ids = new ElementIds()
+    const snapshot = await runAction('browser_snapshot', {}, { ids, budget })
+    const elementRef = observedRef(snapshot, ids, field)
+    const select = field instanceof HTMLSelectElement
+    const result = await runAction(select ? 'browser_select' : 'browser_type', {
+      elementRef, ...(select ? { optionIndex: 1 } : { text: 'synthetic', replace: true }),
+    }, { ids, budget })
+    expect(field.getAttribute('aria-label')).toBe('Different record')
+    expect(result.feedback).toEqual({ version: 1, state: 'readback-unconfirmed', businessChange: 'not-verified' })
+    await expect(runAction(select ? 'browser_select' : 'browser_type', {
+      elementRef, ...(select ? { optionIndex: 0 } : { text: 'repeat' }),
+    }, { ids, budget })).rejects.toThrow('stale')
   })
 
   it('rejects a changed or disabled option and reports selection rollback', async () => {

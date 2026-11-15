@@ -33,6 +33,11 @@ Development build 0.1.10 also distinguishes Host-proven refusals before dispatch
 from unknown results after dispatch. Existing approval and run restrictions
 remain in force; an unsent refusal does not reconcile any earlier write.
 
+Development build 0.1.11 also marks field edits as unconfirmed when event
+handlers change the target or select options, including during settling. Old
+references are retired and the same-turn Host write fence remains active after
+a fresh observation. A partial edit is not undone by this check.
+
 From the repository root:
 
 ```sh

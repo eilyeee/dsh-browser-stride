@@ -56,6 +56,8 @@ pnpm run test:smoke-operation-feedback
 
 `pnpm run test:smoke-write-boundaries` 检查原生工具批次和 PTC `Promise.allSettled` 的写入顺序。临时 Host 使用脚本模型和模拟扩展，延迟回执以检查调用是否重叠；字段回读未确认或写入回执失败时，后续写入必须在 Host 被拒绝，读取仍可继续。正常回执场景要求两个写入依次到达，避免把全部拒绝当作通过。它验证当前 DSH 调度和 Host 保护的配合，不调用真实模型或浏览器，不证明业务保存、跨进程恢复或跨 Agent 互斥。
 
+`pnpm run test:smoke-field-readback` 使用临时 Host、隔离 Chrome 和脚本 PTC，检查下拉选项／目标在事件中改变，以及输入框、文本域、富文本和下拉框在稳定等待期间换目标。未确认结果后，脚本重新观察并用新的 Save 引用验证 Host 仍拦截写入；服务端应收到零次保存。另有正常输入／选择后各保存一次的对照。设置前述 `STRIDE_REAL_MODEL`、`STRIDE_MODEL_CREDENTIALS` 和 `STRIDE_MODEL_PATCH` 可用现有默认模型运行同一组页面任务，模型可直接停手；两种模式分别保存整轮与逐场景证据，不操作常用 Host 或真实业务站点。
+
 不调用模型的全链路基础设施探针：
 
 ```bash

@@ -289,6 +289,15 @@ export function resetDeltaState(ids: ElementIds): void {
   ids.clearObservation()
 }
 
+/** A partial field edit is not undone by retiring its observation. */
+function unconfirmedFieldTarget(index: number, ctx: ActionContext): ActionResult {
+  resetDeltaState(ctx.ids)
+  return {
+    text: `Field [${index}] may have partially changed, but the target changed during page events. Re-observe and check its state before continuing.`,
+    feedback: { version: 1, state: 'readback-unconfirmed', businessChange: 'not-verified' },
+  }
+}
+
 /** Attach the settled page change while retaining the full view as the next delta baseline. */
 function withPageDelta(text: string, ctx: ActionContext, settled = true, state: 'observed' | 'dispatched' | 'readback-unconfirmed' = 'dispatched'): ActionResult {
   const feedback = { version: 1 as const, state, businessChange: 'not-verified' as const }
@@ -475,19 +484,18 @@ async function typeAction(args: Record<string, unknown>, ctx: ActionContext): Pr
   if (!stillCurrent()) throw new ActionError('action-failed', `Element [${index}] is read-only or does not support text input.`)
   if (isEditable(el)) {
     if (!typeIntoContentEditable(el, text, replace, stillCurrent)) {
-      resetDeltaState(ctx.ids)
-      return { text: `Input to [${index}] may have partially changed the field, but the target changed during page events. Re-observe and check its state before continuing.`, feedback: { version: 1, state: 'readback-unconfirmed', businessChange: 'not-verified' } }
+      return unconfirmedFieldTarget(index, ctx)
     }
   } else if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
     expectedValue = `${replace ? '' : el.value}${text}`
     if ((replace && !setNativeValue(el, '', stillCurrent)) || !setNativeValue(el, `${el.value}${text}`, stillCurrent)) {
-      resetDeltaState(ctx.ids)
-      return { text: `Input to [${index}] may have partially changed the field, but the target changed during page events. Re-observe and check its state before continuing.`, feedback: { version: 1, state: 'readback-unconfirmed', businessChange: 'not-verified' } }
+      return unconfirmedFieldTarget(index, ctx)
     }
   } else {
     throw new ActionError('action-failed', `Element [${index}] is not editable (${el.tagName.toLowerCase()}).`)
   }
   const settled = await waitForPageSettled(TYPE_SETTLE)
+  if (!stillCurrent()) return unconfirmedFieldTarget(index, ctx)
   if (expectedValue !== undefined && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)
     && (!el.isConnected || el.value !== expectedValue)) {
     return withPageDelta(`Input was sent to [${index}], but its value could not be confirmed at readback. Observe again before continuing.${settleNote(settled)}`, ctx, settled, 'readback-unconfirmed')
@@ -513,15 +521,14 @@ async function selectAction(args: Record<string, unknown>, ctx: ActionContext): 
   el.dispatchEvent(new Event('input', { bubbles: true }))
   const stillCurrent = (): boolean => referenceStillCurrent(args, ctx.ids, index, true)
   if (!stillCurrent()) {
-    resetDeltaState(ctx.ids)
-    return { text: `Selection in [${index}] may have partially changed, but the target changed during page events. Re-observe and check its state before continuing.` }
+    return unconfirmedFieldTarget(index, ctx)
   }
   el.dispatchEvent(new Event('change', { bubbles: true }))
   if (!stillCurrent()) {
-    resetDeltaState(ctx.ids)
-    return { text: `Selection in [${index}] may have partially changed, but the target changed during page events. Re-observe and check its state before continuing.` }
+    return unconfirmedFieldTarget(index, ctx)
   }
   const settled = await waitForPageSettled(TYPE_SETTLE)
+  if (!stillCurrent()) return unconfirmedFieldTarget(index, ctx)
   if (!el.isConnected || !option.isConnected || el.selectedIndex !== optionIndex || !option.selected) {
     return withPageDelta(`Selection was sent to [${index}], but could not be confirmed at readback. Observe again before continuing.${settleNote(settled)}`, ctx, settled, 'readback-unconfirmed')
   }
