@@ -30,7 +30,8 @@
     "test:smoke-operation-feedback": "node scripts/smoke-operation-feedback.mjs",
     "test:smoke-session-failures": "node scripts/smoke-session-continuity.mjs --failures-only",
     "test:smoke-release": "node scripts/smoke-release.mjs",
-    "test:smoke-preflight": "node scripts/smoke-preflight-feedback.mjs"
+    "test:smoke-preflight": "node scripts/smoke-preflight-feedback.mjs",
+    "test:smoke-write-boundaries": "node scripts/smoke-write-boundaries.mjs"
   },
   "dependencies": {
     "@deepseek-ai/cordis-plugin-group": "1.0.5",

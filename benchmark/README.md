@@ -54,6 +54,8 @@ pnpm run test:smoke-operation-feedback
 
 `pnpm run test:smoke-preflight` 专门检查 Host 发送前的拒绝：使用临时 Host、真实 PTC 运行时、脚本模型和模拟扩展，确认不支持的视觉操作未发往扩展，随后普通观察与点击仍可执行。它不使用真实浏览器或真实模型，不替代页面和常用环境验收，也不改变已有写入的未知状态。
 
+`pnpm run test:smoke-write-boundaries` 检查原生工具批次和 PTC `Promise.allSettled` 的写入顺序。临时 Host 使用脚本模型和模拟扩展，延迟回执以检查调用是否重叠；字段回读未确认或写入回执失败时，后续写入必须在 Host 被拒绝，读取仍可继续。正常回执场景要求两个写入依次到达，避免把全部拒绝当作通过。它验证当前 DSH 调度和 Host 保护的配合，不调用真实模型或浏览器，不证明业务保存、跨进程恢复或跨 Agent 互斥。
+
 不调用模型的全链路基础设施探针：
 
 ```bash

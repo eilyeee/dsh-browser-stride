@@ -9,6 +9,11 @@ package versions currently identify development builds, not supported releases.
 
 ### Test infrastructure
 
+- An isolated write-boundary smoke checks native tool batches and parallel PTC
+  submissions against delayed simulated-extension replies. Unconfirmed readback
+  and failed write receipts must stop a second write while allowing observation;
+  confirmed replies must permit both writes in order. This is SDK/Host runtime
+  coverage, not real-browser, real-model or business-persistence evidence.
 - Extension fixture setup waits for both saved settings and authentication to
   the intended Host. It reports settings failures immediately, bounds parent
   waits, records credential-free handshake metadata and can issue the one-time
