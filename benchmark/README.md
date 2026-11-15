@@ -206,3 +206,11 @@ Shadow 控件合成用例的测试器每轮最多 20 次模型请求和 20 次�
 组件正文最多检查 50,000 个节点、64 个开放根、16 层根嵌套和 250,000 个原始字符，超限不返回前缀；完整正文遮罩后再截断到工具输出预算。它按渲染 DOM 顺序读取，不等同完整可访问性树、CSS 生成文字或画布识别。插槽遵循 [assignedNodes](https://developer.mozilla.org/en-US/docs/Web/API/HTMLSlotElement/assignedNodes)，文本布局使用 [Range.getClientRects](https://developer.mozilla.org/en-US/docs/Web/API/Range/getClientRects)；单测的无布局环境与隔离浏览器证据分别记录。
 
 组件验收必须先检查页面就绪标记、敏感字段实际测试值，以及歧义／插槽场景的必需节点，再发起模型回合。0.1.15 的浏览器敏感场景曾因错误调用 ShadowRoot.insertAdjacentHTML 而没有装载测试数据，其旧通过记录不能证明浏览器遮罩有效；修复后用 `node scripts/smoke-shadow-controls.mjs --privacy-only` 单独回归，原失败／历史证据保留。
+
+开放组件的有界等待可单独检查：
+
+```bash
+pnpm run test:smoke-component-settle
+```
+
+该检查使用临时 Host 和隔离 Chrome，分别覆盖延迟更新、等待中创建的开放根，以及持续变化。合成按钮只启动本地计时器；独立检查点击后的自动回读已看到完成值，或明确返回未稳定，业务保存次数为零。默认使用固定 PTC 适配器；`STRIDE_REAL_MODEL=1` 配合私有模型配置可单独运行现有默认模型。它不证明网络、框架或闭合根就绪，也不代替常用浏览器验收。套件 27 区分本次等待语义。

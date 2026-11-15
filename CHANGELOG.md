@@ -83,6 +83,16 @@ package versions currently identify development builds, not supported releases.
 
 ### Fixed
 
+- Development build 0.1.17 watches nested open shadow roots during bounded
+  DOM settling, including roots attached to existing hosts while waiting.
+  Continuous changes or incomplete bounded inspection report unsettled and
+  invalidate old references instead of publishing an automatic delta. Detached
+  roots no longer prolong the wait; observers and timers are released. Frequent
+  mutations cannot repeatedly postpone the pending deadline check. This
+  does not establish network/framework readiness, property-only updates or a
+  business save. Wire version 4 is unchanged; benchmark suite 27 records the
+  expanded wait semantics.
+
 - Development build 0.1.13 reads back the rendered plain text of rich-text
   inputs, marking rollback or mismatch unconfirmed. A present editing command
   that rejects or throws is never followed by a direct DOM write; only an

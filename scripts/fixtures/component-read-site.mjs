@@ -1,6 +1,7 @@
 import {createServer} from 'node:http'
 
 export const COMPONENT_READ_CASES=['requirements','privacy','recovery','slots','inspector']
+export const COMPONENT_SETTLE_CASES=['settle-delayed','settle-late-root','settle-continuous']
 export const COMPONENT_READ_SECRETS=['synthetic-component-pass','synthetic-component-code']
 export async function startComponentReadSite(){
   let writes=0
@@ -8,7 +9,7 @@ export async function startComponentReadSite(){
     res.setHeader('cache-control','no-store');const url=new URL(req.url,'http://127.0.0.1')
     if(req.method!=='GET'){writes++;res.writeHead(405);res.end();return}
     if(url.pathname==='/health'){res.end('ok');return}
-    const kind=url.searchParams.get('case');if(url.pathname!=='/fixture'||!COMPONENT_READ_CASES.includes(kind)){res.writeHead(404);res.end();return}
+    const kind=url.searchParams.get('case');if(url.pathname!=='/fixture'||![...COMPONENT_READ_CASES,...COMPONENT_SETTLE_CASES].includes(kind)){res.writeHead(404);res.end();return}
     res.setHeader('content-type','text/html; charset=utf-8')
     res.end(`<!doctype html><meta charset="utf-8"><title>Component readonly fixture</title>
 <style>body{font:16px sans-serif;margin:24px}#widget{display:block}#header{height:20px}#customer{margin-top:0}</style>
@@ -28,6 +29,24 @@ if(kind==='recovery')appendMarkup(root,'<p class="duplicate">One</p><p class="du
 if(kind==='slots'){
  appendMarkup(root,'<slot name="note"><p>UNUSED_FALLBACK</p></slot><slot name="empty"><p>Default note</p></slot><p style="display:none">HIDDEN_PROSE</p><p style="opacity:0">FADED_PROSE</p>');
  host.innerHTML='<span slot="note">Assigned <b>visible</b> note</span><span>UNASSIGNED_PROSE</span>';
+}
+if(kind.startsWith('settle-')){
+ appendMarkup(root,'<button id="start">Start updates</button><input readonly aria-label="State" value="INITIAL"><div id="late"></div>');
+ window.componentStarts=0;window.componentTicks=0;window.componentFinished=false;
+ root.querySelector('#start').onclick=()=>{
+  window.componentStarts++;
+  const state=root.querySelector('[aria-label="State"]');state.setAttribute('value','COMPONENT_LOADING');
+  if(kind==='settle-continuous')setInterval(()=>{window.componentTicks++;state.setAttribute('value','TICK_'+window.componentTicks)},20);
+  else{
+   let target=root;
+   if(kind==='settle-late-root')setTimeout(()=>{target=root.querySelector('#late').attachShadow({mode:'open'});target.innerHTML='<p>Late root loading</p>'},30);
+   for(const ms of [40,80,120])setTimeout(()=>{target.querySelector('p').textContent='Component still loading '+ms},ms);
+   setTimeout(()=>{
+    window.componentTicks++;window.componentFinished=true;
+    target.querySelector('p').textContent='Component ready: 24px';state.setAttribute('value','COMPONENT_READY');
+   },160);
+  }
+ };
 }
 window.componentReadFixtureReady=true;
 </script>`)

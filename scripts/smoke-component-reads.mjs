@@ -14,15 +14,15 @@ import {startDshBackend} from '../benchmark/lib/dsh-process.mjs'
 import {startExtensionBrowser} from '../benchmark/lib/extension-browser.mjs'
 import {within} from '../benchmark/lib/extension-connection.mjs'
 import {parseMarkedModelReport} from '../benchmark/lib/model-report.mjs'
-import {COMPONENT_READ_CASES,COMPONENT_READ_SECRETS,startComponentReadSite} from './fixtures/component-read-site.mjs'
+import {COMPONENT_READ_CASES,COMPONENT_SETTLE_CASES,COMPONENT_READ_SECRETS,startComponentReadSite} from './fixtures/component-read-site.mjs'
 
 const repo=resolve(import.meta.dirname,'..'),require=createRequire(join(repo,'package.json'))
 const bridgeRequire=createRequire(join(repo,'packages/browser/bridge-browser/package.json'))
 const cli=join(dirname(require.resolve('@deepseek-ai/dsh/package.json')),'lib/bin.js')
 const root=await mkdtemp(join(tmpdir(),'stride-component-reads-')),home=join(root,'home')
 const version=JSON.parse(await readFile(join(repo,'package.json'),'utf8')).version,realModel=process.env.STRIDE_REAL_MODEL==='1'
-const cases=COMPONENT_READ_CASES
-const base=join(repo,'.stride-private/validation/component-reads',version),label=realModel?'real-model':'scripted'
+const settleOnly=process.argv.includes('--settle-only'),cases=settleOnly?COMPONENT_SETTLE_CASES:COMPONENT_READ_CASES
+const base=join(repo,'.stride-private/validation',settleOnly?'component-settle':'component-reads',version),label=realModel?'real-model':'scripted'
 await mkdir(base,{recursive:true});const artifacts=await mkdtemp(join(base,label+'-'))
 await writeFile(join(base,label+'.json'),JSON.stringify({passed:false,status:'in-progress',evidenceDirectory:artifacts.slice(base.length+1)})+'\n',{mode:0o600})
 const env={...process.env,DSH_HOME:home,DSH_TELEMETRY_DISABLED:'1'}
@@ -31,7 +31,11 @@ const summaries=[],programs={}
 const findRef=String.raw`function ref(view,label){const line=view.text.split('\n').find(line=>line.includes(label));const value=line?.match(/ref=(obs_[a-f0-9-]+:\d+)/)?.[1];if(!value)throw Error('Missing observed '+label);return value;}`
 for(const kind of cases){
   let code=`const view=await tools.browser_snapshot({});const elementRef=ref(view,'input "Anchor"');`
-  if(kind==='requirements')code+=`console.log(await tools.browser_get_text({elementRef,selector:'#requirements'}));console.log(await tools.browser_measure_layout({elementRef,selector:'#customer',referenceSelector:'#header'}));`
+  if(kind.startsWith('settle-')){
+    code=`const view=await tools.browser_snapshot({});console.log(await tools.browser_click({elementRef:ref(view,'button "Start updates"')}));console.log(await tools.browser_wait({}));`
+    if(kind!=='settle-continuous')code+=`const current=await tools.browser_snapshot({});console.log(await tools.browser_get_text({elementRef:ref(current,'input "Anchor"')}));`
+  }
+  else if(kind==='requirements')code+=`console.log(await tools.browser_get_text({elementRef,selector:'#requirements'}));console.log(await tools.browser_measure_layout({elementRef,selector:'#customer',referenceSelector:'#header'}));`
   else if(kind==='recovery')code+=`let refused=false;try{await tools.browser_get_text({elementRef,selector:'.duplicate'})}catch{refused=true}if(!refused)throw Error('Ambiguous selector accepted');console.log(await tools.browser_get_text({elementRef,selector:'#requirements'}));`
   else if(kind==='inspector')code+=`console.log(await tools.browser_read_design_styles({elementRef,region:'#properties'}));`
   else code+=`console.log(await tools.browser_get_text({elementRef}));`
@@ -66,7 +70,7 @@ async *stream(options){const messages=options.messages,texts=messages.map(m=>m.c
 export const inject=['llm','tools','agents'];export function apply(ctx){${realModel?'':"ctx.on('agent/created',({agent})=>{agent.ctx.effect(()=>agent.ctx.tools.presentAs('ptc'))});ctx.effect(()=>ctx.llm.registerAdapter(['stride-component-reads'],new Scripted()));"}
  let requests=0,calls=0;ctx.on('session/event',(_s,e)=>{if(e.type==='turn/start'){requests=0;calls=0}});
  ctx.on('agent/request',(_p,next)=>{if(++requests>20)throw Error('Synthetic request budget');return next()});
- ctx.effect(()=>ctx.tools.guard(exec=>!['run_code','browser_snapshot','browser_measure_layout','browser_read_design_styles','browser_get_text','browser_wait','browser_list_tabs'].includes(exec.name)?'Only synthetic component read tools are allowed':exec.name.startsWith('browser_')&&++calls>20?'Synthetic browser budget exhausted':undefined));
+ ctx.effect(()=>ctx.tools.guard(exec=>!['run_code','browser_snapshot','browser_measure_layout','browser_read_design_styles','browser_get_text','browser_wait','browser_list_tabs'${settleOnly?",'browser_click'":''}].includes(exec.name)?'Only synthetic component fixture tools are allowed':exec.name.startsWith('browser_')&&++calls>20?'Synthetic browser budget exhausted':undefined));
 }`,{mode:0o600})
   process.env.DSH_HOME=home;for(const key of ['DSH_EXT_TOKEN','DSH_BRIDGE_ADMIN_TOKEN','DSH_BROWSER_SESSION_WORKSPACE'])delete process.env[key]
   const net=createServer();await new Promise(done=>net.listen(0,'127.0.0.1',done));const port=net.address().port;await new Promise(done=>net.close(done))
@@ -84,6 +88,7 @@ export const inject=['llm','tools','agents'];export function apply(ctx){${realMo
     if(kind==='privacy')assert.deepEqual(await browser.target.evaluate(()=>[window.readRoot.querySelector('[type="password"]').value,window.readRoot.querySelector('#code').value]),COMPONENT_READ_SECRETS)
     if(kind==='recovery')assert.equal(await browser.target.evaluate(()=>window.readRoot.querySelectorAll('.duplicate').length),2)
     if(kind==='slots')assert.equal(await browser.target.evaluate(()=>window.readRoot.host.querySelector('[slot="note"]').textContent),'Assigned visible note')
+    if(settleOnly)assert.deepEqual(await browser.target.evaluate(()=>({starts:window.componentStarts,ticks:window.componentTicks,finished:window.componentFinished,state:window.readRoot.querySelector('[aria-label="State"]').value})),{starts:0,ticks:0,finished:false,state:'INITIAL'})
     await browser.bindSession(sessionId);await browser.panel.bringToFront();await host.client.followSession(sessionId)
     let started=false,finish;const done=new Promise(resolve=>{finish=resolve})
     const off=host.client.onFrame(frame=>{
@@ -94,19 +99,33 @@ export const inject=['llm','tools','agents'];export function apply(ctx){${realMo
     try{
       const task=kind==='requirements'?'使用 Anchor 的当前引用，在其所在树内读取 #requirements，再测量 #customer 相对 #header 的间距，报告 requirementSpacing 与 measuredGap（CSS px）。':kind==='privacy'?'使用 Anchor 的当前引用读取其所在组件正文，确认两个可识别敏感值的副本均已遮罩，不能复述任何敏感片段。':kind==='recovery'?'先使用 Anchor 当前引用和 .duplicate 做范围正文读取；如果不唯一，改用同一树的 #requirements，保持同一需求判据，报告 requirementSpacing。':kind==='slots'?'使用 Anchor 的当前引用读取组件正文，报告实际显示的插槽文字（slotText）及空插槽的默认文字（fallbackText），不要把未分配或隐藏的内容当作正文。':'使用 Anchor 当前引用和 #properties 区域调用 browser_read_design_styles，报告 width、height 和 borderRadius；只使用面板明确数值。'
       const reportFields=kind==='requirements'?'requirementSpacing、measuredGap 均为数字':kind==='recovery'?'requirementSpacing 为数字':kind==='slots'?'slotText、fallbackText 为原文字符串':kind==='inspector'?'width、height、borderRadius 为带 px 的字符串':'没有额外字段'
-      const prompt=realModel?`只读当前已授权的本地合成页，当前会话已绑定，从 browser_snapshot 开始，不重新绑定标签。${task}所有正文、布局和样式读取都必须带当前 Anchor 的 elementRef，不读取文档对照。不输入、不点击、不保存、不操作文件或其他网站。完成本轮指定读取后立即报告；没有观察到的信息保持未知，不补造或穷举猜测选择器。本轮仅返回 JSON：marker 为 COMPONENT_MODEL_DONE，goalReached 为布尔值，reason 为实际读取依据，${reportFields}。不要查询或补充其他任务字段。`:'COMPONENT_CASE='+kind
+      const settleTask=kind==='settle-continuous'?'点击一次 Start updates 后调用一次 browser_wait；此组件持续变化，请如实报告 settled=false，不能把超时当作已稳定。不重复点击，不保存。':'点击一次 Start updates 后调用一次 browser_wait；然后重新快照，使用新 Anchor 引用读取组件正文，确认 Component ready: 24px，并报告 settled=true。'
+      const prompt=realModel?(settleOnly?`当前是已授权的本地合成组件测试页，会话已绑定。从 browser_snapshot 开始。${settleTask}只允许点击 Start updates 一次以启动本地计时器；不输入、不点 Save、不访问文件或其他网站。读取正文必须携带当前 Anchor 引用。完成即停止。仅返回 JSON：marker 为 COMPONENT_MODEL_DONE，goalReached 为布尔值，settled 为上述实际结果，reason 为工具依据。`:`只读当前已授权的本地合成页，当前会话已绑定，从 browser_snapshot 开始，不重新绑定标签。${task}所有正文、布局和样式读取都必须带当前 Anchor 的 elementRef，不读取文档对照。不输入、不点击、不保存、不操作文件或其他网站。完成本轮指定读取后立即报告；没有观察到的信息保持未知，不补造或穷举猜测选择器。本轮仅返回 JSON：marker 为 COMPONENT_MODEL_DONE，goalReached 为布尔值，reason 为实际读取依据，${reportFields}。不要查询或补充其他任务字段。`):'COMPONENT_CASE='+kind
       cancelTimer=setTimeout(()=>{void host.client.rpc('session.cancel',{sessionId}).catch(()=>{});finish('test-timeout')},realModel?240000:45000)
       const input=browser.panel.locator('.composer textarea');await input.fill(prompt);await input.press('Enter')
       const reason=await within(done,realModel?245000:50000,'component read turn')
       await writeFile(join(artifacts,kind+'-events.json'),JSON.stringify(events,null,2)+'\n',{mode:0o600});assert.equal(reason,'completed')
       const calls=events.filter(e=>e.type==='tool/ptc-dispatch'||(e.type==='tool/call'&&e.data.name?.startsWith('browser_'))).map(e=>e.data)
       assert.equal(site.state().writes,0);assert.equal(await browser.target.evaluate(()=>window.pageWrites),0)
-      assert.equal(calls.filter(c=>['browser_type','browser_select','browser_click','browser_scroll'].includes(c.name)).length,0)
+      assert.equal(calls.filter(c=>['browser_type','browser_select','browser_scroll',...settleOnly?[]:['browser_click']].includes(c.name)).length,0)
       const scoped=calls.filter(c=>['browser_get_text','browser_measure_layout','browser_read_design_styles'].includes(c.name))
-      assert.ok(scoped.length>0)
+      assert.ok(scoped.length>0||kind==='settle-continuous')
       for(const c of scoped){const args=typeof c.arguments==='string'?JSON.parse(c.arguments):c.arguments??c.args;assert.ok(args?.elementRef)}
       const texts=scoped.filter(c=>!c.isError).flatMap(c=>(c.content??[]).filter(b=>b.type==='text').map(b=>b.text)).join('\n')
-      if(kind==='requirements'){
+      if(settleOnly){
+        const clicks=calls.filter(c=>c.name==='browser_click');assert.equal(clicks.length,1);assert.equal(clicks[0].isError,false)
+        const waits=calls.filter(c=>c.name==='browser_wait');assert.equal(waits.length,1);assert.equal(waits[0].isError,false)
+        const clickText=clicks[0].content.filter(b=>b.type==='text').map(b=>b.text).join('\n')
+        const waitText=waits[0].content.filter(b=>b.type==='text').map(b=>b.text).join('\n')
+        const state=await browser.target.evaluate(()=>({starts:window.componentStarts,ticks:window.componentTicks,finished:window.componentFinished}))
+        assert.equal(state.starts,1);assert.ok(state.ticks>0)
+        if(kind==='settle-continuous'){
+          assert.ok(clickText.includes('did not become quiet'));assert.ok(waitText.includes('did not become quiet'));assert.equal(state.finished,false)
+        }else{
+          assert.ok(clickText.includes('COMPONENT_READY'),'The automatic post-click delta must see the completed component, not its loading value')
+          assert.ok(waitText.includes('was quiet'));assert.ok(texts.includes('Component ready: 24px'));assert.equal(state.finished,true)
+        }
+      }else if(kind==='requirements'){
         const measured=scoped.find(c=>c.name==='browser_measure_layout'&&!c.isError);assert.ok(measured)
         const text=measured.content.find(b=>b.type==='text').text,layout=JSON.parse(text.slice(text.indexOf('{'),text.lastIndexOf('}')+1))
         assert.equal(layout.scope,'open-shadow-root');assert.equal(layout.comparison.verticalGap,24);assert.equal(layout.target.css.margin.top,'24px')
@@ -130,6 +149,7 @@ export const inject=['llm','tools','agents'];export function apply(ctx){${realMo
         report=parseMarkedModelReport(final,'COMPONENT_MODEL_DONE')
         await writeFile(join(artifacts,kind+'-report.json'),JSON.stringify(report,null,2)+'\n',{mode:0o600})
         assert.equal(report.goalReached,true)
+        if(settleOnly)assert.equal(report.settled,kind!=='settle-continuous')
         if(kind==='requirements'){assert.equal(report.requirementSpacing,24);assert.equal(report.measuredGap,24)}
         if(kind==='recovery')assert.equal(report.requirementSpacing,24)
         if(kind==='slots'){assert.equal(report.slotText,'Assigned visible note');assert.equal(report.fallbackText,'Default note')}
@@ -143,7 +163,7 @@ export const inject=['llm','tools','agents'];export function apply(ctx){${realMo
   }
   await browser.panel.setViewportSize({width:360,height:800});assert.ok(await browser.panel.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1))
   await browser.panel.screenshot({path:join(artifacts,'panel.png')})
-  const summary={passed:true,version,scope:'observed-read-tree',realHost:true,isolatedChrome:true,browserVersion:browser.browserVersion,scriptedModel:!realModel,realModel,cases:summaries,originalHostUntouched:true,evidenceDirectory:artifacts.slice(base.length+1),hostBundleSha256:createHash('sha256').update(await readFile(join(repo,'packages/browser/bridge-browser/lib/index.js'))).digest('hex'),contentBundleSha256:createHash('sha256').update(await readFile(join(repo,'extensions/dsh-browser/dist/content.js'))).digest('hex')}
+  const summary={passed:true,version,scope:settleOnly?'bounded-open-component-quiet':'observed-read-tree',realHost:true,isolatedChrome:true,browserVersion:browser.browserVersion,scriptedModel:!realModel,realModel,cases:summaries,originalHostUntouched:true,evidenceDirectory:artifacts.slice(base.length+1),hostBundleSha256:createHash('sha256').update(await readFile(join(repo,'packages/browser/bridge-browser/lib/index.js'))).digest('hex'),contentBundleSha256:createHash('sha256').update(await readFile(join(repo,'extensions/dsh-browser/dist/content.js'))).digest('hex')}
   await writeFile(join(artifacts,'result.json'),JSON.stringify(summary,null,2)+'\n',{mode:0o600});await writeFile(join(base,label+'.json'),JSON.stringify(summary,null,2)+'\n',{mode:0o600});console.log(JSON.stringify(summary))
 }catch(error){
   await writeFile(join(artifacts,'failure-events.json'),JSON.stringify(events,null,2)+'\n',{mode:0o600})

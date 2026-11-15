@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {createRequire} from 'node:module'
-import {COMPONENT_READ_CASES,COMPONENT_READ_SECRETS,startComponentReadSite} from '../fixtures/component-read-site.mjs'
+import {COMPONENT_READ_CASES,COMPONENT_SETTLE_CASES,COMPONENT_READ_SECRETS,startComponentReadSite} from '../fixtures/component-read-site.mjs'
 import {SHADOW_CASES,SHADOW_SYNTHETIC_SECRETS,startShadowSite} from '../fixtures/shadow-site.mjs'
 
 const require=createRequire(new URL('../../extensions/dsh-browser/package.json',import.meta.url))
@@ -41,4 +41,19 @@ test('native shadow fixtures really mount sensitive values and their document mi
       }
     }finally{dom.window.close()}
   }}finally{await site.close()}
+})
+
+for(const kind of COMPONENT_SETTLE_CASES)test(`component settle fixture initializes and runs: ${kind}`,async()=>{
+  const site=await startComponentReadSite();let dom
+  try{
+    dom=await page(site,kind);const w=dom.window
+    assert.equal(w.componentReadFixtureReady,true);assert.equal(w.componentStarts,0)
+    assert.equal(w.readRoot.querySelector('[aria-label="State"]').value,'INITIAL')
+    w.readRoot.querySelector('#start').click();assert.equal(w.componentStarts,1)
+    await new Promise(done=>setTimeout(done,kind==='settle-continuous'?70:190))
+    assert.ok(w.componentTicks>0);assert.equal(w.componentFinished,kind!=='settle-continuous')
+    if(kind==='settle-late-root')assert.equal(w.readRoot.querySelector('#late').shadowRoot.querySelector('p').textContent,'Component ready: 24px')
+    if(kind!=='settle-continuous')assert.equal(w.readRoot.querySelector('[aria-label="State"]').value,'COMPONENT_READY')
+    assert.equal(w.pageWrites,0);assert.equal(site.state().writes,0)
+  }finally{dom?.window.close();await site.close()}
 })

@@ -1,6 +1,6 @@
 {
   "name": "dsh-browser-stride",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "description": "DSH Stride (寻行): product branch of the dsh browser bridge and controlled-tab Chrome/Firefox extension workspace",
   "author": "Yuxiang Lin",
   "license": "MIT",
@@ -37,7 +37,8 @@
     "test:smoke-editor": "node scripts/smoke-field-readback.mjs --editor-only",
     "test:smoke-scroll": "node scripts/smoke-scroll.mjs",
     "test:smoke-shadow": "node scripts/smoke-shadow-controls.mjs",
-    "test:smoke-component-reads": "node scripts/smoke-component-reads.mjs"
+    "test:smoke-component-reads": "node scripts/smoke-component-reads.mjs",
+    "test:smoke-component-settle": "node scripts/smoke-component-reads.mjs --settle-only"
   },
   "dependencies": {
     "@deepseek-ai/cordis-plugin-group": "1.0.5",

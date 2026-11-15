@@ -18,6 +18,7 @@ import { buildSnapshot, renderSnapshotDetails } from './snapshot.ts'
 import { visualViewportState } from './visual.ts'
 import { measureLayout } from './layout.ts'
 import { componentText } from './component-text.ts'
+import { OPEN_TREE_LIMITS, queryOpenRoots } from './dom-tree.ts'
 import { changeDesignZoom, nativeDesignZoomControls } from './design-zoom.ts'
 import { DesignZoomNotSelectedError } from './design-zoom-error.ts'
 import { clearLanhuZoom, commitLanhuZoom, prepareLanhuZoom } from './lanhu-zoom.ts'
@@ -60,17 +61,21 @@ const TYPABLE_INPUT_TYPES = new Set(['text', 'search', 'tel', 'url', 'email', 'p
 /**
  * Wait for document readiness and a mutation-free window. The old fixed delay
  * charged every action equally and still returned too early when a late DOM
- * update landed near its boundary. This observer returns early on already
- * stable pages, extends only for real mutations, and stays bounded on pages
- * with continuous animation.
+ * update landed near its boundary. Watch accessible open roots as well as the
+ * document, including roots attached to existing hosts during the wait. This
+ * is bounded DOM quiet, not network/framework readiness or business success.
  */
 export function waitForPageSettled(policy: PageSettlePolicy = ACTION_SETTLE): Promise<boolean> {
   const startedAt = performance.now()
   let readyAt = document.readyState === 'complete' ? startedAt : undefined
   let lastMutationAt = startedAt
   let timer: ReturnType<typeof setTimeout> | undefined
+  let checkQueued = false
   let finished = false
   let observer: MutationObserver | undefined
+  const roots = new Set<ShadowRoot>()
+  let incomplete = false
+  const observeOptions = { subtree: true, childList: true, attributes: true, characterData: true }
 
   return new Promise((resolve) => {
     const finish = (settled: boolean): void => {
@@ -78,12 +83,15 @@ export function waitForPageSettled(policy: PageSettlePolicy = ACTION_SETTLE): Pr
       finished = true
       if (timer !== undefined) clearTimeout(timer)
       observer?.disconnect()
+      roots.clear()
       document.removeEventListener('readystatechange', schedule)
       window.removeEventListener('load', schedule)
       resolve(settled)
     }
     const check = (): void => {
       timer = undefined
+      checkQueued = false
+      discoverRoots()
       const now = performance.now()
       if (readyAt === undefined && document.readyState === 'complete') {
         readyAt = now
@@ -92,7 +100,7 @@ export function waitForPageSettled(policy: PageSettlePolicy = ACTION_SETTLE): Pr
       if (readyAt !== undefined) {
         const afterReady = now - readyAt
         const quietFor = now - lastMutationAt
-        if (afterReady >= policy.minimumMs && quietFor >= policy.quietMs) {
+        if (!incomplete && afterReady >= policy.minimumMs && quietFor >= policy.quietMs) {
           finish(true)
           return
         }
@@ -102,7 +110,8 @@ export function waitForPageSettled(policy: PageSettlePolicy = ACTION_SETTLE): Pr
         }
         const untilMinimum = Math.max(0, policy.minimumMs - afterReady)
         const untilQuiet = Math.max(0, policy.quietMs - quietFor)
-        timer = setTimeout(check, Math.max(1, Math.min(policy.maxAfterReadyMs - afterReady, Math.max(untilMinimum, untilQuiet))))
+        timer = setTimeout(check, incomplete ? Math.max(1, policy.maxAfterReadyMs - afterReady)
+          : Math.max(1, Math.min(policy.maxAfterReadyMs - afterReady, Math.max(untilMinimum, untilQuiet))))
         return
       }
       const elapsed = now - startedAt
@@ -113,22 +122,37 @@ export function waitForPageSettled(policy: PageSettlePolicy = ACTION_SETTLE): Pr
       timer = setTimeout(check, Math.max(1, Math.min(100, policy.timeoutMs - elapsed)))
     }
     function schedule(): void {
-      if (finished) return
+      // Keep the first queued check: faster mutation streams must not keep
+      // cancelling it and thereby postpone even the hard wait deadline.
+      if (finished || checkQueued) return
       if (timer !== undefined) clearTimeout(timer)
+      checkQueued = true
       timer = setTimeout(check, 0)
+    }
+    function discoverRoots(): void {
+      if (incomplete || observer === undefined) return
+      const scan = queryOpenRoots(document, '*')
+      if (scan.limited) { incomplete = true; return }
+      for (const element of scan.elements) {
+        const root = element.shadowRoot
+        if (root === null || roots.has(root)) continue
+        // Bound cumulative subscriptions too, even if components churn during
+        // a wait. Incomplete observation must never be reported as quiet.
+        if (roots.size >= OPEN_TREE_LIMITS.roots) { incomplete = true; return }
+        observer.observe(root, observeOptions)
+        roots.add(root)
+        lastMutationAt = performance.now()
+      }
     }
 
     if (document.documentElement !== null) {
-      observer = new MutationObserver(() => {
+      observer = new MutationObserver(records => {
+        if (!records.some(record => record.target.isConnected)) return
         lastMutationAt = performance.now()
         schedule()
       })
-      observer.observe(document.documentElement, {
-        subtree: true,
-        childList: true,
-        attributes: true,
-        characterData: true,
-      })
+      observer.observe(document.documentElement, observeOptions)
+      discoverRoots()
     }
     document.addEventListener('readystatechange', schedule)
     window.addEventListener('load', schedule)

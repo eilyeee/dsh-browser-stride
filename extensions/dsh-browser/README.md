@@ -1,5 +1,15 @@
 # Browser extension
 
+Development build 0.1.17 extends bounded DOM settling to nested accessible open
+shadow roots, including roots attached while waiting. Continuous changes or
+incomplete inspection return unsettled. Action readback and explicit waits then
+suppress automatic page deltas and retire old references. Detached roots do not
+prolong the wait. Limits apply to 50,000 inspected elements, 64 roots and
+16 root levels; cumulative subscriptions are capped at 64 per wait. Observers
+and timers are released on completion. Mutation callbacks coalesce without
+postponing the wait deadline. This does not establish network or
+framework readiness, closed-root state, property-only changes or business saves.
+
 Development build 0.1.16 lets `browser_get_text`, `browser_measure_layout` and
 `browser_read_design_styles` accept an optional current control `elementRef`.
 It scopes selectors to that control's own document or open shadow root; scoped
