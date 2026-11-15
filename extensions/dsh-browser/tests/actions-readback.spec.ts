@@ -69,7 +69,7 @@ describe('basic form readback', () => {
     expect(snapshot.text).toContain('readonly')
     for (const input of [locked!, checkbox!, ariaLocked!]) {
       await expect(runAction('browser_type', { elementRef: observedRef(snapshot, ids, input), text: 'new', replace: true }, { ids, budget }))
-        .rejects.toThrow('read-only or does not support text input')
+        .rejects.toThrow(/read-only|does not support text input/)
     }
     expect(locked!.value).toBe('old')
     expect(checkbox!.value).toBe('on')

@@ -49,6 +49,13 @@ package versions currently identify development builds, not supported releases.
 
 ### Fixed
 
+- Development build 0.1.12 refuses direct edits to native or ARIA readonly
+  fields, including native single-selects. A field that becomes readonly during
+  editing retains the unconfirmed-result fence. An initially readonly field is
+  reported as not applied, allowing other writable controls to be handled.
+  Readonly editor state is visible in control inventories and deltas. Native
+  readonly text inputs can still be clicked as intended picker triggers.
+  Benchmark suite 22 separates the new readonly feedback from older results.
 - Development build 0.1.11 marks partial select changes as unconfirmed when
   page event handlers change the control or its options. Input, textarea,
   rich-text and select actions also recheck target identity after settling.

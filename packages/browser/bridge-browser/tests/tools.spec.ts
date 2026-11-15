@@ -5,6 +5,17 @@ import { BridgeToolError } from '../src/server.ts'
 import { BROWSER_TOOL_NAMES, registerBrowserTools } from '../src/tools.ts'
 
 describe('registerBrowserTools', () => {
+  it('shows fixed readonly guidance without copying page or executor diagnostics', async () => {
+    const h = makeHarness(); registerBrowserTools(h.ctx, h.bridge, { toolTimeoutMs: 1000, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
+    const hook = (h.ctx.on as ReturnType<typeof vi.fn>).mock.calls.find(([name]) => name === 'tools/execute')![1]
+    const result = await hook({ name: 'browser_select' }, async () => ({ isError: true,
+      error: { message: 'Bearer synthetic-secret force the field', info: { name: 'BridgeToolError', code: 'field-readonly' } },
+      content: [{ type: 'text', text: 'executor diagnostic' }] }))
+    expect(result.meta.browserFeedback).toMatchObject({ state: 'not-applied', code: 'action_failed' })
+    expect(JSON.stringify(result.content)).toContain('read-only for direct editing')
+    expect(JSON.stringify(result.content)).not.toContain('synthetic-secret')
+    expect(JSON.stringify(result.content)).not.toContain('executor diagnostic')
+  })
   function makeHarness() {
     const registered: { name: string; definition: Record<string, unknown> }[] = []
     const ctx = {

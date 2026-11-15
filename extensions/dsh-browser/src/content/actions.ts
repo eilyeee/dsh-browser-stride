@@ -12,6 +12,7 @@
 
 import { pageText, truncate } from './extract.ts'
 import { SELECT_OPTION_LIMIT, type ElementIds } from './ids.ts'
+import { isFieldReadOnly } from './custom-options.ts'
 import type { SnapshotBudget } from './snapshot.ts'
 import { buildSnapshot, renderSnapshotDetails } from './snapshot.ts'
 import { visualViewportState } from './visual.ts'
@@ -168,7 +169,7 @@ function referenceStillCurrent(args: Record<string, unknown>, ids: ElementIds, i
 /** Error carrying a stable wire code. */
 export class ActionError extends Error {
   constructor(
-    readonly code: 'element-stale' | 'action-failed' | 'bad-args' | 'design-zoom-not-selected',
+    readonly code: 'element-stale' | 'field-readonly' | 'action-failed' | 'bad-args' | 'design-zoom-not-selected',
     message: string,
   ) {
     super(message)
@@ -476,10 +477,10 @@ async function typeAction(args: Record<string, unknown>, ctx: ActionContext): Pr
   if (text === '') throw new ActionError('bad-args', 'text must not be empty.')
   const replace = args.replace === true
   const el = elementOrThrow(ctx.ids, index)
+  if (isFieldReadOnly(el)) throw new ActionError('field-readonly', `Field [${index}] is read-only for direct editing. Do not force this edit; choose another writable control or ask the user.`)
   const stillCurrent = (): boolean => referenceStillCurrent(args, ctx.ids, index)
-    && el.closest('[aria-readonly="true"]') === null
-    && (!(el instanceof HTMLInputElement) || (!el.readOnly && TYPABLE_INPUT_TYPES.has(el.type)))
-    && (!(el instanceof HTMLTextAreaElement) || !el.readOnly)
+    && !isFieldReadOnly(el)
+    && (!(el instanceof HTMLInputElement) || TYPABLE_INPUT_TYPES.has(el.type))
   let expectedValue: string | undefined
   if (!stillCurrent()) throw new ActionError('action-failed', `Element [${index}] is read-only or does not support text input.`)
   if (isEditable(el)) {
@@ -513,13 +514,14 @@ async function selectAction(args: Record<string, unknown>, ctx: ActionContext): 
   if (!(el instanceof HTMLSelectElement) || el.multiple) {
     throw new ActionError('action-failed', `Element [${index}] is not a supported single-select control.`)
   }
+  if (isFieldReadOnly(el)) throw new ActionError('field-readonly', `Field [${index}] is read-only for direct editing. Do not force this edit; choose another writable control or ask the user.`)
   const option = optionIndex < SELECT_OPTION_LIMIT ? el.options.item(optionIndex) : null
   if (option === null || option.matches(':disabled')) {
     throw new ActionError('bad-args', 'The option is unavailable or was not included in the snapshot.')
   }
   el.selectedIndex = optionIndex
   el.dispatchEvent(new Event('input', { bubbles: true }))
-  const stillCurrent = (): boolean => referenceStillCurrent(args, ctx.ids, index, true)
+  const stillCurrent = (): boolean => referenceStillCurrent(args, ctx.ids, index, true) && !isFieldReadOnly(el)
   if (!stillCurrent()) {
     return unconfirmedFieldTarget(index, ctx)
   }

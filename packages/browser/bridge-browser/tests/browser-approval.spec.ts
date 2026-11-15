@@ -3,6 +3,16 @@ import { BrowserApprovalGate } from '../src/browser-approval.ts'
 import { BridgeToolError } from '../src/server.ts'
 
 describe('browser approval retry boundary', () => {
+  it('permits another writable control after readonly refusal without clearing earlier uncertainty', async () => {
+    const gate = new BrowserApprovalGate(), agent = {}, work = vi.fn(async () => 'editable')
+    const refusal = new BridgeToolError('field-readonly', 'Read-only field')
+    await expect(gate.request(agent, async () => { throw refusal }, 'browser_select')).rejects.toBe(refusal)
+    expect(refusal.notDispatched).toBe(false)
+    await expect(gate.request(agent, work, 'browser_type')).resolves.toBe('editable')
+    await expect(gate.request(agent, async () => { throw new BridgeToolError('timeout', 'lost reply') }, 'browser_click')).rejects.toThrow('lost reply')
+    await expect(gate.request(agent, work, 'browser_select')).rejects.toMatchObject({ code: 'write-blocked-unconfirmed' })
+    expect(work).toHaveBeenCalledOnce()
+  })
   it('permits another method after a Host-proven unsent refusal, while retaining unknown-write protection', async () => {
     const gate = new BrowserApprovalGate(), agent = {}, write = vi.fn(async () => 'alternative')
     await expect(gate.request(agent, async () => { throw new BridgeToolError('content-unavailable', 'Unsupported capability', true) }, 'browser_click_at')).rejects.toThrow('Unsupported capability')

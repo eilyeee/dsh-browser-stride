@@ -7,7 +7,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { isReadOnlyBrowserTool } from './protocol.ts'
-import { feedbackText, failureFeedback, observationFeedback, parseToolFeedback } from './tool-feedback.ts'
+import { feedbackText, failureFeedback, observationFeedback, parseToolFeedback, READONLY_FIELD_GUIDANCE } from './tool-feedback.ts'
 import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { BridgeServer } from './server.ts'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
@@ -125,7 +125,8 @@ export function registerBrowserTools(
       : parseToolFeedback(typeof result.value === 'object' && result.value !== null && !Array.isArray(result.value) ? result.value.feedback : undefined)
         ?? observationFeedback(readOnly ? 'observed' : 'dispatched')
     return { ...result, meta: { browserFeedback: { ...feedback } },
-      ...(result.isError ? { content: [{ type: 'text' as const, text: feedbackText(feedback) }] } : {}) }
+      ...(result.isError ? { content: [{ type: 'text' as const, text: feedbackText(feedback)
+        + (result.error.info?.code === 'field-readonly' ? ' ' + READONLY_FIELD_GUIDANCE : '') }] } : {}) }
   })
   const call = async (exec: Pick<ToolRunContext, 'agent' | 'signal'>, name: string, args: Record<string, unknown>): Promise<TextResult> => {
     const result = await request(exec, name, args)

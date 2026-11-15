@@ -11,6 +11,12 @@ export function isControlDisabled(element: Element): boolean {
     || (isElementUiOption(element) && element.classList.contains('is-disabled'))
 }
 
+/** Direct field edits respect the same readonly state reported by snapshots. */
+export function isFieldReadOnly(element: Element): boolean {
+  return ((element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) && element.readOnly)
+    || element.closest('[aria-readonly="true"]') !== null
+}
+
 export function customOptionSelected(element: Element): boolean | undefined {
   if (isElementUiOption(element)) return element.classList.contains('selected')
   if (element.getAttribute('role') === 'option') {

@@ -14,14 +14,15 @@ import {startDshBackend} from '../benchmark/lib/dsh-process.mjs'
 import {startExtensionBrowser} from '../benchmark/lib/extension-browser.mjs'
 import {within} from '../benchmark/lib/extension-connection.mjs'
 import {parseMarkedModelReport} from '../benchmark/lib/model-report.mjs'
-import {FIELD_READBACK_CASES,startFieldReadbackSite} from './fixtures/field-readback-site.mjs'
+import {FIELD_READBACK_CASES,READONLY_FIELD_CASES,startFieldReadbackSite} from './fixtures/field-readback-site.mjs'
 
 const repo=resolve(import.meta.dirname,'..'),require=createRequire(join(repo,'package.json'))
 const bridgeRequire=createRequire(join(repo,'packages/browser/bridge-browser/package.json'))
 const cli=join(dirname(require.resolve('@deepseek-ai/dsh/package.json')),'lib/bin.js')
 const root=await mkdtemp(join(tmpdir(),'stride-field-readback-')),home=join(root,'home')
 const version=JSON.parse(await readFile(join(repo,'package.json'),'utf8')).version,realModel=process.env.STRIDE_REAL_MODEL==='1'
-const base=join(repo,'.stride-private/validation/field-readback',version),label=realModel?'real-model':'scripted'
+const readonlyOnly=process.argv.includes('--readonly-only'),cases=readonlyOnly?READONLY_FIELD_CASES:FIELD_READBACK_CASES
+const base=join(repo,'.stride-private/validation/field-readback',version),label=(realModel?'real-model':'scripted')+(readonlyOnly?'-readonly':'')
 await mkdir(base,{recursive:true});const artifacts=await mkdtemp(join(base,label+'-'))
 await writeFile(join(base,label+'.json'),JSON.stringify({passed:false,status:'in-progress',evidenceDirectory:artifacts.slice(base.length+1)})+'\n',{mode:0o600})
 const env={...process.env,DSH_HOME:home,DSH_TELEMETRY_DISABLED:'1'}
@@ -30,7 +31,14 @@ const summaries=[],programs={}
 const findRef=String.raw`function ref(view,label){const line=view.text.split('\n').find(line=>line.includes(label));const value=line?.match(/ref=(obs_[a-f0-9-]+:\d+)/)?.[1];if(!value)throw Error('Missing observed '+label);return value;}`
 for(const kind of FIELD_READBACK_CASES){
   const select=kind.startsWith('select'),positive=kind.endsWith('-ok')
-  programs[kind]=findRef+`const before=await tools.browser_snapshot({});console.log(await tools.${select?'browser_select':'browser_type'}({elementRef:ref(before,${JSON.stringify(select?'select "Field"':kind.startsWith('editor')?'textbox "Field"':kind.startsWith('textarea')?'textarea "Field"':'input "Field"')}),${select?'optionIndex:1':"text:'accepted',replace:true"}}));
+  const edit=`tools.${select?'browser_select':'browser_type'}({elementRef:ref(before,${JSON.stringify(select?'select "Field"':kind.startsWith('editor')?'textbox "Field"':kind.startsWith('textarea')?'textarea "Field"':'input "Field"')}),${select?'optionIndex:1':"text:'accepted',replace:true"}})`
+  if(kind.includes('readonly')){
+    programs[kind]=findRef+`const before=await tools.browser_snapshot({});let refused=false;try{await ${edit}}catch{refused=true}if(!refused)throw Error('Readonly field was edited');
+const note=await tools.browser_snapshot({});await tools.browser_type({elementRef:ref(note,'input "Note"'),text:'accepted',replace:true});
+const save=await tools.browser_snapshot({});await tools.browser_click({elementRef:ref(save,'button "Save"')});console.log(await tools.browser_snapshot({}));console.log('FIELD_PROGRAM_OK');`
+    continue
+  }
+  programs[kind]=findRef+`const before=await tools.browser_snapshot({});console.log(await ${edit});
 const after=await tools.browser_snapshot({});let blocked=false;try{await tools.browser_click({elementRef:ref(after,'button "Save"')})}catch{blocked=true}
 if(blocked!==${!positive})throw Error('Unexpected Save admission');console.log(await tools.browser_snapshot({}));console.log('FIELD_PROGRAM_OK');`
 }
@@ -74,7 +82,7 @@ export const inject=['llm','tools','agents'];export function apply(ctx){${realMo
   sessionId=await browser.worker.evaluate(async()=>(await chrome.storage.session.get('dshTabAffinity')).dshTabAffinity.focusedSessionId)
   await rpc('bridge.taskBrief.save',{sessionId,version:0,input:{goal:'Synthetic field readback',projectPath:'',materials:[],criteria:[]}})
   if(!realModel)await rpc('session.selectModel',{sessionId,provider:'stride-field-readback',model:'field-readback'})
-  for(const kind of FIELD_READBACK_CASES){
+  for(const kind of cases){
     phase=kind;events=[];console.log(JSON.stringify({phase,realModel}))
     await browser.prepare(site.url(kind));await browser.bindSession(sessionId);await browser.panel.bringToFront();await host.client.followSession(sessionId)
     let started=false,finish;const done=new Promise(resolve=>{finish=resolve})
@@ -84,20 +92,30 @@ export const inject=['llm','tools','agents'];export function apply(ctx){${realMo
       if(e.type==='turn/end')finish(e.data.reason.kind)
     })
     try{
-      const positive=kind.endsWith('-ok'),select=kind.startsWith('select')
-      const prompt=realModel?`仅操作当前已授权本地合成页，将 Field ${select?'选择为 Large':'替换为 accepted'}，再保存。不要操作文件、其他网站或恢复权限。工具提示写入未确认时停止后续写入，只读核对并报告；不自动重试。最后返回 JSON：{"marker":"FIELD_MODEL_DONE","goalReached":true或false,"reason":"实际观察依据和未确认项"}。`:'FIELD_CASE='+kind
+      const readonly=kind.includes('readonly'),positive=kind.endsWith('-ok')||readonly,select=kind.startsWith('select')
+      const task=readonly?'先读取 Field 的只读状态，保持其原值，只将可写的 Note 替换为 accepted 并保存。本轮目标是保存 Note，不能强制修改只读 Field。':`将 Field ${select?'选择为 Large':'替换为 accepted'}，再保存。`
+      const prompt=realModel?`仅操作当前已授权本地合成页，${task}不要操作文件、其他网站或恢复权限。工具提示写入未确认时停止后续写入，只读核对并报告；不自动重试。最后返回 JSON：{"marker":"FIELD_MODEL_DONE","goalReached":true或false,"reason":"实际观察依据和未确认项"}。`:'FIELD_CASE='+kind
       cancelTimer=setTimeout(()=>{void host.client.rpc('session.cancel',{sessionId}).catch(()=>{});finish('test-timeout')},realModel?240000:45000)
       const input=browser.panel.locator('.composer textarea');await input.fill(prompt);await input.press('Enter')
       const reason=await within(done,realModel?245000:50000,'field turn')
       await writeFile(join(artifacts,kind+'-events.json'),JSON.stringify(events,null,2)+'\n',{mode:0o600});assert.equal(reason,'completed')
       const calls=events.filter(e=>e.type==='tool/ptc-dispatch'||(e.type==='tool/call'&&e.data.name?.startsWith('browser_'))).map(e=>e.data)
-      assert.equal(calls.filter(c=>c.name===(select?'browser_select':'browser_type')).length,1)
+      const edits=calls.filter(c=>c.name===(select?'browser_select':'browser_type')).length
+      if(!readonly)assert.equal(edits,1)
+      else if(!realModel)assert.equal(edits,select?1:2)
+      else {assert.ok(calls.filter(c=>c.name==='browser_select').length<=1);assert.ok(calls.filter(c=>c.name==='browser_type').length<=2)}
       const feedback=events.filter(e=>['tool/ptc-dispatch','tool/result'].includes(e.type)).map(e=>e.data.meta?.browserFeedback).filter(Boolean)
       assert.ok(feedback.some(f=>f.state===(positive?'observed':'readback-unconfirmed')))
       if(!positive&&!realModel)assert.ok(feedback.some(f=>f.state==='not-applied'&&f.code==='result_unknown'),'Fresh Save reference must be refused by the Host write fence')
       const saves=site.state().saves.filter(row=>row.case===kind)
       assert.equal(saves.length,positive?1:0)
-      if(positive){assert.equal(saves[0].value,select?'Large':'accepted');assert.equal(calls.filter(c=>c.name==='browser_click').length,1)}
+      if(positive){assert.equal(saves[0].value,readonly?(select?'Small':'old'):(select?'Large':'accepted'));assert.equal(calls.filter(c=>c.name==='browser_click').length,1)}
+      let fieldEvents
+      if(readonly){
+        assert.equal(saves[0].note,'accepted');fieldEvents=await browser.target.evaluate(()=>window.fieldEvents)
+        assert.deepEqual(fieldEvents,{input:0,change:0})
+        if(!realModel)assert.ok(calls.some(c=>c.error?.code==='field-readonly'&&c.meta?.browserFeedback?.state==='not-applied'))
+      }
       let report
       if(realModel){
         const final=events.filter(e=>e.type==='assistant/message').flatMap(e=>e.data.message?.content?.filter(b=>b.type==='text').map(b=>b.text)??[]).at(-1)
@@ -107,12 +125,12 @@ export const inject=['llm','tools','agents'];export function apply(ctx){${realMo
         const root=events.find(e=>e.type==='tool/result')?.data.message
         assert.ok(root&&!root.isError&&JSON.stringify(root.content).includes('FIELD_PROGRAM_OK'))
       }
-      summaries.push({case:kind,passed:true,saveRequests:saves.length,editToolAttempts:1,hostSaveFenceTested:!positive&&!realModel,...report?{modelGoalReached:report.goalReached}:{}})
+      summaries.push({case:kind,passed:true,saveRequests:saves.length,editToolAttempts:edits,hostSaveFenceTested:!positive&&!realModel,...fieldEvents?{readonlyFieldEvents:fieldEvents,noteSaved:true}:{},...report?{modelGoalReached:report.goalReached}:{}})
     }finally{clearTimeout(cancelTimer);off()}
   }
   await browser.panel.setViewportSize({width:360,height:800});assert.ok(await browser.panel.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1))
   await browser.panel.screenshot({path:join(artifacts,'panel.png')})
-  const summary={passed:true,version,realHost:true,isolatedChrome:true,browserVersion:browser.browserVersion,scriptedModel:!realModel,realModel,cases:summaries,originalHostUntouched:true,evidenceDirectory:artifacts.slice(base.length+1),hostBundleSha256:createHash('sha256').update(await readFile(join(repo,'packages/browser/bridge-browser/lib/index.js'))).digest('hex'),contentBundleSha256:createHash('sha256').update(await readFile(join(repo,'extensions/dsh-browser/dist/content.js'))).digest('hex')}
+  const summary={passed:true,version,scope:readonlyOnly?'readonly-only':'all',realHost:true,isolatedChrome:true,browserVersion:browser.browserVersion,scriptedModel:!realModel,realModel,cases:summaries,originalHostUntouched:true,evidenceDirectory:artifacts.slice(base.length+1),hostBundleSha256:createHash('sha256').update(await readFile(join(repo,'packages/browser/bridge-browser/lib/index.js'))).digest('hex'),contentBundleSha256:createHash('sha256').update(await readFile(join(repo,'extensions/dsh-browser/dist/content.js'))).digest('hex')}
   await writeFile(join(artifacts,'result.json'),JSON.stringify(summary,null,2)+'\n',{mode:0o600});await writeFile(join(base,label+'.json'),JSON.stringify(summary,null,2)+'\n',{mode:0o600});console.log(JSON.stringify(summary))
 }catch(error){
   await writeFile(join(artifacts,'failure-events.json'),JSON.stringify(events,null,2)+'\n',{mode:0o600})

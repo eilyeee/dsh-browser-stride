@@ -38,6 +38,12 @@ handlers change the target or select options, including during settling. Old
 references are retired and the same-turn Host write fence remains active after
 a fresh observation. A partial edit is not undone by this check.
 
+Development build 0.1.12 checks native and ARIA readonly state before direct
+field edits and during selection. A pre-existing readonly field is refused
+without stopping edits to other writable fields; a field locked after partial
+editing keeps the uncertainty fence. Readonly text inputs used as picker
+triggers can still be clicked to open their intended menu.
+
 From the repository root:
 
 ```sh

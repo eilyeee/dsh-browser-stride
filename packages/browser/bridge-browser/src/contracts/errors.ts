@@ -187,6 +187,8 @@ export function fromLegacyToolError(code: string, message: string): BrowserError
       return makeBrowserError('target_unavailable', message)
     case 'action-failed':
       return makeBrowserError('action_failed', message)
+    case 'field-readonly':
+      return makeBrowserError('action_failed', message, { retryable: false })
     case 'timeout':
     case 'action-duplicate':
     case 'action-conflict':

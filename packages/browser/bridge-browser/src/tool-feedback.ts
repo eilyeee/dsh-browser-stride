@@ -1,6 +1,8 @@
 /** Bounded diagnostic feedback. It never grants access or verifies a business change. */
 import { BROWSER_ERROR_CODES, errorDefault, type BrowserErrorCode, type NextStep } from './contracts/errors.ts'
 
+export const READONLY_FIELD_GUIDANCE = 'This field is read-only for direct editing. Do not force this edit through another interaction method. Continue only with other writable controls within existing authorization, or ask the user.'
+
 export const FEEDBACK_STATES = ['observed', 'dispatched', 'readback-unconfirmed', 'not-applied', 'failed', 'uncertain'] as const
 export interface BrowserToolFeedback {
   version: 1
@@ -35,7 +37,7 @@ export function failureFeedback(code: string, readOnly: boolean, notDispatched =
       kind = 'permission_denied'; state = 'not-applied'; break
     case 'no-active-tab': kind = 'target_unavailable'; state = 'not-applied'; break
     case 'bad-args': kind = 'bad_args'; state = 'not-applied'; break
-    case 'design-zoom-not-selected': kind = 'action_failed'; state = 'not-applied'; break
+    case 'field-readonly': case 'design-zoom-not-selected': kind = 'action_failed'; state = 'not-applied'; break
     case 'timeout': case 'bridge-closed': case 'action-duplicate': case 'action-conflict': case 'receipt-unavailable': case 'execution-denied':
       kind = readOnly ? 'connection_unavailable' : 'result_unknown'; state = readOnly ? 'failed' : 'uncertain'; break
     case 'content-unavailable': kind = 'target_unavailable'; state = readOnly ? 'failed' : 'uncertain'; break

@@ -13,7 +13,7 @@
 import { accessibleName, collectInteractive, isInViewport, isVisible, mainText, pageText, truncate } from './extract.ts'
 import { ElementIds, SELECT_OPTION_LIMIT } from './ids.ts'
 import { isSensitiveField, maskValue } from './privacy.ts'
-import { customOptionSelected, isControlDisabled, isElementUiOption } from './custom-options.ts'
+import { customOptionSelected, isControlDisabled, isElementUiOption, isFieldReadOnly } from './custom-options.ts'
 import { makeElementRef, makeObservationId, type ObservationId } from '@eilyeee/dsh-browser-stride/src/contracts/ids.ts'
 
 /** Role label per element kind (model-facing vocabulary). */
@@ -45,6 +45,7 @@ interface InventoryItem {
   checked?: boolean
   ariaInvalid?: AriaInvalidState
   selected?: boolean
+  readOnly?: true
   href?: string
   inViewport: boolean
 }
@@ -273,6 +274,8 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
     // Match the same disabled/inert boundary used when deciding whether an
     // observed target can be operated on, including disabled fieldsets.
     if (isControlDisabled(el)) item.disabled = true
+    if ((el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement
+      || el.hasAttribute('contenteditable')) && isFieldReadOnly(el)) item.readOnly = true
     if (el instanceof HTMLInputElement) {
       if (el.type === 'checkbox' || el.type === 'radio') item.checked = el.checked
     }
@@ -314,8 +317,7 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
       ...(ariaInvalid === undefined ? {} : { ariaInvalid }),
       ...checkable ? { checked: el.checked } : {},
       ...(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) && el.required ? { required: true } : {},
-      ...((el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) && el.readOnly
-        || el.closest('[aria-readonly="true"]') !== null) ? { readOnly: true } : {},
+      ...isFieldReadOnly(el) ? { readOnly: true } : {},
       ...el instanceof HTMLSelectElement && !masked && !el.multiple ? {
         options: Array.from({ length: Math.min(el.options.length, SELECT_OPTION_LIMIT) }, (_, index) => el.options.item(index)!).map((option, index) => ({
           index, label: option.label.replace(/\s+/g, ' ').trim().slice(0, 120), disabled: option.matches(':disabled'),
@@ -381,7 +383,7 @@ function selectedText(select: HTMLSelectElement): string {
 
 function sameItem(a: InventoryItem, b: InventoryItem): boolean {
   return a.role === b.role && a.name === b.name && a.href === b.href
-    && a.disabled === b.disabled && a.checked === b.checked && a.selected === b.selected
+    && a.disabled === b.disabled && a.readOnly === b.readOnly && a.checked === b.checked && a.selected === b.selected
     && a.ariaInvalid === b.ariaInvalid && a.inViewport === b.inViewport
 }
 
@@ -412,6 +414,7 @@ function capRendered(text: string, budgetChars: number): { text: string; bodyLen
 function renderItem(item: InventoryItem, observationId: ObservationId): string {
   const state = [
     item.disabled === true ? 'disabled' : undefined,
+    item.readOnly === true ? 'readonly' : undefined,
     item.checked === undefined ? undefined : item.checked ? 'checked' : 'unchecked',
     item.selected === undefined ? undefined : item.selected ? 'selected' : 'not selected',
     item.ariaInvalid === undefined ? undefined : `aria-invalid=${item.ariaInvalid}`,

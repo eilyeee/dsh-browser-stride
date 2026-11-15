@@ -53,6 +53,7 @@ describe('fromLegacyToolError', () => {
     expect(fromLegacyToolError('no-active-tab', '').code).toBe('target_unavailable')
     expect(fromLegacyToolError('content-unavailable', '').code).toBe('target_unavailable')
     expect(fromLegacyToolError('action-failed', '').code).toBe('action_failed')
+    expect(fromLegacyToolError('field-readonly', '')).toMatchObject({ code: 'action_failed', retryable: false })
     expect(fromLegacyToolError('bridge-closed', '').code).toBe('connection_unavailable')
     expect(fromLegacyToolError('bad-args', '').code).toBe('bad_args')
     expect(fromLegacyToolError('internal', '').code).toBe('internal')

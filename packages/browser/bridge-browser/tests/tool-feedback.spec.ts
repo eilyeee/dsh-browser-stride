@@ -4,6 +4,7 @@ import { failureFeedback, parseToolFeedback } from '../src/tool-feedback.ts'
 describe('browser feedback trust and uncertainty', () => {
   it('distinguishes stale preconditions from an unknown write and a failed read', () => {
     expect(failureFeedback('element-stale', false)).toMatchObject({ state: 'not-applied', code: 'target_expired', nextStep: 'reobserve' })
+    expect(failureFeedback('field-readonly', false)).toMatchObject({ state: 'not-applied', code: 'action_failed', nextStep: 'reobserve' })
     expect(failureFeedback('timeout', false)).toMatchObject({ state: 'uncertain', code: 'result_unknown', nextStep: 'reconcile_business_state' })
     expect(failureFeedback('timeout', true)).toMatchObject({ state: 'failed', code: 'connection_unavailable' })
     expect(failureFeedback('new-unrecognized-code', false).state).toBe('uncertain')

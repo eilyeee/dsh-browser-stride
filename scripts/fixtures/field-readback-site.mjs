@@ -1,7 +1,8 @@
 import {createServer} from 'node:http'
 
 /** Local-only edits: observe the actual field identity and count Save requests. */
-export const FIELD_READBACK_CASES=['select-input','select-change','select-late','input-late','textarea-late','editor-late','select-ok','input-ok']
+export const READONLY_FIELD_CASES=['select-readonly','select-readonly-ancestor','input-readonly','textarea-readonly','editor-readonly','select-lock-input','select-lock-change','select-lock-late']
+export const FIELD_READBACK_CASES=['select-input','select-change','select-late','input-late','textarea-late','editor-late','select-ok','input-ok',...READONLY_FIELD_CASES]
 export async function startFieldReadbackSite(){
   const saves=[]
   const server=createServer(async(req,res)=>{
@@ -23,18 +24,27 @@ export async function startFieldReadbackSite(){
     res.setHeader('content-type','text/html; charset=utf-8')
     res.end(`<!doctype html><meta charset="utf-8"><title>Field readback fixture</title>
 <style>body{font:16px sans-serif;margin:24px}#field{display:block;min-width:220px;min-height:30px;margin:16px 0}</style>
-<main><h1>Synthetic field settings</h1>${field}<button id="save">Save</button><p id="status">Not saved</p></main>
+<main><h1>Synthetic field settings</h1><section id="field-group">${field}</section><label>Note<input id="note" aria-label="Note"></label><button id="save">Save</button><p id="status">Not saved</p></main>
 <script>
 const kind=${JSON.stringify(kind)},field=document.querySelector('#field');let changed=false;
+if(kind.includes('readonly')){
+ if(kind==='select-readonly-ancestor')document.querySelector('#field-group').setAttribute('aria-readonly','true');
+ else if(kind==='input-readonly')field.readOnly=true;
+ else field.setAttribute('aria-readonly','true');
+ if(field.isContentEditable)field.textContent='old';else if(!(field instanceof HTMLSelectElement))field.value='old';
+}
 window.fieldEvents={input:0,change:0};
 for(const event of ['input','change'])field.addEventListener(event,()=>window.fieldEvents[event]++);
 function retarget(){if(changed)return;changed=true;if(kind==='select-input')field.options[1].text='Different option';else field.setAttribute('aria-label','Other record');}
-if(kind==='select-input')field.addEventListener('input',retarget);
+if(kind.includes('lock-'))field.addEventListener(kind==='select-lock-change'?'change':'input',()=>{
+ const lock=()=>field.setAttribute('aria-readonly','true');if(kind==='select-lock-late')queueMicrotask(lock);else lock();
+});
+else if(kind==='select-input')field.addEventListener('input',retarget);
 else if(kind==='select-change')field.addEventListener('change',retarget);
 else if(kind.endsWith('-late'))field.addEventListener('input',()=>queueMicrotask(retarget));
 document.querySelector('#save').onclick=async()=>{
  const value=field instanceof HTMLSelectElement?field.selectedOptions[0].text:field.isContentEditable?field.textContent:field.value;
- const reply=await fetch('/save',{method:'POST',body:JSON.stringify({case:kind,value})});
+ const reply=await fetch('/save',{method:'POST',body:JSON.stringify({case:kind,value,note:document.querySelector('#note').value})});
  document.querySelector('#status').textContent=reply.ok?'Saved':'Save failed';
 };
 </script>`)
