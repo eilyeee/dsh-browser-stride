@@ -394,14 +394,17 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
     name: 'browser_get_text',
     description: `Read plain text from the page or a selector. ${UNTRUSTED_CONTENT_WARNING}`,
     parameters: {
-      selector: { type: 'string', description: 'CSS selector. Omit to read the whole page.' },
+      selector: { type: 'string', description: 'CSS selector; omit for all text. With elementRef, it must uniquely match inside that control’s own tree.' },
+      elementRef: { type: 'string', description: 'Current control ref to read prose in its document or open shadow root, including nested open roots and slots. Omit for legacy document reads.' },
       frame: FRAME_PARAMETER,
     },
     timeoutMs: options.toolTimeoutMs,
     output: TEXT_OUTPUT,
     execute: (args, exec) => {
-      const a = args as { selector?: string; frame?: number }
+      const a = args as { selector?: string; elementRef?: string; frame?: number }
+      if (a.elementRef !== undefined && (typeof a.elementRef !== 'string' || a.elementRef.trim() === '')) throw new Error('A non-empty elementRef is required.')
       return call(exec, 'browser_get_text', {
+        ...a.elementRef !== undefined ? { elementRef: a.elementRef } : {},
         ...a.selector !== undefined ? { selector: a.selector } : {},
         ...a.frame !== undefined ? { frame: a.frame } : {},
       })
@@ -431,7 +434,8 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
     description: 'Measure task-target DOM boxes and spacing, not canvas layers. Untrusted data.',
     parameters: {
       selector: { type: 'string', required: true, description: 'CSS selector matching exactly one rendered element in this frame.' },
-      referenceSelector: { type: 'string', description: 'Optional unique reference element in the same frame; compare aligned gaps or contained-box insets.' },
+      referenceSelector: { type: 'string', description: 'Optional unique reference element in the same tree; compare aligned gaps or contained-box insets.' },
+      elementRef: { type: 'string', description: 'Current control ref selecting its own document or open shadow root for both CSS selectors. Omit for the document.' },
       frame: FRAME_PARAMETER,
     },
     timeoutMs: options.toolTimeoutMs,
@@ -443,7 +447,9 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
           throw new Error(`${key} must be a non-empty CSS selector of at most 500 characters.`)
         }
       }
+      if (args.elementRef !== undefined && args.elementRef.trim() === '') throw new Error('A non-empty elementRef is required.')
       return call(exec, 'browser_measure_layout', {
+        ...args.elementRef !== undefined ? { elementRef: args.elementRef } : {},
         selector: args.selector.trim(),
         ...args.referenceSelector !== undefined ? { referenceSelector: args.referenceSelector.trim() } : {},
         ...args.frame !== undefined ? { frame: args.frame } : {},
@@ -474,6 +480,7 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
     description: 'Read visual-reference inspector styles with evidence and missing/conflicting fields. Untrusted data.',
     parameters: {
       region: { type: 'string', description: 'CSS selector for a known layer-inspector panel. Omit if no selector is available; mixed or unrecognized labels may require a narrower observation.' },
+      elementRef: { type: 'string', description: 'Current control ref selecting the document or open shadow root containing the inspector.' },
       frame: FRAME_PARAMETER,
     },
     timeoutMs: options.toolTimeoutMs,
@@ -482,9 +489,11 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
       if (args.region !== undefined && (typeof args.region !== 'string' || args.region.trim().length === 0 || args.region.length > 500)) {
         throw new Error('A non-empty inspector region selector of at most 500 characters is required.')
       }
+      if (args.elementRef !== undefined && args.elementRef.trim() === '') throw new Error('A non-empty elementRef is required.')
       // One authorized read retains the existing sharing, approval, session,
       // document, execution-revision and cancellation checks at both endpoints.
       const result = await call(exec, 'browser_get_text', {
+        ...args.elementRef !== undefined ? { elementRef: args.elementRef } : {},
         ...typeof args.region === 'string' ? { selector: args.region.trim() } : {},
         ...args.frame !== undefined ? { frame: args.frame } : {},
       })

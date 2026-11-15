@@ -5,6 +5,14 @@ const execution = { kind: 'legacy' as const }
 const action = { actionId: 'act_synthetic', requestDigest: 'a'.repeat(64) }
 
 describe('parseBridgeFrame', () => {
+  it('accepts optional boolean observed-read capability and rejects malformed values', () => {
+    for (const t of ['hello', 'hello.ok']) {
+      const frame = { t, token: 'test', caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } }
+      for (const elementReadScope of [undefined,true,false]) expect(parseBridgeFrame(JSON.stringify({ ...frame, caps: { ...frame.caps, elementReadScope } }))).toBeDefined()
+      for (const elementReadScope of [null,1,'true',{}]) expect(parseBridgeFrame(JSON.stringify({ ...frame, caps: { ...frame.caps, elementReadScope } }))).toBeUndefined()
+    }
+  })
+
   it('accepts optional boolean scroll capability in both handshakes and rejects malformed values', () => {
     for (const t of ['hello', 'hello.ok']) {
       const frame = { t, token: 'test', caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } }

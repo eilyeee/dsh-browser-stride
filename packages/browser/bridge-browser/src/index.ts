@@ -319,6 +319,7 @@ function mountBridge(
       visualViewport: true,
       layoutMetrics: true,
       elementScroll: true,
+      elementReadScope: true,
       designViewZoom: true,
       release: bridgeRelease(),
       ...(briefs === undefined ? { taskNotesUnavailable: true } : {}),

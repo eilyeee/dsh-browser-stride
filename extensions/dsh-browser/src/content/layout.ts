@@ -2,13 +2,13 @@
 const sides = ['top', 'right', 'bottom', 'left'] as const
 const selectorLimit = 500
 
-function uniqueElement(value: unknown, name: string): { selector: string; element: Element } {
+function uniqueElement(value: unknown, name: string, scope: Document | ShadowRoot): { selector: string; element: Element } {
   if (typeof value !== 'string' || value.trim() === '' || value.length > selectorLimit) {
     throw new Error(`${name} must be a non-empty CSS selector of at most ${selectorLimit} characters.`)
   }
   const selector = value.trim()
   let elements: NodeListOf<Element>
-  try { elements = document.querySelectorAll(selector) } catch { throw new Error(`${name} is not valid CSS.`) }
+  try { elements = scope.querySelectorAll(selector) } catch { throw new Error(`${name} is not valid CSS.`) }
   if (elements.length !== 1) throw new Error(`${name} matched ${elements.length} elements; choose a selector matching exactly one element.`)
   return { selector, element: elements[0]! }
 }
@@ -53,14 +53,14 @@ function compare(target: Rect, reference: Rect, sameElement: boolean) {
   }
 }
 
-/** Selectors are queried in this frame only; no iframe or shadow-root traversal. */
-export function measureLayout(args: Record<string, unknown>) {
-  const target = uniqueElement(args.selector, 'selector')
-  const reference = args.referenceSelector === undefined ? undefined : uniqueElement(args.referenceSelector, 'referenceSelector')
+/** Both selectors stay in one tree of the controlled frame; they never pierce roots. */
+export function measureLayout(args: Record<string, unknown>, scope: Document | ShadowRoot = document) {
+  const target = uniqueElement(args.selector, 'selector', scope)
+  const reference = args.referenceSelector === undefined ? undefined : uniqueElement(args.referenceSelector, 'referenceSelector', scope)
   const observedTarget = observe(target.selector, target.element)
   const observedReference = reference === undefined ? undefined : observe(reference.selector, reference.element)
   return {
-    version: 1, units: 'CSS pixels', coordinateSpace: 'current-frame viewport',
+    version: 1, scope: scope instanceof ShadowRoot ? 'open-shadow-root' : 'document', units: 'CSS pixels', coordinateSpace: 'current-frame viewport',
     viewport: { width: innerWidth, height: innerHeight, scrollX, scrollY, devicePixelRatio },
     target: observedTarget,
     ...(observedReference === undefined ? {} : { reference: observedReference,

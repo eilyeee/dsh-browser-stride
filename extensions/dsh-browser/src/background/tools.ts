@@ -934,7 +934,7 @@ function validateFrameTarget(call: ToolCall, frames: TabFrame[]): ToolAnswer | u
 
 function validateElementTarget(call: ToolCall, tabId: number, frames: TabFrame[]): ToolAnswer | undefined {
   if (call.name !== 'browser_click' && call.name !== 'browser_type' && call.name !== 'browser_select'
-    && !(call.name === 'browser_scroll' && call.args.elementRef !== undefined)) return undefined
+    && !(['browser_scroll', 'browser_get_text', 'browser_measure_layout'].includes(call.name) && call.args.elementRef !== undefined)) return undefined
   if (typeof call.args.elementRef !== 'string' || parseElementRef(call.args.elementRef) === undefined) {
     return { ok: false, error: { code: 'bad-args', message: 'An observation-bound elementRef is required. Call browser_snapshot and update the bridge and extension together.' } }
   }

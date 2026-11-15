@@ -20,6 +20,7 @@ export async function startShadowSite(){
 <style>body{font:16px sans-serif;margin:24px;min-height:2000px}#component,#other{display:block;margin:20px 0}#outer{height:400px;overflow-y:auto}#outer-space{height:1000px}</style>
 <main><h1>Synthetic component form</h1><span id="name-label">Outside wrong name</span><input id="field" aria-label="Outside field" value="keep"><div id="outer"><div id="component"></div><div id="outer-space"></div></div><div id="other"></div><label>Note<input id="note" aria-label="Note"></label><button id="save">Save note</button><p id="status">Not saved</p><p id="mirror"></p></main>
 <script>
+function appendMarkup(root,html){const template=document.createElement('template');template.innerHTML=html;root.append(template.content)}
 const kind=${JSON.stringify(kind)};window.closedClicks=0;window.fieldEvents={input:0,change:0};window.framework={name:'old',size:'Small',checked:false};
 const closed=document.createElement('div');document.body.append(closed);const locked=closed.attachShadow({mode:'closed'});locked.innerHTML='<button>Closed action</button>';locked.querySelector('button').onclick=()=>window.closedClicks++;
 function makeComponent(host){
@@ -39,7 +40,7 @@ if(kind==='retarget'){
  currentComponent.field.addEventListener('input',()=>other.append(currentComponent.field),{once:true});
 }
 if(kind==='privacy'){
- const root=currentComponent.root;root.insertAdjacentHTML('beforeend','<input type="password" aria-label="Password"><label for="code">验证码</label><input id="code">');
+ const root=currentComponent.root;appendMarkup(root,'<input type="password" aria-label="Password"><label for="code">验证码</label><input id="code">');
  root.querySelector('[type="password"]').value=${JSON.stringify(SHADOW_SYNTHETIC_SECRETS[0])};root.querySelector('#code').value=${JSON.stringify(SHADOW_SYNTHETIC_SECRETS[1])};
  document.querySelector('#mirror').textContent=${JSON.stringify(SHADOW_SYNTHETIC_SECRETS.join(' '))};
 }
@@ -48,6 +49,7 @@ async function save(mode){
  document.querySelector('#status').textContent='Saved '+mode;
 }
 document.querySelector('#save').onclick=()=>save('note');
+window.shadowFixtureReady=true;
 </script>`)
   })
   await new Promise(done=>server.listen(0,'127.0.0.1',done));const origin='http://127.0.0.1:'+server.address().port

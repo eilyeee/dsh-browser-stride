@@ -17,6 +17,7 @@ import type { SnapshotBudget } from './snapshot.ts'
 import { buildSnapshot, renderSnapshotDetails } from './snapshot.ts'
 import { visualViewportState } from './visual.ts'
 import { measureLayout } from './layout.ts'
+import { componentText } from './component-text.ts'
 import { changeDesignZoom, nativeDesignZoomControls } from './design-zoom.ts'
 import { DesignZoomNotSelectedError } from './design-zoom-error.ts'
 import { clearLanhuZoom, commitLanhuZoom, prepareLanhuZoom } from './lanhu-zoom.ts'
@@ -236,10 +237,12 @@ export async function runAction(action: string, args: Record<string, unknown>, c
     case 'browser_reload':
       return reloadAction(ctx)
     case 'browser_get_text':
-      return getTextAction(args)
-    case 'browser_measure_layout':
-      try { return { text: JSON.stringify(measureLayout(args)) } }
+      return getTextAction(args, ctx)
+    case 'browser_measure_layout': {
+      const scope = args.elementRef === undefined ? document : readScope(args, ctx)
+      try { return { text: JSON.stringify(measureLayout(args, scope)) } }
       catch (error) { throw new ActionError('action-failed', error instanceof Error ? error.message : 'Layout could not be measured.') }
+    }
     case 'browser_set_design_zoom':
       try {
         if (args.phase === 'prepare' && nativeDesignZoomControls().length === 0) {
@@ -693,7 +696,35 @@ function reloadAction(ctx: ActionContext): ActionResult {
   }
 }
 
-async function getTextAction(args: Record<string, unknown>): Promise<ActionResult> {
+/** A read scope keeps the observed identity boundary without granting write access. */
+function readScope(args: Record<string, unknown>, ctx: ActionContext): Document | ShadowRoot {
+  const index = referenceArg(args, ctx.ids)
+  const element = ctx.ids.elementByIndex(index)
+  if (element === undefined || !ctx.ids.isReadTargetCurrent(index)) {
+    throw new ActionError('element-stale', 'The observed read scope changed or disappeared. Take a fresh snapshot.')
+  }
+  const root = element.getRootNode()
+  if (root instanceof Document || root instanceof ShadowRoot && root.mode === 'open') return root
+  throw new ActionError('element-stale', 'The observed read scope is no longer accessible. Take a fresh snapshot.')
+}
+
+async function getTextAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
+  if (args.elementRef !== undefined) {
+    const scope = readScope(args, ctx)
+    let source: Document | ShadowRoot | Element = scope
+    if (args.selector !== undefined) {
+      if (typeof args.selector !== 'string' || args.selector.trim() === '' || args.selector.length > 500) {
+        throw new ActionError('bad-args', 'selector must be a non-empty CSS selector of at most 500 characters.')
+      }
+      let matches: NodeListOf<Element>
+      try { matches = scope.querySelectorAll(args.selector) } catch { throw new ActionError('bad-args', 'selector is not valid CSS.') }
+      if (matches.length !== 1) throw new ActionError('bad-args', `selector matched ${matches.length} elements in the observed tree; choose a unique selector.`)
+      source = matches[0]!
+    }
+    const text = componentText(source), clipped = truncate(text, 8_000)
+    return { text: `Text scope: ${scope instanceof ShadowRoot ? 'open shadow root' : 'document'} of the observed control; rendered DOM order.\n${clipped.text}`
+      + (clipped.truncated > 0 ? `\n(Truncated ${clipped.truncated} characters after redaction.)` : '') }
+  }
   const selector = typeof args.selector === 'string' && args.selector !== '' ? args.selector : undefined
   const source = selector !== undefined ? document.querySelector(selector) : null
   const text = source !== null ? pageText(source, true) : selector !== undefined ? `No element matched selector: ${selector}` : pageText(undefined, true)

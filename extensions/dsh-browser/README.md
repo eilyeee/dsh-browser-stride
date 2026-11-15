@@ -1,11 +1,21 @@
 # Browser extension
 
+Development build 0.1.16 lets `browser_get_text`, `browser_measure_layout` and
+`browser_read_design_styles` accept an optional current control `elementRef`.
+It scopes selectors to that control's own document or open shadow root; scoped
+selectors must match exactly once. Text follows nested open roots and assigned
+slots, with sensitive-value redaction before clipping. Traversal/text limits
+withhold incomplete text. Both peers must negotiate `elementReadScope`. Omitting
+the reference keeps legacy document behavior. Snapshot prose/regions still use
+the document; closed roots, CSS-generated text and shadow rich-text edits remain
+unsupported. Layout reports use the current frame's viewport coordinates.
+
 Development build 0.1.15 includes native controls inside open Shadow DOM in
 snapshots. Internal labels stay scoped to their tree; hidden, disabled, readonly
 and inert host/slot boundaries still apply. A control moved between components
 needs a new reference. Recognizable sensitive values are masked, including copies
 in document text; if bounded inspection is incomplete the text is withheld.
-Text prose and CSS selectors remain document-scoped. Closed roots and shadow-root
+Without an observed read scope, prose and CSS selectors remain document-scoped. Closed roots and shadow-root
 rich-text editing are not supported. Synthetic keys target the focused internal
 control without guaranteeing native keyboard behavior.
 

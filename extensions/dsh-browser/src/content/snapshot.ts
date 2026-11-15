@@ -455,7 +455,7 @@ function appendTruncationNotes(lines: string[], view: SnapshotView): void {
 
 function snapshotScope(view: SnapshotView): string {
   const textScope = view.region === undefined ? 'page main content' : `selector ${JSON.stringify(view.region)}`
-  return `Text scope: ${textScope}; control inventory: current frame. Controls include open shadow roots; prose/CSS stay document-scoped.`
+  return `Text scope: ${textScope}; control inventory: current frame. Controls include open shadow roots; snapshot text/region stay document-scoped. Component prose: browser_get_text + elementRef.`
 }
 
 function snapshotLimits(view: SnapshotView): string {

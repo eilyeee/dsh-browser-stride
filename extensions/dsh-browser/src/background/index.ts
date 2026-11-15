@@ -1478,6 +1478,9 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
     if (call.name === 'browser_scroll' && call.args.elementRef !== undefined && caps?.elementScroll !== true) {
       return { ok: false, error: { code: 'content-unavailable', message: 'Targeted scroll requires an updated extension and Host Bridge.' } }
     }
+    if (['browser_get_text', 'browser_measure_layout'].includes(call.name) && call.args.elementRef !== undefined && caps?.elementReadScope !== true) {
+      return { ok: false, error: { code: 'content-unavailable', message: 'Scoped reads require an updated extension and Host Bridge.' } }
+    }
     if (call.name === 'browser_measure_layout' && caps?.layoutMetrics !== true) {
       return { ok: false, error: { code: 'content-unavailable', message: 'Layout measurement requires an updated extension and Host Bridge.' } }
     }

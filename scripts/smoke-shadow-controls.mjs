@@ -21,8 +21,9 @@ const bridgeRequire=createRequire(join(repo,'packages/browser/bridge-browser/pac
 const cli=join(dirname(require.resolve('@deepseek-ai/dsh/package.json')),'lib/bin.js')
 const root=await mkdtemp(join(tmpdir(),'stride-shadow-controls-')),home=join(root,'home')
 const version=JSON.parse(await readFile(join(repo,'package.json'),'utf8')).version,realModel=process.env.STRIDE_REAL_MODEL==='1'
-const cases=SHADOW_CASES
-const base=join(repo,'.stride-private/validation/shadow-controls',version),label=realModel?'real-model':'scripted'
+const privacyOnly=process.argv.includes('--privacy-only')
+const cases=privacyOnly?['privacy']:SHADOW_CASES
+const base=join(repo,'.stride-private/validation/shadow-controls',version),label=(realModel?'real-model':'scripted')+(privacyOnly?'-privacy':'')
 await mkdir(base,{recursive:true});const artifacts=await mkdtemp(join(base,label+'-'))
 await writeFile(join(base,label+'.json'),JSON.stringify({passed:false,status:'in-progress',evidenceDirectory:artifacts.slice(base.length+1)})+'\n',{mode:0o600})
 const env={...process.env,DSH_HOME:home,DSH_TELEMETRY_DISABLED:'1'}
@@ -85,7 +86,10 @@ export const inject=['llm','tools','agents'];export function apply(ctx){${realMo
   if(!realModel)await rpc('session.selectModel',{sessionId,provider:'stride-shadow-controls',model:'shadow-controls'})
   for(const kind of cases){
     phase=kind;events=[];console.log(JSON.stringify({phase,realModel}))
-    await browser.prepare(site.url(kind));await browser.bindSession(sessionId);await browser.panel.bringToFront();await host.client.followSession(sessionId)
+    await browser.prepare(site.url(kind))
+    assert.equal(await browser.target.evaluate(()=>window.shadowFixtureReady),true,'Fixture setup must finish before any model turn')
+    if(kind==='privacy')assert.deepEqual(await browser.target.evaluate(()=>[window.currentComponent.root.querySelector('[type="password"]').value,window.currentComponent.root.querySelector('#code').value]),SHADOW_SYNTHETIC_SECRETS)
+    await browser.bindSession(sessionId);await browser.panel.bringToFront();await host.client.followSession(sessionId)
     let started=false,finish;const done=new Promise(resolve=>{finish=resolve})
     const off=host.client.onFrame(frame=>{
       if(frame.type!=='session/event'||frame.sessionId!==sessionId)return
@@ -139,7 +143,7 @@ export const inject=['llm','tools','agents'];export function apply(ctx){${realMo
   }
   await browser.panel.setViewportSize({width:360,height:800});assert.ok(await browser.panel.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1))
   await browser.panel.screenshot({path:join(artifacts,'panel.png')})
-  const summary={passed:true,version,scope:'native-controls',realHost:true,isolatedChrome:true,browserVersion:browser.browserVersion,scriptedModel:!realModel,realModel,cases:summaries,originalHostUntouched:true,evidenceDirectory:artifacts.slice(base.length+1),hostBundleSha256:createHash('sha256').update(await readFile(join(repo,'packages/browser/bridge-browser/lib/index.js'))).digest('hex'),contentBundleSha256:createHash('sha256').update(await readFile(join(repo,'extensions/dsh-browser/dist/content.js'))).digest('hex')}
+  const summary={passed:true,version,scope:privacyOnly?'privacy-only':'native-controls',realHost:true,isolatedChrome:true,browserVersion:browser.browserVersion,scriptedModel:!realModel,realModel,cases:summaries,originalHostUntouched:true,evidenceDirectory:artifacts.slice(base.length+1),hostBundleSha256:createHash('sha256').update(await readFile(join(repo,'packages/browser/bridge-browser/lib/index.js'))).digest('hex'),contentBundleSha256:createHash('sha256').update(await readFile(join(repo,'extensions/dsh-browser/dist/content.js'))).digest('hex')}
   await writeFile(join(artifacts,'result.json'),JSON.stringify(summary,null,2)+'\n',{mode:0o600});await writeFile(join(base,label+'.json'),JSON.stringify(summary,null,2)+'\n',{mode:0o600});console.log(JSON.stringify(summary))
 }catch(error){
   await writeFile(join(artifacts,'failure-events.json'),JSON.stringify(events,null,2)+'\n',{mode:0o600})

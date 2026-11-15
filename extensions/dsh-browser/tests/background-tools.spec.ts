@@ -285,7 +285,7 @@ describe('dispatchToolCall', () => {
     expect(chromeMock.sendMessage).not.toHaveBeenCalled()
   })
 
-  it.each(['browser_select', 'browser_scroll'])('rejects %s without a snapshot of its current document', async name => {
+  it.each(['browser_select', 'browser_scroll', 'browser_get_text', 'browser_measure_layout'])('rejects %s without a snapshot of its current document', async name => {
     const chromeMock = mockChrome({ tab: { id: 981, url: 'https://example.com/' } })
     const authorize = vi.fn(async () => 'approved' as const)
     await expect(dispatchToolCall(
@@ -844,7 +844,7 @@ describe('dispatchToolCall', () => {
     expect(chromeMock.sendMessage).not.toHaveBeenCalled()
   })
 
-  it.each(['browser_click', 'browser_scroll'])('rejects %s reference after its frame document reloads', async name => {
+  it.each(['browser_click', 'browser_scroll', 'browser_get_text', 'browser_measure_layout'])('rejects %s reference after its frame document reloads', async name => {
     const frames = [
       { frameId: 0, parentFrameId: -1, documentId: 'top-doc', url: 'https://app.example/' },
       { frameId: 3, parentFrameId: 0, documentId: 'child-v1', url: 'https://widget.example/form' },

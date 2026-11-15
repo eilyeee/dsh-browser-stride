@@ -9,6 +9,11 @@ package versions currently identify development builds, not supported releases.
 
 ### Test infrastructure
 
+- Component fixtures append markup through a template fragment instead of the
+  unsupported ShadowRoot.insertAdjacentHTML. Both smokes require completed
+  setup and verify actual sensitive field values before starting a model turn.
+  The earlier 0.1.15 browser privacy claim lacked initialized fixture data;
+  retained results are historical and that scenario needs the corrected check.
 - An isolated write-boundary smoke checks native tool batches and parallel PTC
   submissions against delayed simulated-extension replies. Unconfirmed readback
   and failed write receipts must stop a second write while allowing observation;
@@ -26,6 +31,16 @@ package versions currently identify development builds, not supported releases.
 
 ### Added
 
+- Development build 0.1.16 lets a current control reference scope plain-text,
+  layout and inspector reads to its own document or open shadow root. Scoped
+  CSS must match uniquely within that tree and never falls back to the page.
+  Text reads follow nested open roots and slot assignment, omit non-rendered
+  prose and native field values, and redact before clipping. Incomplete bounded
+  collection withholds text. Disabled observed controls can anchor reads while
+  remaining unavailable for edits. Both peers negotiate `elementReadScope`;
+  legacy document reads and wire version 4 remain. Benchmark suite 26 separates
+  the expanded read interface. Closed roots, generated text and shadow-root
+  rich-text edits remain outside this change.
 - Development build 0.1.15 discovers native controls in accessible open shadow
   roots, including nested components. Labels resolve within their own tree;
   visibility, disabled/readonly checks and scroll contexts include hosts and

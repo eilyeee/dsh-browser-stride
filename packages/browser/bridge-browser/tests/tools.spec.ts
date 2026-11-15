@@ -233,6 +233,15 @@ describe('registerBrowserTools', () => {
     expect(h.requestTool).toHaveBeenCalledExactlyOnceWith('browser_scroll', {direction:'down',amount:120,elementRef:'obs_test:1',frame:2},exec.signal,1000,'scroll-session')
   })
 
+  it.each(['browser_get_text','browser_measure_layout','browser_read_design_styles'])('forwards an observed read scope through the original Session: %s', async name => {
+    const h = makeHarness()
+    registerBrowserTools(h.ctx, h.bridge, { toolTimeoutMs: 1000, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
+    const execute = h.registered.find(item => item.name === name)!.definition.execute as (a: unknown, e: unknown) => Promise<unknown>
+    const exec = { agent: { id: 'read-scope-session' }, signal: new AbortController().signal }
+    await execute({elementRef:'obs_test:1',selector:'#panel',region:'#panel',frame:2,sessionId:'forged',javascript:'forged'},exec)
+    expect(h.requestTool).toHaveBeenCalledExactlyOnceWith(name==='browser_read_design_styles'?'browser_get_text':name,{elementRef:'obs_test:1',selector:'#panel',frame:2},exec.signal,1000,'read-scope-session')
+  })
+
   it('executes every remaining tool with mapped args', async () => {
     const { ctx, bridge, requestTool, registered } = makeHarness()
     registerBrowserTools(ctx, bridge, { toolTimeoutMs: 1_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })

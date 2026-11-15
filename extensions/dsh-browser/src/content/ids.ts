@@ -141,10 +141,15 @@ export class ElementIds {
   /** Reject stale, detached, hidden, disabled or semantically changed targets. */
   isActionTargetCurrent(index: number): boolean {
     const el = this.elementById.get(index)
+    return el !== undefined && this.isReadTargetCurrent(index) && !isControlDisabled(el)
+  }
+
+  /** Disabled/inert controls may identify a readonly scope, without authorizing edits. */
+  isReadTargetCurrent(index: number): boolean {
+    const el = this.elementById.get(index)
     const identity = this.observedIdentity.get(index)
     return el !== undefined && identity !== undefined && el.isConnected && isVisible(el)
       && ancestorsOpaque(el)
-      && !isControlDisabled(el)
       && identity === actionIdentity(el)
   }
 }

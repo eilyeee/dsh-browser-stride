@@ -192,6 +192,8 @@ export interface BridgeCaps {
   layoutMetrics?: boolean
   /** Observation-bound vertical scrolling within a control's nearest container. */
   elementScroll?: boolean
+  /** Current-control anchored text/selector reads in one document or open root. */
+  elementReadScope?: boolean
   /** Bounded supported design-view zoom control and readback. */
   designViewZoom?: boolean
   /** Session task notes and per-criterion reports; not execution authority. */
@@ -390,6 +392,7 @@ function isCaps(value: unknown): value is BridgeCaps {
     && (caps.visualViewport === undefined || typeof caps.visualViewport === 'boolean')
     && (caps.layoutMetrics === undefined || typeof caps.layoutMetrics === 'boolean')
     && (caps.elementScroll === undefined || typeof caps.elementScroll === 'boolean')
+    && (caps.elementReadScope === undefined || typeof caps.elementReadScope === 'boolean')
     && (caps.designViewZoom === undefined || typeof caps.designViewZoom === 'boolean')
     && (caps.taskNotes === undefined || typeof caps.taskNotes === 'boolean')
     && (caps.taskNotesUnavailable === undefined || typeof caps.taskNotesUnavailable === 'boolean')
