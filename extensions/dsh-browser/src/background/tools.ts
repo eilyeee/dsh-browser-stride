@@ -396,7 +396,7 @@ async function snapshotAllFrames(
     return unavailable('The snapshot budget is too small to describe the main page. Increase snapshotMaxChars and try again.')
   }
   const previous = snapshotDocumentsByTab.get(tabId) ?? new Map<number, string>()
-  const deltaRequested = call.args.delta === true
+  const deltaRequested = call.args.delta === true && typeof call.args.baseObservationId === 'string'
 
   const settled = await Promise.allSettled(selected.map(async (frame) => {
     if ((budgets.get(frame.frameId)?.maxChars ?? 0) < MIN_FRAME_SNAPSHOT_CHARS) {
@@ -451,11 +451,8 @@ async function snapshotAllFrames(
     else sections.push(frameHeader(frame), text)
   }
 
-  if (deltaRequested) {
-    const liveIds = new Set(frames.map((frame) => frame.frameId))
-    const removed = [...previous.keys()].filter((frameId) => frameId !== 0 && !liveIds.has(frameId))
-    if (removed.length > 0) sections.push(`\nRemoved iframes: ${removed.join(', ')}`.slice(0, 75))
-  }
+  // Frame membership has no caller-owned baseline yet. List current frames
+  // without deriving removals from another call's internal frame inventory.
   if (selected.length < frames.length) sections.push('\n(Additional iframes omitted by the snapshot budget.)')
 
   snapshotDocumentsByTab.set(tabId, capturedDocuments)

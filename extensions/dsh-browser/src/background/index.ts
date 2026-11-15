@@ -1481,6 +1481,9 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
     if (['browser_get_text', 'browser_measure_layout'].includes(call.name) && call.args.elementRef !== undefined && caps?.elementReadScope !== true) {
       return { ok: false, error: { code: 'content-unavailable', message: 'Scoped reads require an updated extension and Host Bridge.' } }
     }
+    if (call.name === 'browser_snapshot' && call.args.baseObservationId !== undefined && caps?.snapshotBase !== true) {
+      return { ok: false, error: { code: 'content-unavailable', message: 'Explicit snapshot baselines require an updated extension and Host Bridge.' } }
+    }
     if (call.name === 'browser_measure_layout' && caps?.layoutMetrics !== true) {
       return { ok: false, error: { code: 'content-unavailable', message: 'Layout measurement requires an updated extension and Host Bridge.' } }
     }

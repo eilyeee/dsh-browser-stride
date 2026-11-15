@@ -320,6 +320,7 @@ function mountBridge(
       layoutMetrics: true,
       elementScroll: true,
       elementReadScope: true,
+      snapshotBase: true,
       designViewZoom: true,
       release: bridgeRelease(),
       ...(briefs === undefined ? { taskNotesUnavailable: true } : {}),

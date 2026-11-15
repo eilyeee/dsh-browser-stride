@@ -925,7 +925,7 @@ describe('dispatchToolCall', () => {
         return { ok: true, result: { text: `frame ${frameId}` } }
       },
     })
-    const deltaCall: ToolCall = { ...CALL, id: 'delta', args: { delta: true } }
+    const deltaCall: ToolCall = { ...CALL, id: 'delta', args: { delta: true, baseObservationId: 'obs_test' } }
 
     await dispatchToolCall(deltaCall, 'auto')
     expect(seen.splice(0)).toEqual([{ frameId: 0, delta: false }, { frameId: 6, delta: false }])
@@ -937,6 +937,13 @@ describe('dispatchToolCall', () => {
     await dispatchToolCall(deltaCall, 'auto')
     expect(seen).toEqual([{ frameId: 0, delta: true }, { frameId: 6, delta: false }])
     expect(chromeMock.getAllFrames).toHaveBeenCalledTimes(3)
+  })
+  it('does not forward an implicit delta against the previous internal frame capture', async () => {
+    const chromeMock = mockChrome({ tab: { id: 23, url: 'https://app.example/' }, respond: () => ({ ok: true, result: { text: 'Full synthetic view' } }) })
+    await dispatchToolCall(CALL, 'auto')
+    await dispatchToolCall({ ...CALL, id: 'legacy-delta', args: { delta: true } }, 'auto')
+    const last = chromeMock.sendMessage.mock.calls.at(-1)![1] as { args: { delta: boolean } }
+    expect(last.args.delta).toBe(false)
   })
 })
 

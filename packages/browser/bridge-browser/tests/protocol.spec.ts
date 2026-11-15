@@ -5,6 +5,13 @@ const execution = { kind: 'legacy' as const }
 const action = { actionId: 'act_synthetic', requestDigest: 'a'.repeat(64) }
 
 describe('parseBridgeFrame', () => {
+  it('validates explicit snapshot-base capability in both handshake directions', () => {
+    for (const t of ['hello', 'hello.ok']) {
+      const frame = { t, token: 'test', caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } }
+      for (const snapshotBase of [undefined, true, false]) expect(parseBridgeFrame(JSON.stringify({ ...frame, caps: { ...frame.caps, snapshotBase } }))).toBeDefined()
+      for (const snapshotBase of [null, 1, 'true', {}]) expect(parseBridgeFrame(JSON.stringify({ ...frame, caps: { ...frame.caps, snapshotBase } }))).toBeUndefined()
+    }
+  })
   it('accepts optional boolean observed-read capability and rejects malformed values', () => {
     for (const t of ['hello', 'hello.ok']) {
       const frame = { t, token: 'test', caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } }

@@ -194,6 +194,8 @@ export interface BridgeCaps {
   elementScroll?: boolean
   /** Current-control anchored text/selector reads in one document or open root. */
   elementReadScope?: boolean
+  /** Delta snapshots require a named, current and fully rendered baseline. */
+  snapshotBase?: boolean
   /** Bounded supported design-view zoom control and readback. */
   designViewZoom?: boolean
   /** Session task notes and per-criterion reports; not execution authority. */
@@ -393,6 +395,7 @@ function isCaps(value: unknown): value is BridgeCaps {
     && (caps.layoutMetrics === undefined || typeof caps.layoutMetrics === 'boolean')
     && (caps.elementScroll === undefined || typeof caps.elementScroll === 'boolean')
     && (caps.elementReadScope === undefined || typeof caps.elementReadScope === 'boolean')
+    && (caps.snapshotBase === undefined || typeof caps.snapshotBase === 'boolean')
     && (caps.designViewZoom === undefined || typeof caps.designViewZoom === 'boolean')
     && (caps.taskNotes === undefined || typeof caps.taskNotes === 'boolean')
     && (caps.taskNotesUnavailable === undefined || typeof caps.taskNotesUnavailable === 'boolean')

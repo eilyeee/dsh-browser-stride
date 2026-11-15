@@ -1,5 +1,17 @@
 # Browser extension
 
+Development build 0.1.18 requires `baseObservationId` with `delta=true` to
+produce a delta. Copy the last received Observation ID. Each frame independently
+requires a matching current baseline, the same live text region and budgets, and
+a previous render without character clipping. Otherwise it returns a full
+snapshot within the usual limits. Full means non-delta, not complete page
+coverage. Regions must match exactly one document node.
+Automatic action deltas retain a reference-bound baseline captured before the
+action waits; unanchored or superseded reads return full observations. Clipped
+automatic responses cannot seed a later delta. Both peers negotiate optional
+`snapshotBase`; old calls without a base remain full reads. This is incremental
+baseline checking, not the full observation-envelope or task-recovery runtime.
+
 Development build 0.1.17 extends bounded DOM settling to nested accessible open
 shadow roots, including roots attached while waiting. Continuous changes or
 incomplete inspection return unsettled. Action readback and explicit waits then

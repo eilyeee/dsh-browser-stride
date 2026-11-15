@@ -83,6 +83,17 @@ package versions currently identify development builds, not supported releases.
 
 ### Fixed
 
+- Development build 0.1.18 binds delta snapshots to an explicit received
+  `baseObservationId`. Missing, superseded, differently scoped/budgeted or
+  render-clipped baselines fall back to full bounded snapshots. Snapshot regions
+  require a unique document node. Automatic action feedback captures a control
+  reference baseline before waiting, so intervening observations cannot become
+  implicit bases; unanchored feedback is full, and clipped renders cannot seed
+  another delta. Optional `snapshotBase` negotiation keeps wire v4 and full
+  legacy reads. Benchmark suite 28 separates the expanded read contract; its
+  Playwright backend continues to return full snapshots. This is not the full
+  observation-envelope or recovery runtime.
+
 - Development build 0.1.17 watches nested open shadow roots during bounded
   DOM settling, including roots attached to existing hosts while waiting.
   Continuous changes or incomplete bounded inspection report unsettled and

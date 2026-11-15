@@ -180,6 +180,7 @@ interface ReadyConnection {
   layoutMetrics: boolean
   elementScroll: boolean
   elementReadScope: boolean
+  snapshotBase: boolean
   designViewZoom: boolean
 }
 
@@ -271,6 +272,10 @@ export class BridgeServer {
     const conn = this.current
     if (conn === null) {
       throw new BridgeToolError('bridge-closed', 'no browser extension is connected to the bridge', true)
+    }
+    if (name === 'browser_snapshot' && args.delta === true && args.baseObservationId === undefined) args = { ...args, delta: false }
+    if (name === 'browser_snapshot' && args.baseObservationId !== undefined && !conn.snapshotBase) {
+      throw new BridgeToolError('content-unavailable', 'Explicit snapshot baselines require an updated extension and Host Bridge. Omit the base and request a full snapshot.', true)
     }
     if ((name === 'browser_screenshot' || name === 'browser_click_at') && !conn.visualViewport) {
       throw new BridgeToolError('content-unavailable', 'Visual browser tools require an updated Chrome extension and Host Bridge.', true)
@@ -529,6 +534,7 @@ export class BridgeServer {
           ...(frame.caps.layoutMetrics === true && this.deps.caps.layoutMetrics === true ? { layoutMetrics: true } : {}),
           ...(frame.caps.elementScroll === true && this.deps.caps.elementScroll === true ? { elementScroll: true } : {}),
           ...(frame.caps.elementReadScope === true && this.deps.caps.elementReadScope === true ? { elementReadScope: true } : {}),
+          ...(frame.caps.snapshotBase === true && this.deps.caps.snapshotBase === true ? { snapshotBase: true } : {}),
           ...(frame.caps.designViewZoom === true && this.deps.caps.designViewZoom === true ? { designViewZoom: true } : {}),
           snapshotMaxChars: Math.min(this.deps.caps.snapshotMaxChars, frame.caps.snapshotMaxChars),
           maxInteractiveItems: Math.min(this.deps.caps.maxInteractiveItems, frame.caps.maxInteractiveItems),
@@ -591,7 +597,7 @@ export class BridgeServer {
         }
       }
     })()
-    this.current = { connectionId: randomUUID(), ws, remoteAddress, abort, pump, ping, orderedSessionRpcs: new Map(), confirmedTools: new Set(), lostRunTargets: new Set(), taskTargetLoss: caps.taskTargetLoss === true, visualViewport: caps.visualViewport === true, layoutMetrics: caps.layoutMetrics === true, elementScroll: caps.elementScroll === true, elementReadScope: caps.elementReadScope === true, designViewZoom: caps.designViewZoom === true,
+    this.current = { connectionId: randomUUID(), ws, remoteAddress, abort, pump, ping, orderedSessionRpcs: new Map(), confirmedTools: new Set(), lostRunTargets: new Set(), taskTargetLoss: caps.taskTargetLoss === true, visualViewport: caps.visualViewport === true, layoutMetrics: caps.layoutMetrics === true, elementScroll: caps.elementScroll === true, elementReadScope: caps.elementReadScope === true, snapshotBase: caps.snapshotBase === true, designViewZoom: caps.designViewZoom === true,
       ...(installationId === undefined ? {} : { installationId }) }
     sendFrame(ws, { t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps, ...(credential === undefined ? {} : { credential }) })
     ws.once('close', () => {

@@ -105,6 +105,7 @@ function nativeConstraintState(el: Element): string {
 export interface SnapshotView {
   observationId: ObservationId
   baseObservationId?: ObservationId
+  deltaFallback?: 'missing-base' | 'base-unavailable' | 'region-changed' | 'budget-changed' | 'previous-render-clipped'
   region?: string
   version: number
   url: string
@@ -213,6 +214,19 @@ function openDialogOf(el: Element, isOpen: (dialog: Element) => boolean): Elemen
   return dialog !== null && isOpen(dialog) ? dialog : null
 }
 
+/** Resolve one document-scoped region before changing any observation state. */
+export function resolveSnapshotRegion(value: string | undefined): { region?: string; element: Element | null } {
+  if (value === undefined) return { element: null }
+  if (typeof value !== 'string' || value.length > 500) throw new Error('Snapshot region must be a CSS selector of at most 500 characters.')
+  const region = value.trim()
+  if (region === '') return { element: null }
+  let matches: NodeListOf<Element>
+  try { matches = document.querySelectorAll(region) } catch { throw new Error('The requested snapshot region is not valid CSS.') }
+  if (matches.length === 0) throw new Error('The requested snapshot region does not exist; choose another selector.')
+  if (matches.length !== 1) throw new Error('The requested snapshot region is ambiguous; choose a unique selector.')
+  return { region, element: matches[0]! }
+}
+
 /**
  * Build a snapshot of the current page.
  *
@@ -226,9 +240,7 @@ function openDialogOf(el: Element, isOpen: (dialog: Element) => boolean): Elemen
  * @returns the snapshot view.
  */
 export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: SnapshotView | null): SnapshotView {
-  const region = options.region !== undefined && options.region !== '' ? options.region : undefined
-  const regionEl = region === undefined ? null : document.querySelector(region)
-  if (region !== undefined && regionEl === null) throw new Error('The requested snapshot region does not exist; choose another selector.')
+  const { region, element: regionEl } = resolveSnapshotRegion(options.region)
   const collected = collectInteractiveDetails(document)
   const elements = collected.elements
   const { added, removed } = ids.assign(elements)
@@ -469,7 +481,7 @@ export function renderSnapshot(view: SnapshotView, delta: boolean, maxChars: num
 
 /** References are admitted only when their entire corresponding line survives the render cap. */
 export function renderSnapshotDetails(view: SnapshotView, delta: boolean, maxChars: number = view.budgetChars): {
-  text: string; targets: Set<number>; selects: Set<number>
+  text: string; targets: Set<number>; selects: Set<number>; renderComplete: boolean
 } {
   const lines: string[] = []
   const renderedTargets: Array<{ line: number; index: number; select: boolean }> = []
@@ -513,6 +525,7 @@ export function renderSnapshotDetails(view: SnapshotView, delta: boolean, maxCha
     appendTruncationNotes(lines, view)
   } else {
     lines.push(`Observation: ${view.observationId}`)
+    if (view.deltaFallback !== undefined) lines.push(`Delta unavailable (${view.deltaFallback}); returning a full snapshot.`)
     lines.push(snapshotScope(view))
     lines.push(snapshotLimits(view))
     lines.push(`Title: ${view.title || '(untitled)'}`)
@@ -538,7 +551,7 @@ export function renderSnapshotDetails(view: SnapshotView, delta: boolean, maxCha
     }
     appendTruncationNotes(lines, view)
   }
-  const capped = capRendered(lines.join('\n'), maxChars)
+  const raw = lines.join('\n'), capped = capRendered(raw, maxChars)
   const ends: number[] = []
   let offset = 0
   for (const line of lines) { offset += line.length; ends.push(offset); offset += 1 }
@@ -550,5 +563,5 @@ export function renderSnapshotDetails(view: SnapshotView, delta: boolean, maxCha
       if (entry.select) selects.add(entry.index)
     }
   }
-  return { text: capped.text, targets, selects }
+  return { text: capped.text, targets, selects, renderComplete: capped.bodyLength === raw.length }
 }

@@ -138,8 +138,12 @@ async function elementFor(page, args) {
   return locator
 }
 
-async function snapshot(page, { delta = false, region } = {}, limits) {
+async function snapshot(page, { delta = false, region, baseObservationId } = {}, limits) {
+  if (baseObservationId !== undefined && (typeof baseObservationId !== 'string' || baseObservationId.trim() === '' || baseObservationId.length > 200)) throw new Error('Invalid snapshot baseObservationId')
+  if (region !== undefined && (typeof region !== 'string' || region.length > 500)) throw new Error('Invalid snapshot region')
+  region = region?.trim() || undefined
   const result = await page.evaluate(({ selector, maxItems, maxChars }) => {
+    if (selector !== undefined && document.querySelectorAll(selector).length > 1) throw new Error('snapshot region is ambiguous')
     const root = selector === undefined
       ? document.querySelector('main') ?? document.body
       : document.querySelector(selector)
@@ -194,6 +198,7 @@ async function snapshot(page, { delta = false, region } = {}, limits) {
     })
     const text = (root.innerText ?? '').replace(/\n{3,}/g, '\n\n').trim()
     const prefix = [
+      `Observation: ${observationId}`,
       `Title: ${document.title}`,
       `URL: ${location.href}`,
       `Text scope: ${selector === undefined ? 'page main content' : `selector ${JSON.stringify(selector)}`}; control inventory: current frame.`,
@@ -230,11 +235,12 @@ export function defineTools(call) {
   return [
     {
       name: 'browser_snapshot',
-      description: `Read the page and accessible iframes. Use the shown elementRef for actions; delta=true returns only changes. ${UNTRUSTED_CONTENT_WARNING}`,
+      description: `Read the page and accessible iframes. Use the shown elementRef for actions. delta=true with baseObservationId requests changes; unavailable baselines return full snapshots. This Playwright baseline always returns a full snapshot. ${UNTRUSTED_CONTENT_WARNING}`,
       parameters: {
         ...OBJECT_SCHEMA,
-        delta: { type: 'boolean', description: 'Return changes since the previous snapshot.' },
-        region: { type: 'string', description: 'Limit main text to this CSS selector; the control inventory still covers the frame.' },
+        delta: { type: 'boolean', description: 'Request changes against baseObservationId; this baseline returns a full snapshot.' },
+        baseObservationId: { type: 'string', description: 'Observation ID from the last received snapshot; the baseline keeps full-snapshot fallback.' },
+        region: { type: 'string', description: 'Unique CSS selector (max 500 characters) for main text; the control inventory still covers the frame.' },
       },
       timeoutMs: 90_000,
       output: TEXT_OUTPUT,

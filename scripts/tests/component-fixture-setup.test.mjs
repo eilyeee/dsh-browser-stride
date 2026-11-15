@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {createRequire} from 'node:module'
-import {COMPONENT_READ_CASES,COMPONENT_SETTLE_CASES,COMPONENT_READ_SECRETS,startComponentReadSite} from '../fixtures/component-read-site.mjs'
+import {COMPONENT_READ_CASES,COMPONENT_SETTLE_CASES,SNAPSHOT_BASE_CASES,COMPONENT_READ_SECRETS,startComponentReadSite} from '../fixtures/component-read-site.mjs'
 import {SHADOW_CASES,SHADOW_SYNTHETIC_SECRETS,startShadowSite} from '../fixtures/shadow-site.mjs'
 
 const require=createRequire(new URL('../../extensions/dsh-browser/package.json',import.meta.url))
@@ -56,4 +56,18 @@ for(const kind of COMPONENT_SETTLE_CASES)test(`component settle fixture initiali
     if(kind!=='settle-continuous')assert.equal(w.readRoot.querySelector('[aria-label="State"]').value,'COMPONENT_READY')
     assert.equal(w.pageWrites,0);assert.equal(site.state().writes,0)
   }finally{dom?.window.close();await site.close()}
+})
+
+test('snapshot baseline fixtures initialize unique and clipped-range scenario data',async()=>{
+  const site=await startComponentReadSite()
+  try{for(const kind of SNAPSHOT_BASE_CASES){
+    const dom=await page(site,kind)
+    try{
+      const w=dom.window;assert.equal(w.componentReadFixtureReady,true)
+      assert.equal(w.document.querySelectorAll('.scope').length,2)
+      assert.equal(w.document.querySelector('#left').textContent,w.document.querySelector('#right').textContent)
+      if(kind==='base-clipped'){assert.equal(w.document.querySelectorAll('select').length,60);assert.equal(w.document.querySelectorAll('option').length,1200)}
+      assert.equal(w.pageWrites,0)
+    }finally{dom.window.close()}
+  }}finally{await site.close()}
 })

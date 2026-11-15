@@ -5,6 +5,19 @@ import { BridgeToolError } from '../src/server.ts'
 import { BROWSER_TOOL_NAMES, registerBrowserTools } from '../src/tools.ts'
 
 describe('registerBrowserTools', () => {
+  it.each([undefined, ' obs_test '])('forwards only an explicit snapshot baseline and disables implicit deltas: %s', async baseObservationId => {
+    const h = makeHarness(); registerBrowserTools(h.ctx, h.bridge, { toolTimeoutMs: 1000, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
+    const tool = h.registered.find(item => item.name === 'browser_snapshot')!.definition.execute as (a: unknown, e: unknown) => Promise<unknown>
+    const signal = new AbortController().signal
+    await tool({ delta: true, ...(baseObservationId === undefined ? {} : { baseObservationId }), sessionId: 'forged', internalBase: 'forged' }, { signal })
+    expect(h.requestTool).toHaveBeenCalledWith('browser_snapshot', baseObservationId === undefined ? { delta: false } : { delta: true, baseObservationId: 'obs_test' }, signal, 1000)
+  })
+  it.each([null, 1, '', 'x'.repeat(201)])('refuses malformed snapshot baseline data before dispatch: %s', async baseObservationId => {
+    const h = makeHarness(); registerBrowserTools(h.ctx, h.bridge, { toolTimeoutMs: 1000, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
+    const execute = h.registered.find(item => item.name === 'browser_snapshot')!.definition.execute as (a: unknown, e: unknown) => Promise<unknown>
+    await expect(Promise.resolve().then(() => execute({ delta: true, baseObservationId }, { signal: new AbortController().signal }))).rejects.toThrow('baseObservationId')
+    expect(h.requestTool).not.toHaveBeenCalled()
+  })
   it('shows fixed readonly guidance without copying page or executor diagnostics', async () => {
     const h = makeHarness(); registerBrowserTools(h.ctx, h.bridge, { toolTimeoutMs: 1000, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
     const hook = (h.ctx.on as ReturnType<typeof vi.fn>).mock.calls.find(([name]) => name === 'tools/execute')![1]
@@ -213,11 +226,11 @@ describe('registerBrowserTools', () => {
     const tool = registered.find((r) => r.name === 'browser_snapshot')!
     const exec = { signal: new AbortController().signal }
     await (tool.definition.execute as (args: unknown, e: { signal: AbortSignal }) => Promise<unknown>)({ delta: true }, exec)
-    expect(requestTool).toHaveBeenLastCalledWith('browser_snapshot', { delta: true }, exec.signal, 1_000)
+    expect(requestTool).toHaveBeenLastCalledWith('browser_snapshot', { delta: false }, exec.signal, 1_000)
     await (tool.definition.execute as (args: unknown, e: { signal: AbortSignal }) => Promise<unknown>)({}, exec)
     expect(requestTool).toHaveBeenLastCalledWith('browser_snapshot', {}, exec.signal, 1_000)
     await (tool.definition.execute as (args: unknown, e: { signal: AbortSignal }) => Promise<unknown>)({ delta: true, region: 'main' }, exec)
-    expect(requestTool).toHaveBeenLastCalledWith('browser_snapshot', { delta: true, region: 'main' }, exec.signal, 1_000)
+    expect(requestTool).toHaveBeenLastCalledWith('browser_snapshot', { delta: false, region: 'main' }, exec.signal, 1_000)
   })
 
   it('forwards targeted scrolling with the owning Session and rejects invalid arguments before dispatch', async () => {

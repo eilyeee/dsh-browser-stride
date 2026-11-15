@@ -208,17 +208,23 @@ interface Call {
 function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[] {
   const snapshot = (): ToolDefinition => defineTool({
     name: 'browser_snapshot',
-    description: `Read the page and accessible iframes. Use the shown elementRef for actions; delta=true returns only changes. ${UNTRUSTED_CONTENT_WARNING}`,
+    description: `Read page/iframes. delta=true needs baseObservationId from the last result; unavailable bases return full snapshots. ${UNTRUSTED_CONTENT_WARNING}`,
     parameters: {
-      delta: { type: 'boolean', description: 'Return changes since the previous snapshot.' },
-      region: { type: 'string', description: 'Limit main text to this CSS selector; the control inventory still covers the frame.' },
+      delta: { type: 'boolean', description: 'Request changes against baseObservationId; otherwise a full snapshot is returned.' },
+      baseObservationId: { type: 'string', description: 'Observation ID from the last received snapshot, not an elementRef. Other frames or unavailable baselines return full snapshots.' },
+      region: { type: 'string', description: 'Unique CSS selector (max 500 characters) for main text; the control inventory still covers the frame.' },
     },
     timeoutMs: options.toolTimeoutMs,
     output: TEXT_OUTPUT,
     execute: (args, exec) => {
-      const a = args as { delta?: boolean; region?: string }
+      const a = args as { delta?: boolean; region?: string; baseObservationId?: string }
+      if (a.baseObservationId !== undefined && (typeof a.baseObservationId !== 'string' || a.baseObservationId.trim() === '' || a.baseObservationId.length > 200)) {
+        throw new Error('baseObservationId must be a non-empty observation ID of at most 200 characters.')
+      }
+      if (a.region !== undefined && (typeof a.region !== 'string' || a.region.length > 500)) throw new Error('region must be a CSS selector of at most 500 characters.')
       return call(exec, 'browser_snapshot', {
-        ...a.delta !== undefined ? { delta: a.delta } : {},
+        ...a.delta !== undefined ? { delta: a.delta === true && a.baseObservationId === undefined ? false : a.delta } : {},
+        ...a.baseObservationId !== undefined ? { baseObservationId: a.baseObservationId.trim() } : {},
         ...a.region !== undefined ? { region: a.region } : {},
       })
     },

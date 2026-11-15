@@ -2,6 +2,7 @@ import {createServer} from 'node:http'
 
 export const COMPONENT_READ_CASES=['requirements','privacy','recovery','slots','inspector']
 export const COMPONENT_SETTLE_CASES=['settle-delayed','settle-late-root','settle-continuous']
+export const SNAPSHOT_BASE_CASES=['base-current','base-region','base-clipped']
 export const COMPONENT_READ_SECRETS=['synthetic-component-pass','synthetic-component-code']
 export async function startComponentReadSite(){
   let writes=0
@@ -9,7 +10,7 @@ export async function startComponentReadSite(){
     res.setHeader('cache-control','no-store');const url=new URL(req.url,'http://127.0.0.1')
     if(req.method!=='GET'){writes++;res.writeHead(405);res.end();return}
     if(url.pathname==='/health'){res.end('ok');return}
-    const kind=url.searchParams.get('case');if(url.pathname!=='/fixture'||![...COMPONENT_READ_CASES,...COMPONENT_SETTLE_CASES].includes(kind)){res.writeHead(404);res.end();return}
+    const kind=url.searchParams.get('case');if(url.pathname!=='/fixture'||![...COMPONENT_READ_CASES,...COMPONENT_SETTLE_CASES,...SNAPSHOT_BASE_CASES].includes(kind)){res.writeHead(404);res.end();return}
     res.setHeader('content-type','text/html; charset=utf-8')
     res.end(`<!doctype html><meta charset="utf-8"><title>Component readonly fixture</title>
 <style>body{font:16px sans-serif;margin:24px}#widget{display:block}#header{height:20px}#customer{margin-top:0}</style>
@@ -47,6 +48,12 @@ if(kind.startsWith('settle-')){
    },160);
   }
  };
+}
+if(kind.startsWith('base-')){
+ document.querySelector('main').insertAdjacentHTML('afterbegin','<section class="scope" id="left">Requirement: retain the customer gap.</section><section class="scope" id="right">Requirement: retain the customer gap.</section>');
+ if(kind==='base-clipped'){
+  document.querySelector('main').insertAdjacentHTML('beforeend',Array.from({length:60},(_,i)=>'<select aria-label="Size '+i+'">'+Array.from({length:20},(_,j)=>'<option>Choice '+i+' '+j+' '+('X'.repeat(100))+'</option>').join('')+'</select>').join(''));
+ }
 }
 window.componentReadFixtureReady=true;
 </script>`)

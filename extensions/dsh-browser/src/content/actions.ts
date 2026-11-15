@@ -14,7 +14,8 @@ import { pageText, truncate } from './extract.ts'
 import { SELECT_OPTION_LIMIT, type ElementIds } from './ids.ts'
 import { isControlDisabled, isFieldReadOnly } from './custom-options.ts'
 import type { SnapshotBudget } from './snapshot.ts'
-import { buildSnapshot, renderSnapshotDetails } from './snapshot.ts'
+import { buildSnapshot, renderSnapshotDetails, resolveSnapshotRegion } from './snapshot.ts'
+import { parseElementRef, type ObservationId } from '@eilyeee/dsh-browser-stride/src/contracts/ids.ts'
 import { visualViewportState } from './visual.ts'
 import { measureLayout } from './layout.ts'
 import { componentText } from './component-text.ts'
@@ -229,6 +230,13 @@ export interface ActionContext {
 
 /** Run one named action with its args. */
 export async function runAction(action: string, args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
+  // Capture the caller's reference before awaiting page events. Another call
+  // may publish a different observation while this action is settling.
+  ctx = { ...ctx }
+  if (['browser_click', 'browser_type', 'browser_select', 'browser_scroll'].includes(action) && typeof args.elementRef === 'string') {
+    const base = parseElementRef(args.elementRef)?.observationId
+    if (base !== undefined) actionBaseByContext.set(ctx, base)
+  }
   switch (action) {
     case 'browser_screenshot': {
       await waitForPageSettled(ACTION_SETTLE)
@@ -296,19 +304,35 @@ export async function runAction(action: string, args: Record<string, unknown>, c
 
 function snapshotAction(args: Record<string, unknown>, ctx: ActionContext): ActionResult {
   const previous = snapshotByRegistry.get(ctx.ids) ?? null
-  const lastSnapshot = previous?.url === location.href ? previous : null
-  const delta = args.delta === true && lastSnapshot !== null
-  const region = typeof args.region === 'string' && args.region !== '' ? args.region : undefined
-  // 基线在每次快照后都更新：delta 调用才能相对上一次（无论是否 delta）比较。
+  if (args.baseObservationId !== undefined && (typeof args.baseObservationId !== 'string' || args.baseObservationId.trim() === '' || args.baseObservationId.length > 200)) {
+    throw new ActionError('bad-args', 'baseObservationId must be a non-empty observation ID of at most 200 characters.')
+  }
+  let scope: ReturnType<typeof resolveSnapshotRegion>
+  try { scope = resolveSnapshotRegion(args.region as string | undefined) }
+  catch (error) { throw new ActionError('bad-args', error instanceof Error ? error.message : 'Invalid snapshot region.') }
+  const { region, element: regionNode } = scope
+  const lastSnapshot = previous?.view.url === location.href ? previous.view : null
+  const base = typeof args.baseObservationId === 'string' ? args.baseObservationId.trim() : undefined
+  const fallback = base === undefined ? 'missing-base'
+    : lastSnapshot === null || base !== lastSnapshot.observationId ? 'base-unavailable'
+    : previous!.regionNode !== regionNode || lastSnapshot.region !== region ? 'region-changed'
+    : !previous!.renderComplete ? 'previous-render-clipped'
+    : !sameBudget(previous!.budget, ctx.budget) ? 'budget-changed' : undefined
+  const delta = args.delta === true && fallback === undefined
   const view = buildSnapshot(ctx.ids, { delta, region, budget: ctx.budget }, lastSnapshot)
-  snapshotByRegistry.set(ctx.ids, view)
+  if (args.delta === true && fallback !== undefined) view.deltaFallback = fallback
   const rendered = renderSnapshotDetails(view, delta)
+  snapshotByRegistry.set(ctx.ids, { view, budget: { ...ctx.budget }, regionNode, renderComplete: rendered.renderComplete })
   ctx.ids.publishObservation(view.observationId, rendered.targets, rendered.selects)
   return { text: rendered.text }
 }
 
 /** Delta state belongs to the content-script registry, not another instance. */
-const snapshotByRegistry = new WeakMap<ElementIds, ReturnType<typeof buildSnapshot>>()
+const snapshotByRegistry = new WeakMap<ElementIds, { view: ReturnType<typeof buildSnapshot>; budget: SnapshotBudget; regionNode: Element | null; renderComplete: boolean }>()
+const actionBaseByContext = new WeakMap<ActionContext, ObservationId>()
+function sameBudget(a: SnapshotBudget, b: SnapshotBudget): boolean {
+  return a.maxItems === b.maxItems && a.maxForms === b.maxForms && a.maxChars === b.maxChars
+}
 
 /** Invalidate delta state after navigation (new document). */
 export function resetDeltaState(ids: ElementIds): void {
@@ -326,19 +350,22 @@ function unconfirmedFieldTarget(index: number, ctx: ActionContext, reason = 'the
   }
 }
 
-/** Attach the settled page change while retaining the full view as the next delta baseline. */
+/** Attach bounded feedback; only a completely rendered result can seed a delta. */
 function withPageDelta(text: string, ctx: ActionContext, settled = true, state: 'observed' | 'dispatched' | 'readback-unconfirmed' = 'dispatched'): ActionResult {
   const feedback = { version: 1 as const, state, businessChange: 'not-verified' as const }
   if (!settled) {
     resetDeltaState(ctx.ids)
     return { text, feedback }
   }
-  const lastSnapshot = snapshotByRegistry.get(ctx.ids) ?? null
-  if (ctx.includePageDelta !== true || lastSnapshot === null) return { text, feedback }
-  const delta = lastSnapshot.url === location.href
-  const view = buildSnapshot(ctx.ids, { delta, budget: ctx.budget }, delta ? lastSnapshot : null)
-  snapshotByRegistry.set(ctx.ids, view)
+  const previous = snapshotByRegistry.get(ctx.ids) ?? null
+  if (ctx.includePageDelta !== true || previous === null) return { text, feedback }
+  const lastSnapshot = previous.view.url === location.href ? previous.view : null
+  const delta = lastSnapshot !== null && previous.renderComplete && lastSnapshot.region === undefined
+    && actionBaseByContext.get(ctx) === lastSnapshot.observationId
+    && previous.budget.maxItems === ctx.budget.maxItems && previous.budget.maxForms === ctx.budget.maxForms
+  const view = buildSnapshot(ctx.ids, { delta, budget: ctx.budget }, lastSnapshot)
   const rendered = renderSnapshotDetails(view, delta, Math.min(ctx.budget.maxChars, ACTION_DELTA_MAX_CHARS))
+  snapshotByRegistry.set(ctx.ids, { view, budget: { ...ctx.budget }, regionNode: null, renderComplete: rendered.renderComplete })
   ctx.ids.publishObservation(view.observationId, rendered.targets, rendered.selects)
   return {
     text,

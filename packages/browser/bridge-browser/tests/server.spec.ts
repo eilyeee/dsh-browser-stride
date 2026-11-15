@@ -1118,6 +1118,25 @@ describe('BridgeServer', () => {
     }
     ws.close()
   })
+  it.each([[false, false], [false, true], [true, false], [true, true]])('negotiates explicit snapshot bases and preserves full legacy reads, host=%s extension=%s', async (host, extension) => {
+    const h = await startBridge({ caps: { ...CAPS, snapshotBase: host } }); harnesses.push(h)
+    const { ws, frames } = await connect(h.url)
+    send(ws, { t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: TOKEN, caps: { ...CAPS, snapshotBase: extension } })
+    await waitFor(() => frames.some(frame => frame.t === 'hello.ok'))
+    const hello = frames.find((frame): frame is Extract<BridgeFrame, { t: 'hello.ok' }> => frame.t === 'hello.ok')!
+    expect(hello.caps.snapshotBase === true).toBe(host && extension)
+    if (!host || !extension) {
+      expect(() => h.bridge.requestTool('browser_snapshot', { delta: true, baseObservationId: 'obs_test' }, new AbortController().signal)).toThrow('updated extension')
+      expect(frames.some(frame => frame.t === 'tool.call')).toBe(false)
+    }
+    const args = host && extension ? { delta: true, baseObservationId: 'obs_test' } : { delta: true }
+    const pending = h.bridge.requestTool('browser_snapshot', args, new AbortController().signal)
+    await waitFor(() => frames.some(frame => frame.t === 'tool.call'))
+    const call = frames.find((frame): frame is Extract<BridgeFrame, { t: 'tool.call' }> => frame.t === 'tool.call')!
+    expect(call.args).toEqual(host && extension ? args : { delta: false })
+    send(ws, { t: 'tool.result', id: call.id, action: call.action, ok: true, result: { text: 'Synthetic snapshot' } })
+    expect(await pending).toEqual({ text: 'Synthetic snapshot' }); ws.close()
+  })
   it('preserves the authenticated no-selection error code across wire-v4', async () => {
     const h = await startBridge({ caps: { ...CAPS, designViewZoom: true } }); harnesses.push(h)
     const { ws, frames } = await connect(h.url)
