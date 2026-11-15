@@ -26,6 +26,15 @@ package versions currently identify development builds, not supported releases.
 
 ### Added
 
+- Development build 0.1.14 adds optional observation-bound vertical container
+  scrolling to `browser_scroll`. A current control reference selects only its
+  previously observed nearest scroll container; reaching its boundary never
+  scrolls an outer container. Snapshots expose position context, and changed
+  targets or unconfirmed position readback retain the existing write fence.
+  Without a reference the legacy viewport path remains. The optional
+  `elementScroll` capability prevents an older peer silently scrolling the
+  viewport instead. Horizontal/reverse-flow scrolling and closed Shadow DOM
+  are outside this change. Benchmark suite 24 separates the expanded tool.
 - Development build 0.1.9 records bounded browser-operation feedback for the
   model and panel, including nested `run_code` results and restored history.
   It distinguishes precondition failures, dispatched actions, page readback

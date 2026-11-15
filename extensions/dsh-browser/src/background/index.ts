@@ -1475,6 +1475,9 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
     if ((call.name === 'browser_screenshot' || call.name === 'browser_click_at') && caps?.visualViewport !== true) {
       return { ok: false, error: { code: 'content-unavailable', message: 'Visual tools require an updated Chrome extension and Host Bridge.' } }
     }
+    if (call.name === 'browser_scroll' && call.args.elementRef !== undefined && caps?.elementScroll !== true) {
+      return { ok: false, error: { code: 'content-unavailable', message: 'Targeted scroll requires an updated extension and Host Bridge.' } }
+    }
     if (call.name === 'browser_measure_layout' && caps?.layoutMetrics !== true) {
       return { ok: false, error: { code: 'content-unavailable', message: 'Layout measurement requires an updated extension and Host Bridge.' } }
     }

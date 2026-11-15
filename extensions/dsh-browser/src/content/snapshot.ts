@@ -14,6 +14,7 @@ import { accessibleName, collectInteractive, isInViewport, isVisible, mainText, 
 import { ElementIds, SELECT_OPTION_LIMIT } from './ids.ts'
 import { isSensitiveField, maskValue } from './privacy.ts'
 import { customOptionSelected, isControlDisabled, isElementUiOption, isFieldReadOnly } from './custom-options.ts'
+import { scrollContext } from './scroll-context.ts'
 import { makeElementRef, makeObservationId, type ObservationId } from '@eilyeee/dsh-browser-stride/src/contracts/ids.ts'
 
 /** Role label per element kind (model-facing vocabulary). */
@@ -48,6 +49,7 @@ interface InventoryItem {
   readOnly?: true
   href?: string
   inViewport: boolean
+  scroll?: { top: number; max: number }
 }
 
 /** One numbered form field with its (masked) value. */
@@ -268,6 +270,7 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
       role: roleOf(el),
       name: nameOf(el),
       inViewport,
+      scroll: scrollContext(el),
     }
     const ariaInvalid = ariaInvalidState(el)
     if (ariaInvalid !== undefined) item.ariaInvalid = ariaInvalid
@@ -385,6 +388,7 @@ function sameItem(a: InventoryItem, b: InventoryItem): boolean {
   return a.role === b.role && a.name === b.name && a.href === b.href
     && a.disabled === b.disabled && a.readOnly === b.readOnly && a.checked === b.checked && a.selected === b.selected
     && a.ariaInvalid === b.ariaInvalid && a.inViewport === b.inViewport
+    && a.scroll?.top === b.scroll?.top && a.scroll?.max === b.scroll?.max
 }
 
 function sameForm(a: FormFieldView, b: FormFieldView): boolean {
@@ -419,6 +423,7 @@ function renderItem(item: InventoryItem, observationId: ObservationId): string {
     item.selected === undefined ? undefined : item.selected ? 'selected' : 'not selected',
     item.ariaInvalid === undefined ? undefined : `aria-invalid=${item.ariaInvalid}`,
     item.inViewport ? undefined : 'outside viewport',
+    item.scroll === undefined ? undefined : `scroll-container top=${item.scroll.top} max=${item.scroll.max}`,
   ].filter((value) => value !== undefined).join('/')
   const stateText = state === '' ? '' : ` [${state}]`
   const hrefText = item.href !== undefined ? ` → ${item.href}` : ''

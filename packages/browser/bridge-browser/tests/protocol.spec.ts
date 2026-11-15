@@ -5,6 +5,14 @@ const execution = { kind: 'legacy' as const }
 const action = { actionId: 'act_synthetic', requestDigest: 'a'.repeat(64) }
 
 describe('parseBridgeFrame', () => {
+  it('accepts optional boolean scroll capability in both handshakes and rejects malformed values', () => {
+    for (const t of ['hello', 'hello.ok']) {
+      const frame = { t, token: 'test', caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } }
+      for (const elementScroll of [undefined, true, false]) expect(parseBridgeFrame(JSON.stringify({ ...frame, caps: { ...frame.caps, elementScroll } }))).toBeDefined()
+      for (const elementScroll of [null, 1, 'true', {}]) expect(parseBridgeFrame(JSON.stringify({ ...frame, caps: { ...frame.caps, elementScroll } }))).toBeUndefined()
+    }
+  })
+
   it.each(['unchanged', 'uncertain'] as const)('preserves optional native target error metadata: %s', targetState => {
     const frame = { t: 'rpc.result', id: 'native-target', ok: false, error: { code: 'stale-version', message: 'Refresh', targetState } }
     expect(parseBridgeFrame(JSON.stringify(frame))).toEqual(frame)

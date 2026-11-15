@@ -11,6 +11,7 @@
 
 import { accessibleName, isVisible } from './extract.ts'
 import { isControlDisabled, optionContextIdentity } from './custom-options.ts'
+import { nearestScrollContainer } from './scroll-context.ts'
 import { parseElementRef, type ObservationId } from '@eilyeee/dsh-browser-stride/src/contracts/ids.ts'
 
 /** Attribute written on every inventoried element (observable numbering). */
@@ -26,7 +27,7 @@ export class ElementIds {
   private readonly idByElement = new WeakMap<Element, number>()
   private readonly elementById = new Map<number, Element>()
   private readonly observedIdentity = new Map<number, string>()
-  private observation?: { id: ObservationId; url: string; targets: Set<number>; selects: Set<number> }
+  private observation?: { id: ObservationId; url: string; targets: Set<number>; selects: Set<number>; scrollContainers: Map<number, HTMLElement> }
   private nextId = 1
 
   /**
@@ -95,7 +96,22 @@ export class ElementIds {
 
   /** Record only controls whose complete representation was returned by this observation. */
   publishObservation(id: ObservationId, targets: Set<number>, selects: Set<number>): void {
-    this.observation = { id, url: location.href, targets, selects }
+    const scrollContainers = new Map<number, HTMLElement>()
+    for (const index of targets) {
+      const element = this.elementById.get(index)
+      const container = element === undefined ? undefined : nearestScrollContainer(element)
+      if (container !== undefined) scrollContainers.set(index, container)
+    }
+    this.observation = { id, url: location.href, targets, selects, scrollContainers }
+  }
+
+  /** Scroll only the exact container observed with this control; never switch to an outer one. */
+  scrollContainerFor(index: number): HTMLElement | undefined {
+    const container = this.observation?.scrollContainers.get(index)
+    const element = this.elementById.get(index)
+    return container !== undefined && element !== undefined && this.isActionTargetCurrent(index)
+      && container.isConnected && isVisible(container) && !isControlDisabled(container)
+      && nearestScrollContainer(element) === container ? container : undefined
   }
 
   /** Invalidate references on page lifecycle events and before navigation. */

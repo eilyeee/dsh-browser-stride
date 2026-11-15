@@ -586,6 +586,41 @@ async function pressAction(args: Record<string, unknown>, ctx: ActionContext): P
 
 async function scrollAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
   const direction = typeof args.direction === 'string' ? args.direction : ''
+  if (!['up', 'down', 'top', 'bottom'].includes(direction)) {
+    throw new ActionError('bad-args', 'direction must be up, down, top, or bottom.')
+  }
+  if ((direction === 'up' || direction === 'down') && args.amount !== undefined
+    && (typeof args.amount !== 'number' || !Number.isFinite(args.amount) || args.amount <= 0 || args.amount > 100_000)) {
+    throw new ActionError('bad-args', 'amount must be a finite positive number of at most 100000 pixels.')
+  }
+  if (args.elementRef !== undefined) {
+    const index = referenceArg(args, ctx.ids)
+    elementOrThrow(ctx.ids, index)
+    const container = ctx.ids.scrollContainerFor(index)
+    if (container === undefined) throw new ActionError('element-stale', 'The observed scroll container is missing or changed. Take a fresh snapshot; omit elementRef only to scroll the viewport.')
+    const style = getComputedStyle(container)
+    if (style.flexDirection === 'column-reverse' || (style.writingMode !== '' && style.writingMode !== 'horizontal-tb')) {
+      throw new ActionError('bad-args', 'Reverse-flow and vertical-writing scroll containers are not supported.')
+    }
+    const before = container.scrollTop
+    const max = container.scrollHeight - container.clientHeight
+    const amount = typeof args.amount === 'number' ? args.amount : Math.max(1, Math.floor(container.clientHeight * 0.8))
+    const destination = direction === 'top' ? 0 : direction === 'bottom' ? max
+      : Math.max(0, Math.min(max, before + (direction === 'up' ? -amount : amount)))
+    container.scrollTo({ top: destination, behavior: 'instant' })
+    const settled = await waitForPageSettled(SCROLL_SETTLE)
+    if (!referenceStillCurrent(args, ctx.ids, index) || ctx.ids.scrollContainerFor(index) !== container) {
+      resetDeltaState(ctx.ids)
+      return { text: 'Scroll was sent, but its observed container changed. Re-observe before continuing.',
+        feedback: { version: 1, state: 'readback-unconfirmed', businessChange: 'not-verified' } }
+    }
+    const after = container.scrollTop
+    const confirmed = Math.abs(after - destination) <= 1
+    return withPageDelta(`Scroll position in the observed container: ${Math.round(before)} → ${Math.round(after)} px; requested ${Math.round(destination)}, read back ${Math.round(after)}.`
+      + (destination === before ? ' It was already at the requested boundary; no outer container was scrolled.' : '')
+      + (confirmed ? ' Position readback does not verify loaded content or a saved change.' : ' Requested position was not confirmed; re-observe before continuing.')
+      + settleNote(settled), ctx, settled, confirmed ? 'observed' : 'readback-unconfirmed')
+  }
   const amount = typeof args.amount === 'number' ? args.amount : Math.floor(window.innerHeight * 0.8)
   switch (direction) {
     case 'top':

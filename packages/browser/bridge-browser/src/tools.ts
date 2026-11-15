@@ -298,18 +298,26 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
 
   const scroll = (): ToolDefinition => defineTool({
     name: 'browser_scroll',
-    description: 'Scroll up, down, top, or bottom; amount is optional pixels.',
+    description: 'Scroll viewport, or only the observed container of elementRef.',
     parameters: {
       direction: { type: 'string', required: true, enum: ['up', 'down', 'top', 'bottom'], description: 'Scroll direction.' },
-      amount: { type: 'number', description: 'Number of pixels to scroll; ignored for top and bottom.' },
+      amount: { type: 'number', description: 'Positive pixels, at most 100000; default 80% of the viewport/container height. Ignored for top and bottom.' },
+      elementRef: { type: 'string', description: 'Current observed control ref with a scroll-container context; omit to scroll the viewport.' },
       frame: FRAME_PARAMETER,
     },
     timeoutMs: options.toolTimeoutMs,
     output: TEXT_OUTPUT,
     execute: (args, exec) => {
-      const a = args as { direction: 'up' | 'down' | 'top' | 'bottom'; amount?: number; frame?: number }
+      const a = args as { direction: 'up' | 'down' | 'top' | 'bottom'; amount?: number; elementRef?: string; frame?: number }
+      if (!['up', 'down', 'top', 'bottom'].includes(a.direction)
+        || ((a.direction === 'up' || a.direction === 'down') && a.amount !== undefined
+          && (typeof a.amount !== 'number' || !Number.isFinite(a.amount) || a.amount <= 0 || a.amount > 100_000))
+        || (a.elementRef !== undefined && (typeof a.elementRef !== 'string' || a.elementRef.length === 0))) {
+        throw new Error('Invalid scroll direction, amount or elementRef.')
+      }
       return call(exec, 'browser_scroll', {
         direction: a.direction,
+        ...a.elementRef !== undefined ? { elementRef: a.elementRef } : {},
         ...a.amount !== undefined ? { amount: a.amount } : {},
         ...a.frame !== undefined ? { frame: a.frame } : {},
       })

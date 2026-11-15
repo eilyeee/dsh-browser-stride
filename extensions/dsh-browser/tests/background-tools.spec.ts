@@ -285,11 +285,11 @@ describe('dispatchToolCall', () => {
     expect(chromeMock.sendMessage).not.toHaveBeenCalled()
   })
 
-  it('rejects a select without a snapshot of its current document', async () => {
+  it.each(['browser_select', 'browser_scroll'])('rejects %s without a snapshot of its current document', async name => {
     const chromeMock = mockChrome({ tab: { id: 981, url: 'https://example.com/' } })
     const authorize = vi.fn(async () => 'approved' as const)
     await expect(dispatchToolCall(
-      { id: 'unobserved-select', name: 'browser_select', args: { elementRef: 'obs_test:1', optionIndex: 0 } },
+      { id: 'unobserved-control', name, args: { elementRef: 'obs_test:1', optionIndex: 0, direction: 'down' } },
       'auto', undefined, authorize,
     )).resolves.toMatchObject({
       ok: false, error: { message: expect.stringContaining('does not belong to the current document') },
@@ -844,7 +844,7 @@ describe('dispatchToolCall', () => {
     expect(chromeMock.sendMessage).not.toHaveBeenCalled()
   })
 
-  it('rejects an element reference after its frame document reloads', async () => {
+  it.each(['browser_click', 'browser_scroll'])('rejects %s reference after its frame document reloads', async name => {
     const frames = [
       { frameId: 0, parentFrameId: -1, documentId: 'top-doc', url: 'https://app.example/' },
       { frameId: 3, parentFrameId: 0, documentId: 'child-v1', url: 'https://widget.example/form' },
@@ -859,7 +859,7 @@ describe('dispatchToolCall', () => {
     frames[1] = { ...frames[1]!, documentId: 'child-v2' }
 
     const answer = await dispatchToolCall(
-      { id: 'stale-click', name: 'browser_click', args: { frame: 3, elementRef: 'obs_test:4' } },
+      { id: 'stale-control', name, args: { frame: 3, elementRef: 'obs_test:4', direction: 'down' } },
       'auto',
       undefined,
       async () => 'approved',

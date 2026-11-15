@@ -1,5 +1,16 @@
 # Browser extension
 
+Development build 0.1.14 adds vertical container scrolling: `browser_scroll`
+accepts an optional current control `elementRef` and scrolls only the nearest
+container captured with that observation. Snapshot items show `scroll-container`
+position context. The scroll stops at that container's boundary; it never falls
+back to an outer container or the viewport. Both peers must negotiate
+`elementScroll`. Omit the reference for the existing viewport behavior. Position
+readback does not verify loaded content or persistence. Horizontal scrolling,
+reverse flow, vertical writing and closed Shadow DOM remain outside this path.
+A container needs an observed control to target; text-only areas without one
+are not independently discovered by this feature.
+
 English | [中文](README.zh.md)
 
 The Chrome/Firefox extension contains a background bridge client, content scripts for text snapshots and page actions, and a React side panel. It works with the local Bridge in this workspace; it does not install or start a Host by itself.

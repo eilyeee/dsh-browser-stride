@@ -158,7 +158,7 @@ export class BridgeClient {
 
       // Authenticate: hello must be accepted before any other traffic.
       const presentedToken = this.token
-      const offeredCaps: BridgeCaps = { textOnly: true, snapshotMaxChars: DEFAULT_SNAPSHOT_MAX_CHARS, maxInteractiveItems: 60, taskTargetLoss: true, layoutMetrics: true, designViewZoom: true, taskNotes: true, ...(import.meta.env.EXT_TARGET === 'firefox' ? {} : { visualViewport: true }) }
+      const offeredCaps: BridgeCaps = { textOnly: true, snapshotMaxChars: DEFAULT_SNAPSHOT_MAX_CHARS, maxInteractiveItems: 60, taskTargetLoss: true, layoutMetrics: true, elementScroll: true, designViewZoom: true, taskNotes: true, ...(import.meta.env.EXT_TARGET === 'firefox' ? {} : { visualViewport: true }) }
       socket.send(JSON.stringify({
         t: 'hello',
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
@@ -192,6 +192,7 @@ export class BridgeClient {
               if (frame.caps.snapshotMaxChars > offeredCaps.snapshotMaxChars || frame.caps.maxInteractiveItems > offeredCaps.maxInteractiveItems
                 || (frame.caps.visualViewport === true && offeredCaps.visualViewport !== true)
                 || (frame.caps.layoutMetrics === true && offeredCaps.layoutMetrics !== true)
+                || (frame.caps.elementScroll === true && offeredCaps.elementScroll !== true)
                 || (frame.caps.designViewZoom === true && offeredCaps.designViewZoom !== true)
                 || (frame.caps.taskNotes === true && offeredCaps.taskNotes !== true)) {
                 this.rejectCompatibility(socket, 'incompatible')

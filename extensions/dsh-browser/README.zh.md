@@ -1,5 +1,7 @@
 # 浏览器扩展
 
+开发包 0.1.14 支持垂直容器滚动：`browser_scroll` 可传当前控件的 `elementRef`，只滚动该次观察记录的最近容器。快照会显示 `scroll-container` 及位置；到达边界后不继续滚动外层，也不自动改滚窗口。双方须协商 `elementScroll` 能力；省略引用仍使用原有窗口滚动。位置回读不证明异步内容加载完整或业务保存成功。横向、反向布局、竖排与闭合 Shadow DOM 不在此路径范围内。容器中需要有已观察控件作为目标；没有控件的纯文本区域尚不能通过此功能独立发现。
+
 [English](README.md) | 中文
 
 Chrome/Firefox 扩展包含后台 Bridge 客户端、负责文本快照与页面动作的 content script，以及 React 侧栏。扩展需要配合本工作区的本机 Bridge，不能独立安装或启动 Host。

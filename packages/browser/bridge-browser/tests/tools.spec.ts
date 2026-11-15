@@ -220,6 +220,19 @@ describe('registerBrowserTools', () => {
     expect(requestTool).toHaveBeenLastCalledWith('browser_snapshot', { delta: true, region: 'main' }, exec.signal, 1_000)
   })
 
+  it('forwards targeted scrolling with the owning Session and rejects invalid arguments before dispatch', async () => {
+    const h = makeHarness()
+    registerBrowserTools(h.ctx, h.bridge, { toolTimeoutMs: 1000, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
+    const execute = h.registered.find(item => item.name === 'browser_scroll')!.definition.execute as (a: unknown, e: unknown) => Promise<unknown>
+    const exec = { agent: { id: 'scroll-session' }, signal: new AbortController().signal }
+    for (const args of [{direction:'sideways'}, {direction:'down',amount:-1}, {direction:'down',amount:Infinity}, {direction:'down',amount:100001}, {direction:'down',elementRef:''}]) {
+      await expect(execute(args, exec)).rejects.toThrow()
+    }
+    expect(h.requestTool).not.toHaveBeenCalled()
+    await execute({direction:'down',amount:120,elementRef:'obs_test:1',frame:2,sessionId:'forged',selector:'#forged'}, exec)
+    expect(h.requestTool).toHaveBeenCalledExactlyOnceWith('browser_scroll', {direction:'down',amount:120,elementRef:'obs_test:1',frame:2},exec.signal,1000,'scroll-session')
+  })
+
   it('executes every remaining tool with mapped args', async () => {
     const { ctx, bridge, requestTool, registered } = makeHarness()
     registerBrowserTools(ctx, bridge, { toolTimeoutMs: 1_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
