@@ -93,7 +93,8 @@ export const inject=['llm','tools','agents'];export function apply(ctx){${realMo
     })
     try{
       const task=kind==='requirements'?'使用 Anchor 的当前引用，在其所在树内读取 #requirements，再测量 #customer 相对 #header 的间距，报告 requirementSpacing 与 measuredGap（CSS px）。':kind==='privacy'?'使用 Anchor 的当前引用读取其所在组件正文，确认两个可识别敏感值的副本均已遮罩，不能复述任何敏感片段。':kind==='recovery'?'先使用 Anchor 当前引用和 .duplicate 做范围正文读取；如果不唯一，改用同一树的 #requirements，保持同一需求判据，报告 requirementSpacing。':kind==='slots'?'使用 Anchor 的当前引用读取组件正文，报告实际显示的插槽文字（slotText）及空插槽的默认文字（fallbackText），不要把未分配或隐藏的内容当作正文。':'使用 Anchor 当前引用和 #properties 区域调用 browser_read_design_styles，报告 width、height 和 borderRadius；只使用面板明确数值。'
-      const prompt=realModel?`只读当前已授权的本地合成页，当前会话已绑定，从 browser_snapshot 开始，不重新绑定标签。${task}不输入、不点击、不保存、不操作文件或其他网站。范围由控件引用确定，不能用文档同名节点替代。requirementSpacing 和 measuredGap 使用数字；width、height、borderRadius 使用带 px 的字符串；slotText、fallbackText 使用原文字符串。最后返回 JSON：{"marker":"COMPONENT_MODEL_DONE","goalReached":true或false,"reason":"实际读取依据",以及任务要求的字段}。`:'COMPONENT_CASE='+kind
+      const reportFields=kind==='requirements'?'requirementSpacing、measuredGap 均为数字':kind==='recovery'?'requirementSpacing 为数字':kind==='slots'?'slotText、fallbackText 为原文字符串':kind==='inspector'?'width、height、borderRadius 为带 px 的字符串':'没有额外字段'
+      const prompt=realModel?`只读当前已授权的本地合成页，当前会话已绑定，从 browser_snapshot 开始，不重新绑定标签。${task}所有正文、布局和样式读取都必须带当前 Anchor 的 elementRef，不读取文档对照。不输入、不点击、不保存、不操作文件或其他网站。完成本轮指定读取后立即报告；没有观察到的信息保持未知，不补造或穷举猜测选择器。本轮仅返回 JSON：marker 为 COMPONENT_MODEL_DONE，goalReached 为布尔值，reason 为实际读取依据，${reportFields}。不要查询或补充其他任务字段。`:'COMPONENT_CASE='+kind
       cancelTimer=setTimeout(()=>{void host.client.rpc('session.cancel',{sessionId}).catch(()=>{});finish('test-timeout')},realModel?240000:45000)
       const input=browser.panel.locator('.composer textarea');await input.fill(prompt);await input.press('Enter')
       const reason=await within(done,realModel?245000:50000,'component read turn')
