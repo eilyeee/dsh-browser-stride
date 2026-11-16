@@ -9,9 +9,15 @@ package versions currently identify development builds, not supported releases.
 
 ### Fixed
 
-- Task-progress tools document their evidence and text limits. Invalid reports
+- Development build 0.1.22 task-progress tools document their evidence and text
+  limits. Invalid reports
   return fixed correction guidance without echoing submitted data or changing
   saved evidence, user review or the version; the existing limits still apply.
+  Missing write versions and malformed/oversized JSON also receive fixed
+  correction guidance without echoing submitted data.
+- A synthetic Host/default-model acceptance checks rejection of five evidence
+  entries, unchanged saved notes, and correction by merging all five observations
+  within the existing four-entry limit. This does not exercise business writes.
 - Development build 0.1.21 lets drained, attributed ordinary conversations open
   or reuse an exact reference URL with a two-minute, one-use Host-owner admission while earlier site writes remain
   unresolved. The old records and write fence are preserved; page edits,

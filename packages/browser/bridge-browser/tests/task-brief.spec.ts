@@ -145,6 +145,29 @@ describe('session task notes and reports', () => {
     const rejected = await beforeStep({ agent, messages: [] }, async () => ({ kind: 'reject' }))
     expect(rejected).toEqual({ kind: 'reject' })
   })
+  it('guides missing versions and invalid JSON without echoing data or consuming a version', async () => {
+    const { store } = await setup()
+    const saved = await store.save('s', 0, input, 'user')
+    const tools: Array<{ execute: (args: unknown, exec: unknown) => Promise<unknown> }> = []
+    const ctx = { effect: (effect: () => unknown) => effect(), on: () => {},
+      tools: { register: (tool: typeof tools[number]) => { tools.push(tool); return () => {} } },
+    } as unknown as Context
+    registerTaskBrief(ctx, store)
+    const exec = { agent: { id: 's' }, signal: new AbortController().signal }
+    const privateMarker = 'synthetic-private-invalid-json'
+    for (const args of [
+      { action: 'report', json: JSON.stringify(report) },
+      { action: 'report', version: saved.version, json: `{${privateMarker}` },
+      { action: 'report', version: saved.version, json: privateMarker.repeat(2000) },
+    ]) {
+      const error = await tools[0]!.execute(args, exec).catch(error => error)
+      expect(error).toMatchObject({ code: 'bad-request', message: expect.stringContaining('numeric version returned by read') })
+      expect(error.message).not.toContain(privateMarker)
+      expect(store.get('s')).toEqual(saved)
+    }
+    await tools[0]!.execute({ action: 'report', version: saved.version, json: JSON.stringify(report) }, exec)
+    expect(store.get('s')).toMatchObject({ version: saved.version + 1, progress: [{ userConfirmed: false }] })
+  })
   it('keeps the model step available if optional task-note storage could not open at startup', async () => {
     let beforeStep!: (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>
     const tools: Array<{ execute: (args: unknown, exec: unknown) => Promise<unknown> }> = []

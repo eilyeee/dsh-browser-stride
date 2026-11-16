@@ -40,9 +40,10 @@ function specification(profile: string) {
 }
 type BriefDomain = Domain<ReturnType<typeof specification>>
 export const TASK_PROGRESS_GUIDANCE = 'Report limits: at most 4 evidence items, each 1-500 characters; nextStep at most 500 characters. Observed reports need evidence; blocked or uncertain reports need a nextStep. Use an existing criterionId and no extra fields.'
+export const TASK_NOTE_WRITE_GUIDANCE = 'Writes require the numeric version returned by read and a valid JSON string in json (max 40000 characters). A rejected request does not advance the version.'
 export class TaskBriefError extends Error {
-  constructor(readonly code: 'bad-request' | 'stale-version' | 'user-edited' | 'storage-unavailable' | 'session-unavailable' | 'closed' | 'cancelled' | 'not-found' | 'limit', detail?: 'progress-shape') {
-    super(`Task notes: ${code}${detail === 'progress-shape' ? `. ${TASK_PROGRESS_GUIDANCE}` : ''}`)
+  constructor(readonly code: 'bad-request' | 'stale-version' | 'user-edited' | 'storage-unavailable' | 'session-unavailable' | 'closed' | 'cancelled' | 'not-found' | 'limit', detail?: 'progress-shape' | 'write-shape') {
+    super(`Task notes: ${code}${detail === 'progress-shape' ? `. ${TASK_PROGRESS_GUIDANCE}` : detail === 'write-shape' ? `. ${TASK_NOTE_WRITE_GUIDANCE}` : ''}`)
   }
 }
 export class TaskBriefStore {

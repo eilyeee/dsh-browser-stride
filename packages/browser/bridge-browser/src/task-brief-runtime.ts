@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { createUserMessage, type ContextFormed } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { TaskBriefError, TaskBriefStore, TASK_PROGRESS_GUIDANCE } from './task-brief.ts'
+import { TaskBriefError, TaskBriefStore, TASK_PROGRESS_GUIDANCE, TASK_NOTE_WRITE_GUIDANCE } from './task-brief.ts'
 import type { TaskBrief, TaskBriefInput } from './task-brief-contract.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
@@ -45,7 +45,7 @@ export function registerTaskBrief(ctx: Context, store: TaskBriefStore | undefine
     description: 'Read or record this session’s project/materials/criteria and report per-criterion evidence. Notes grant no access; model observations are not verified completion. Read before continuing a project task; user edits cannot be overwritten.',
     parameters: {
       action: { type: 'string', enum: ['read', 'record', 'report', 'classify'], required: true },
-      version: { type: 'number', description: 'Version from read; required for writes.' },
+      version: { type: 'number', description: TASK_NOTE_WRITE_GUIDANCE },
       json: { type: 'string', description: 'record: JSON {goal,projectPath,materials:[{url,label,role:unknown|requirement|design|api|reference}],criteria:[{id,text}]}. report: JSON {criterionId,implementation:pending|implemented|blocked,observation:unverified|observed|uncertain,evidence:string[],nextStep}. classify: JSON {url,role:requirement|design|api|reference}, a suggestion only for an existing unknown-role material. Use observed only with readback evidence; explain missing conditions. ' + TASK_PROGRESS_GUIDANCE },
     },
     output: { schema: { type: 'object', additionalProperties: false, properties: { text: { type: 'string', required: true } } },
@@ -56,9 +56,9 @@ export function registerTaskBrief(ctx: Context, store: TaskBriefStore | undefine
       if (sid === undefined) throw new TaskBriefError('bad-request')
       const current = notes()
       if (a.action === 'read') return { text: JSON.stringify(current.get(sid)) }
-      if (!Number.isSafeInteger(a.version) || typeof a.json !== 'string' || a.json.length > 40000) throw new TaskBriefError('bad-request')
+      if (!Number.isSafeInteger(a.version) || typeof a.json !== 'string' || a.json.length > 40000) throw new TaskBriefError('bad-request', 'write-shape')
       let input: unknown
-      try { input = JSON.parse(a.json) } catch { throw new TaskBriefError('bad-request') }
+      try { input = JSON.parse(a.json) } catch { throw new TaskBriefError('bad-request', 'write-shape') }
       const brief = a.action === 'record' ? await current.save(sid, a.version!, input as TaskBriefInput, 'model', exec.signal)
         : a.action === 'report' ? await current.report(sid, a.version!, input, exec.signal)
         : a.action === 'classify' ? await current.classify(sid, a.version!, input, exec.signal) : undefined
