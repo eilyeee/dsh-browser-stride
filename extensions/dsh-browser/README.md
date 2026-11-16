@@ -1,5 +1,14 @@
 # Browser extension
 
+## Connected but pages are missing
+
+In 0.1.20, **Page connection check** shows the current window's authorized-page count and last toolbar result. Failures automatically reveal a fixed message for pinned/unsupported pages, browser access denial, grouping, storage or changed pages. Raw browser errors and page content are not retained. Other windows and late attempts cannot overwrite the current window's newer result.
+
+**Refresh authorized pages** rechecks existing grants without granting access or selecting a target. Connecting to the Host, opening the panel or dragging a page into the group does not grant access. Unpin a pinned tab before clicking its toolbar icon. A missing toolbar record is different from a failed attempt.
+
+In a model inventory, `scope: authorized-tabs` means the entries were filtered by existing authorization; new entries also report `authorized: true`. `controlled` only identifies the selected target, so false does not mean unauthorized. Dispatch still checks current authority and target separately. `pnpm run test:smoke-page-authorization` checks native failure, read-only refresh and explicit retry on disposable Host/Chrome; regular-browser acceptance remains separate.
+
+
 Development build 0.1.19 binds observations to the native page lifetime, conversation and managed execution revision. A trusted pointer/key event in a controlled page retires old observations: the model must read again, and a managed task needs explicit continuation. This does not detect every background account or tenant change. Login and business identity still need independent checks; model-generated events never grant authority.
 
 Bounded snapshot metadata reports listed frames, native document epochs and omitted text/controls/options. `complete` is always false: closed roots, hidden canvas layers, non-DOM state and unlisted frames are outside the evidence. Recognized-value redaction does not mean all personal information is removed. Missing legacy metadata remains unknown. An observation ID cannot prove the model received a complete baseline, so explicit model delta requests currently return bounded full snapshots with `model-projection-not-attested`. Trusted lower-level protocol baseline checks remain. The 0.1.18 description below is historical.

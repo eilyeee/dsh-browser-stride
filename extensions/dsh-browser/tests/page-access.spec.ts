@@ -43,6 +43,18 @@ function fixture() {
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 describe('native page access and visible control group', () => {
+  it.each(['pinned-tab', 'page-access-denied', 'group-unavailable', 'storage-unavailable', 'unsupported-page'] as const)('reports a fixed native authorization failure: %s', async code => {
+    const h = fixture(), tab = h.page(4)
+    await h.access.ready
+    if (code === 'pinned-tab') tab.pinned = true
+    if (code === 'unsupported-page') tab.url = 'chrome://extensions/'
+    if (code === 'page-access-denied') h.inject.mockRejectedValueOnce(Error('PRIVATE-NATIVE-ERROR'))
+    if (code === 'group-unavailable') vi.mocked(chrome.tabs.group).mockRejectedValueOnce(Error('PRIVATE-NATIVE-ERROR'))
+    if (code === 'storage-unavailable') h.set.mockRejectedValueOnce(Error('PRIVATE-NATIVE-ERROR'))
+    await expect(h.access.grantFromAction(tab)).rejects.toMatchObject({ code, message: 'page-access-required' })
+    expect(h.access.has(4)).toBe(false)
+  })
+
   it('keeps accepted task-page consent independent of its old startup connection while honoring native revocation', async () => {
     const h = fixture(), page = h.page(42)
     let startupCurrent = true, automaticAllowed = true
@@ -257,7 +269,7 @@ describe('native page access and visible control group', () => {
     await expect(h.access.grantFromAction(h.page(1, 1, 'chrome://settings/'))).rejects.toThrow('page-access-required')
     expect(h.inject).not.toHaveBeenCalled()
     h.inject.mockRejectedValue(new Error('Cannot access contents'))
-    await expect(h.access.grantFromAction(h.page(2))).rejects.toThrow('Cannot access contents')
+    await expect(h.access.grantFromAction(h.page(2))).rejects.toMatchObject({ code: 'page-access-denied', message: 'page-access-required' })
     expect(h.access.has(2)).toBe(false)
     expect(chrome.tabs.group).not.toHaveBeenCalled()
   })

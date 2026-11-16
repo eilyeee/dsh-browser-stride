@@ -1,5 +1,6 @@
 import { readPageAccessEpoch, writePageAccessEpoch } from './credential-store.ts'
 import { debuggerPages } from './debugger-pages.ts'
+import { PageAuthorizationError, type PageAuthorizationFailure } from '../page-authorization.ts'
 
 /** Native action or the opted-in newly-created-tab path grants access. Group membership never does. */
 export const PAGE_ACCESS_KEY = 'dshPageAccess'
@@ -126,30 +127,39 @@ export class PageAccess {
     await this.ready
     if (tab.id !== undefined && this.grants.get(tab.id)?.mode === 'debugger') return
     const site = origin(tab.url)
-    if (tab.id === undefined || site === undefined || (requiresGroup() && tab.pinned)) throw new Error('page-access-required')
+    if (tab.id === undefined || site === undefined) throw new PageAuthorizationError('unsupported-page')
+    if (requiresGroup() && tab.pinned) throw new PageAuthorizationError('pinned-tab')
     const grant: Grant = { tabId: tab.id, windowId: tab.windowId, origin: site, nonce: crypto.randomUUID(), pending: true }
     this.grants.set(tab.id, grant)
+    let failure: PageAuthorizationFailure = 'storage-unavailable'
     try {
       await this.persist()
+      failure = 'page-changed'
       const matches = (native: chrome.tabs.Tab) => native.id === grant.tabId && native.windowId === grant.windowId && origin(native.url) === grant.origin && (!requiresGroup() || !native.pinned)
       if (this.grants.get(tab.id) !== grant || !matches(await chrome.tabs.get(tab.id))) throw new Error('page-access-required')
+      failure = 'page-access-denied'
       const receiver = await chrome.tabs.sendMessage(tab.id, { type: 'DSH_PING' }, { frameId: 0 }).catch(() => undefined)
-      if (this.grants.get(tab.id) !== grant) throw new Error('page-access-required')
+      if (this.grants.get(tab.id) !== grant) throw new PageAuthorizationError('page-changed')
       if (receiver?.ok !== true) await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] })
-      if (this.grants.get(tab.id) !== grant) throw new Error('page-access-required')
+      if (this.grants.get(tab.id) !== grant) throw new PageAuthorizationError('page-changed')
+      failure = 'page-changed'
       const live = await chrome.tabs.get(tab.id)
       if (!matches(live)) throw new Error('page-access-required')
+      failure = 'group-unavailable'
       await this.joinGroup(grant)
+      failure = 'page-changed'
       const grouped = await chrome.tabs.get(tab.id)
-      if (this.grants.get(tab.id) !== grant) throw new Error('page-access-required')
+      if (this.grants.get(tab.id) !== grant) throw new PageAuthorizationError('page-changed')
       delete grant.pending
       if (!this.allows(grouped)) throw new Error('page-access-required')
+      failure = 'storage-unavailable'
       await this.persist()
-      if (this.grants.get(tab.id) !== grant) throw new Error('page-access-required')
+      failure = 'page-changed'
+      if (this.grants.get(tab.id) !== grant) throw new PageAuthorizationError('page-changed')
       this.changed()
     } catch (error) {
       if (this.grants.get(tab.id) === grant) void this.revoke(tab.id).catch(() => {})
-      throw error
+      throw new PageAuthorizationError(error instanceof PageAuthorizationError ? error.code : failure)
     }
   }
   /** Only called with the native result of this request's tabs.create, after explicit settings opt-in. */

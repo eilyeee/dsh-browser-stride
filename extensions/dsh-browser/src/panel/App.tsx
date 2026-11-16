@@ -7,6 +7,7 @@
  * @module
  */
 
+import { PageAccessDiagnostics } from './PageAccessDiagnostics.tsx'
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { BrowserPairingStatus } from '../background/pairing-client.ts'
 import { BRIDGE_SESSION_PURGE_METHOD, DEFAULT_SNAPSHOT_MAX_CHARS } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
@@ -2250,6 +2251,7 @@ export function App(): React.JSX.Element {
         }}>{copy.pageAccess.revoke}</button>}
       </section>
       <VersionStatus caps={caps} locale={locale} />
+      <PageAccessDiagnostics api={api} access={pageAccess} locale={locale} />
       <ControlGroupStatus state={tabAffinity} pages={pageAccess.pages ?? []} copy={copy} onSelect={selectGroupPage} />
       <DiagnosticsPanel api={api} sessionId={sessionRef.current} affinity={tabAffinity} available={state === 'connected' && caps?.pageDiagnostics === true && pageAccess.controlledGranted} locale={locale} />
       <RecoveryPanel api={api} sessionId={sessionRef.current} affinity={tabAffinity} available={state === 'connected' && caps?.manualRecovery === true && pageAccess.controlledGranted} working={working || sessionSwitchBlocked} locale={locale} />

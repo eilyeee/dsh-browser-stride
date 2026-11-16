@@ -774,6 +774,7 @@ async function dispatchTabManagementTool(
         index: tab.index,
         active: tab.active,
         controlled: tab.id === context.controlledTabId,
+        ...(context.allowsTab === undefined ? {} : { authorized: true }),
         title: tab.title ?? '',
         url: tabUrl(tab),
       }))

@@ -34,6 +34,7 @@
  * @module
  */
 
+import { PageAuthorizationAttempts, PageAuthorizationError } from '../page-authorization.ts'
 import { pageDiagnostics } from './diagnostics.ts'
 import { NATIVE_RECOVERY_PREPARE, NATIVE_RECOVERY_CONFIRM, recoveryOfferSchema, recoveryCommitSchema, recoveryDecisionsSchema } from '@eilyeee/dsh-browser-stride/src/native-review.ts'
 import {
@@ -473,26 +474,31 @@ function broadcastStatus(): void {
 
 let pageAccessBroadcastRevision = 0
 let controlPages: AffinityTab[] = []
-function broadcastPageAccess(): void {
+const pageAuthorizationAttempts = new PageAuthorizationAttempts()
+async function broadcastPageAccess(): Promise<boolean> {
   const revision = ++pageAccessBroadcastRevision
   const state = tabAffinity.snapshot()
   const message = { type: 'page-access', activeGranted: pageAccess.has(state.active?.tabId),
     controlledGranted: pageAccess.has(state.controlled?.tabId), controlledTabId: state.controlled?.tabId ?? null,
     revocableTabId: pageAccess.has(state.controlled?.tabId) ? state.controlled!.tabId : pageAccess.has(state.active?.tabId) ? state.active!.tabId : null }
   const post = (pages: AffinityTab[]) => {
-    for (const port of panelPorts) { try { port.postMessage({ ...message, pages }) } catch { /* closed */ } }
+    for (const port of panelPorts) {
+      const windowId = panelWindows.get(port)
+      try { port.postMessage({ ...message, pages, ...(windowId === undefined ? {} : { authorizedPageCount: pages.filter(page => page.windowId === windowId).length, authorization: pageAuthorizationAttempts.get(windowId) }) }) } catch { /* closed */ }
+    }
   }
   // Withdraw revoked choices immediately; native reads cannot restore an older list.
   post(controlPages.filter(page => pageAccess.has(page.tabId)))
-  void Promise.all(pageAccess.ids().map(async id => {
+  return Promise.all(pageAccess.ids().map(async id => {
     try {
       const tab = await chrome.tabs.get(id)
       return pageAccess.allows(tab) ? summarizeTab(tab) : null
     } catch { return null }
   })).then(pages => {
-    if (revision !== pageAccessBroadcastRevision) return
+    if (revision !== pageAccessBroadcastRevision) return false
     controlPages = pages.filter((page): page is AffinityTab => page !== null && pageAccess.has(page.tabId))
     post(controlPages)
+    return true
   })
 }
 
@@ -1907,6 +1913,15 @@ chrome.runtime.onConnect.addListener((port) => {
     if (typeof message !== 'object' || message === null) return
     const msg = message as { type?: string }
     switch (msg.type) {
+      case 'page-access.refresh': {
+        const id = (message as { id?: unknown }).id
+        if (typeof id !== 'string') break
+        void pageAccess.ready.then(() => broadcastPageAccess()).then(fresh => {
+          if (!fresh) throw Error('refresh-superseded')
+          if (panelPorts.has(port)) port.postMessage({ type: 'page-access.refresh.result', id, ok: true })
+        }).catch(() => { try { port.postMessage({ type: 'page-access.refresh.result', id, ok: false, error: { message: 'Page list refresh failed' } }) } catch { /* closed */ } })
+        break
+      }
       case 'page-recovery': {
         const request = message as { id?: unknown; action?: unknown; sessionId?: unknown; tabId?: unknown; revision?: unknown; expectedUrl?: unknown; reviewId?: unknown; decisions?: unknown }
         if (typeof request.id !== 'string') break
@@ -2232,6 +2247,7 @@ chrome.runtime.onConnect.addListener((port) => {
           || !Number.isInteger(registration.windowId)
           || registration.windowId < 0) break
         panelWindows.set(port, registration.windowId)
+        void broadcastPageAccess()
         syncSelectionWatch()
         try {
           port.postMessage({ type: 'selection', selection: selections.current(registration.windowId) })
@@ -2595,6 +2611,7 @@ chrome.tabs.onAttached?.addListener((tabId) => {
 // Ports are cleaned up by their own disconnect; only the window's quote is
 // left behind when the whole window goes away.
 chrome.windows.onRemoved.addListener((windowId) => {
+  pageAuthorizationAttempts.forget(windowId)
   selections.clear(windowId)
 })
 
@@ -2639,11 +2656,17 @@ function openAssistantPanel(windowId?: number): void {
 // An actual toolbar action is the only way to grant native activeTab access.
 // Opening a side panel from the browser menu does not authorize a webpage.
 chrome.action?.onClicked.addListener(tab => {
+  const complete = tab.id === undefined ? undefined : pageAuthorizationAttempts.begin(tab.windowId, tab.id)
   openAssistantPanel(tab.windowId)
+  void broadcastPageAccess()
   void pageAccess.grantFromAction(tab).then(() => {
-    broadcastPageAccess()
+    complete?.()
+    void broadcastPageAccess()
     syncSelectionWatch()
-  }).catch(() => { broadcastPageAccess() })
+  }).catch(error => {
+    complete?.(error instanceof PageAuthorizationError ? error.code : 'page-access-denied')
+    void broadcastPageAccess()
+  })
 })
 if (import.meta.env.EXT_TARGET !== 'firefox') {
   void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {})

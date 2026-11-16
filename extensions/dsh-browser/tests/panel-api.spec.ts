@@ -11,6 +11,18 @@ afterEach(() => {
 })
 
 describe('panel protocol', () => {
+  it('correlates read-only page-list refresh without authorizing or selecting a page', async () => {
+    let receive: ((message: unknown) => void) | undefined
+    const postMessage = vi.fn()
+    vi.stubGlobal('chrome', { runtime: { connect: vi.fn(() => ({ postMessage,
+      onMessage: { addListener: (callback: (message: unknown) => void) => { receive = callback } }, onDisconnect: { addListener: vi.fn() } })) } })
+    const api = connectPanel(), task = api.refreshPageAccess(), request = postMessage.mock.calls[0]![0]
+    expect(request).toEqual({ type: 'page-access.refresh', id: expect.any(String) })
+    receive?.({ type: 'page-access.refresh.result', id: request.id, ok: true })
+    await task
+    expect(postMessage).toHaveBeenCalledTimes(1)
+  })
+
   it('correlates a manual review offer/commit and does not replay an uncertain acknowledgement', async () => {
     vi.useFakeTimers()
     let receive: ((message: unknown) => void) | undefined

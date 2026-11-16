@@ -125,3 +125,5 @@ pnpm run test:benchmark
 本仓库保留上游 MIT 许可证及来源声明：[LICENSE](LICENSE)、[NOTICE.md](NOTICE.md)。
 
 版本、更新与恢复操作见[兼容性说明](docs/compatibility.md)，其中区分构建、隔离浏览器和常用浏览器证据。
+
+连接正常但页面未列出时，可查看扩展的[页面连接诊断](extensions/dsh-browser/README.zh.md#连接正常但页面未列出)。

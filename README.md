@@ -133,3 +133,5 @@ After building, `pnpm run test:smoke-browser` optionally checks the real Host an
 The repository retains the upstream MIT license and attribution in [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md).
 
 Compatibility, update/recovery steps and evidence boundaries are listed in the [compatibility guide](docs/compatibility.md).
+
+If connected pages are missing, see the extension’s [page connection check](extensions/dsh-browser/README.md#connected-but-pages-are-missing).

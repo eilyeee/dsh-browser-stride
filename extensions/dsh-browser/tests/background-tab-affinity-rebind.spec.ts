@@ -126,6 +126,33 @@ afterEach(() => {
 })
 
 describe('background tab-affinity rebind protocol', () => {
+  it('does not confirm a list refresh superseded by another native read', async () => {
+    const h = await connectPanelForTest()
+    h.onMessage.emit({ type: 'panel.window', windowId: 1 })
+    await vi.waitFor(() => expect(h.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'page-access', authorizedPageCount: 3 })))
+    let release!: (page: chrome.tabs.Tab) => void
+    h.get.mockImplementationOnce(() => new Promise<chrome.tabs.Tab>(resolve => { release = resolve }))
+    h.onMessage.emit({ type: 'page-access.refresh', id: 'old-list' })
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'))
+    h.onMessage.emit({ type: 'page-access.refresh', id: 'new-list' })
+    await vi.waitFor(() => expect(h.postMessage).toHaveBeenCalledWith({ type: 'page-access.refresh.result', id: 'new-list', ok: true }))
+    release(tab(1))
+    await vi.waitFor(() => expect(h.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'page-access.refresh.result', id: 'old-list', ok: false })))
+  })
+  it('refreshes existing grants per window without injecting, grouping, selecting or granting pages', async () => {
+    const h = await connectPanelForTest()
+    h.onMessage.emit({ type: 'panel.window', windowId: 1 })
+    await vi.waitFor(() => expect(h.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'page-access', authorizedPageCount: 3 })))
+    vi.mocked(chrome.scripting.executeScript).mockClear()
+    h.postMessage.mockClear()
+    h.onMessage.emit({ type: 'page-access.refresh', id: 'read-list' })
+    await vi.waitFor(() => expect(h.postMessage).toHaveBeenCalledWith({ type: 'page-access.refresh.result', id: 'read-list', ok: true }))
+    expect(chrome.scripting.executeScript).not.toHaveBeenCalled()
+    expect(h.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'page-access', authorizedPageCount: 3, authorization: undefined }))
+    h.onMessage.emit({ type: 'panel.window', windowId: 2 })
+    await vi.waitFor(() => expect(h.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'page-access', authorizedPageCount: 0 })))
+  })
+
   it.each(['different-document', 'pending-navigation', 'invalid-url', 'no-tab', 'revoked'])('refuses stale material selection: %s', async kind => {
     const h = await connectPanelForTest()
     h.onMessage.emit({ type: 'session.active', sessionId: 'material-session', isNew: true })

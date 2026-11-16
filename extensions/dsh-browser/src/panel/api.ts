@@ -14,6 +14,7 @@ import type { ApprovalDecision, ApprovalRequest } from '../security/approval.ts'
 import { parsePageSelection, type PageSelection } from '../selection.ts'
 import { getUiLocale } from '../i18n.ts'
 import type { BrowserPairingStatus } from '../background/pairing-client.ts'
+import type { PageAuthorizationStatus } from '../page-authorization.ts'
 import type { RecoveryDecisions, RecoveryReply } from '@eilyeee/dsh-browser-stride/src/native-review.ts'
 
 /** Panel-side subset of the extension settings. */
@@ -94,12 +95,12 @@ interface SessionResumeHintMessage {
   sessionId: string | null
 }
 
-export interface PageAccessStatus { activeGranted: boolean; controlledGranted: boolean; controlledTabId: number | null; revocableTabId: number | null; pages?: AffinityTab[] }
+export interface PageAccessStatus { activeGranted: boolean; controlledGranted: boolean; controlledTabId: number | null; revocableTabId: number | null; pages?: AffinityTab[]; authorizedPageCount?: number; authorization?: PageAuthorizationStatus }
 export interface PageDiagnosticsStatus { enabled: boolean; captureId?: string; startedAt?: number; count: number; dropped: number }
 export interface PageDiagnosticsRequest { action: 'start' | 'stop' | 'status'; sessionId: string; tabId: number; revision: number; expectedUrl: string; captureId?: string }
 export type PageRecoveryRequest = Omit<PageDiagnosticsRequest, 'action' | 'captureId'> & ({ action: 'prepare' } | { action: 'confirm'; reviewId: string; decisions: RecoveryDecisions })
 
-type BackgroundMessage = ({ type: 'page-access' } & PageAccessStatus) | RpcResultMessage | RespondResultMessage | SettingsResultMessage | (Omit<SettingsResultMessage, 'type'> & { type: 'browser-pairing.unpair.result' | 'page-access.revoke.result' }) | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | (Omit<TabAffinityRebindResultMessage, 'type'> & { type: 'browser-run.retarget.result' | 'tab-affinity.unbind.result' }) | SelectionMessage | SessionResumeHintMessage | { type: 'browser-pairing'; status: BrowserPairingStatus }
+type BackgroundMessage = ({ type: 'page-access' } & PageAccessStatus) | RpcResultMessage | RespondResultMessage | SettingsResultMessage | (Omit<SettingsResultMessage, 'type'> & { type: 'browser-pairing.unpair.result' | 'page-access.revoke.result' | 'page-access.refresh.result' }) | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | (Omit<TabAffinityRebindResultMessage, 'type'> & { type: 'browser-run.retarget.result' | 'tab-affinity.unbind.result' }) | SelectionMessage | SessionResumeHintMessage | { type: 'browser-pairing'; status: BrowserPairingStatus }
 
 /** Structured gateway failure retained for product-level error handling. */
 export class PanelRpcError extends Error {
@@ -123,6 +124,7 @@ function panelRpcError(failure: RpcFailurePayload | undefined, fallbackMessage: 
 
 /** The panel API surface. */
 export interface PanelApi {
+  refreshPageAccess(): Promise<void>
   pageRecovery(request: PageRecoveryRequest): Promise<RecoveryReply>
   pageDiagnostics(request: PageDiagnosticsRequest): Promise<PageDiagnosticsStatus>
   startBrowserPairing(bridgeUrl: string): Promise<void>
@@ -224,6 +226,7 @@ export function connectPanel(): PanelApi {
           ?? (getUiLocale() === 'zh' ? '回答提交失败' : 'Failed to send the answer')))
         break
       }
+      case 'page-access.refresh.result':
       case 'page-access.revoke.result':
       case 'browser-pairing.unpair.result':
       case 'settings.result': {
@@ -413,6 +416,18 @@ export function connectPanel(): PanelApi {
       })
     },
     onPageAccess(callback) { pageAccessListeners.add(callback); return () => { pageAccessListeners.delete(callback) } },
+    refreshPageAccess() {
+      const id = crypto.randomUUID()
+      return new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => { pendingSettings.delete(id); reject(new PanelRpcError('timeout', 'Page list refresh was not confirmed')) }, 10000)
+        const entry = { resolve: () => { clearTimeout(timer); resolve() }, reject: (error: Error) => { clearTimeout(timer); reject(error) } }
+        pendingSettings.set(id, entry)
+        void send({ type: 'page-access.refresh', id }, { kind: 'settings', id }).catch((error: unknown) => {
+          if (pendingSettings.get(id) !== entry) return
+          pendingSettings.delete(id); entry.reject(connectionError(error))
+        })
+      })
+    },
     revokePageAccess(tabId) {
       const id = crypto.randomUUID()
       return new Promise<void>((resolve, reject) => {

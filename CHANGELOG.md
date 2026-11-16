@@ -7,6 +7,21 @@ package versions currently identify development builds, not supported releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- Development build 0.1.20 reports native toolbar authorization failures instead
+  of silently showing an empty page list. Pinned/unsupported pages, browser access,
+  grouping, persistence and changed-page failures have fixed localized messages;
+  raw browser errors are not retained. Outcomes stay in their original window,
+  late attempts cannot replace later clicks, and closed windows are forgotten.
+- The panel offers a read-only authorized-page refresh and per-window count.
+  Refresh grants no page authority and does not change selection. Tab inventories
+  explicitly mark authorized entries; `controlled` means selected, not permission.
+  Benchmark suite 30 separates the inventory/guidance change.
+- An isolated native Chrome smoke verifies the pinned failure, unchanged grants
+  after refresh and successful grouping after an explicit unpin/toolbar retry.
+  This does not identify the cause on the user's regular browser.
+
 ### Added
 
 - Development build 0.1.19 binds snapshot references to native page, session and
