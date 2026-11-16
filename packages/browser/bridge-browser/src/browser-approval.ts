@@ -2,7 +2,7 @@ import { BridgeToolError } from './server.ts'
 import { isReadOnlyBrowserTool } from './protocol.ts'
 import { failureFeedback, parseToolFeedback } from './tool-feedback.ts'
 
-export const UNCERTAIN_WRITE_GUIDANCE = 'A previous browser write has an unconfirmed result. Read the current page and check the business state. Do not issue another write or repeat the submission. A new turn does not clear the durable fence. Report the uncertainty and ask for native per-operation review before continuing.'
+export const UNCERTAIN_WRITE_GUIDANCE = 'A previous browser write has an unconfirmed result. Read the current page and check the business state. Do not edit the page or repeat the submission. A Host-owner authorized exact reference may be opened or reused for observation; an uncertain tab operation must be reviewed before another tab change. A new turn does not clear the durable fence. Report the uncertainty and ask for native per-operation review before continuing.'
 
 export const APPROVAL_RETRY_GUIDANCE = 'Browser approvals are paused for this turn. Stop browser calls and tell the user to return to the DSH Stride extension, then send a new message to retry and confirm the new request. Do not retry automatically or use another access method.'
 export const DESIGN_VIEW_RETRY_GUIDANCE = 'Design-view preparation failed for this turn. Stop browser calls and ask the user to enlarge the design view manually, then send a new message before continuing. Do not guess canvas points or retry via other tools.'
@@ -10,7 +10,7 @@ export const DESIGN_VIEW_RECOVERY_GUIDANCE = 'No percentage selection was dispat
 
 /** Agent-local fences; only a trusted no-selection failure releases view preparation. */
 export class BrowserApprovalGate {
-  private readonly states = new WeakMap<object, { blocked: boolean; uncertainWrite?: true; designView?: 'pending' | 'failed' }>()
+  private readonly states = new WeakMap<object, { blocked: boolean; uncertainWrite?: true; uncertainTarget?: true; designView?: 'pending' | 'failed' }>()
 
   reset(agent: object): void { this.states.delete(agent) }
 
@@ -25,17 +25,18 @@ export class BrowserApprovalGate {
     if (state?.designView !== undefined) throw new BridgeToolError('content-unavailable', state.designView === 'pending'
       ? 'Design-view preparation is in progress. Wait for its result before other browser calls.'
       : DESIGN_VIEW_RETRY_GUIDANCE, true)
-    if (state?.uncertainWrite && !readOnly) throw new BridgeToolError('write-blocked-unconfirmed', UNCERTAIN_WRITE_GUIDANCE, true)
+    const targetPreparation = toolName === 'browser_open_tab'
+    if (state?.uncertainWrite && !readOnly && (!targetPreparation || state.uncertainTarget)) throw new BridgeToolError('write-blocked-unconfirmed', UNCERTAIN_WRITE_GUIDANCE, true)
     const preparesDesign = toolName === 'browser_set_design_zoom'
     if (preparesDesign && state !== undefined) state.designView = 'pending'
     try {
       const result = await work()
       const feedback = parseToolFeedback(typeof result === 'object' && result !== null ? (result as { feedback?: unknown }).feedback : undefined)
-      if (!readOnly && feedback?.state === 'readback-unconfirmed' && state !== undefined) state.uncertainWrite = true
+      if (!readOnly && feedback?.state === 'readback-unconfirmed' && state !== undefined) { state.uncertainWrite = true; if (targetPreparation) state.uncertainTarget = true }
       if (preparesDesign && state !== undefined) delete state.designView
       return result
     } catch (error) {
-      if (!readOnly && state !== undefined && failureFeedback(error instanceof BridgeToolError ? error.code : 'internal', false, error instanceof BridgeToolError && error.notDispatched).state === 'uncertain') state.uncertainWrite = true
+      if (!readOnly && state !== undefined && failureFeedback(error instanceof BridgeToolError ? error.code : 'internal', false, error instanceof BridgeToolError && error.notDispatched).state === 'uncertain') { state.uncertainWrite = true; if (targetPreparation) state.uncertainTarget = true }
       const recoverable = preparesDesign && error instanceof BridgeToolError && error.code === 'design-zoom-not-selected'
       if (preparesDesign && state !== undefined) {
         if (recoverable) delete state.designView

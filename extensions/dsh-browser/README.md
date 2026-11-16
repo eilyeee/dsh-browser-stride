@@ -1,5 +1,8 @@
 # Browser extension
 
+In 0.1.21, a drained ordinary conversation with a one-use Host-owner admission can open or reuse its exact reference URL for observation while old site-write uncertainty remains. Original records and the page-write fence are preserved. Page edits, submissions, current-page navigation, tab closing and managed tab mutations remain fenced. Active writes or an unresolved open/follow refuse another target change. The admission lasts two minutes, belongs to one session and connection, disallows forced copies and cannot be issued by browser tools. Direct follow remains fenced. Existing native permission/approval checks, durable records and write ordering still apply; this neither acknowledges old operations nor resumes a task.
+
+
 ## Connected but pages are missing
 
 In 0.1.20, **Page connection check** shows the current window's authorized-page count and last toolbar result. Failures automatically reveal a fixed message for pinned/unsupported pages, browser access denial, grouping, storage or changed pages. Raw browser errors and page content are not retained. Other windows and late attempts cannot overwrite the current window's newer result.

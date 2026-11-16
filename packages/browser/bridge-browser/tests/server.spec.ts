@@ -142,6 +142,44 @@ async function taskRpc(h: { ws: WebSocket; frames: BridgeFrame[] }, method: stri
 }
 
 describe('recorded tool dispatch', () => {
+  it.each(['other-session','expired','new-connection'] as const)('refuses an unrelated or stale reference admission: %s', async kind => {
+    const h=await connectedLedger(true),signal=new AbortController().signal,url='https://reference.example/wiki'
+    for(const sessionId of ['one','two']) {
+      const requestId='old-'+sessionId
+      await h.ledger.prepare({requestId,connectionId:'old',sessionId,name:'browser_click',args:{},expiresAt:Date.now()+60000})
+      await h.ledger.markSent(requestId);await h.ledger.settle(requestId,{state:'unresolved',reason:'connection-closed'})
+    }
+    h.bridge.authorizeReference('one',url)
+    let clock: ReturnType<typeof vi.spyOn> | undefined
+    if(kind==='expired')clock=vi.spyOn(Date,'now').mockReturnValue(Date.now()+121000)
+    if(kind==='new-connection') {
+      const replacement=await connect(h.url)
+      send(replacement.ws,{t:'hello',protocolVersion:BRIDGE_PROTOCOL_VERSION,token:TOKEN,caps:CAPS})
+      await waitFor(()=>replacement.frames.some(frame=>frame.t==='hello.ok'))
+    }
+    try {expect(()=>h.bridge.requestTool('browser_open_tab',{url},signal,1000,kind==='other-session'?'two':'one')).toThrowError(expect.objectContaining({code:'write-blocked-unconfirmed'}))}
+    finally {clock?.mockRestore()}
+  })
+  it('dispatches and confirms reference target preparation while preserving the original unknown site write', async () => {
+    const h=await connectedLedger(true),sid='reference-audit',signal=new AbortController().signal
+    await h.ledger.prepare({requestId:'old-site-write',connectionId:'old',sessionId:sid,name:'browser_type',args:{},expiresAt:Date.now()+60000})
+    await h.ledger.markSent('old-site-write');await h.ledger.settle('old-site-write',{state:'unresolved',reason:'connection-closed'})
+    const url='https://reference.example/wiki'
+    expect(()=>h.bridge.requestTool('browser_open_tab',{url},signal,1000,sid)).toThrowError(expect.objectContaining({code:'write-blocked-unconfirmed'}))
+    h.bridge.authorizeReference(sid,url)
+    for(const args of [{url:'https://reference.example/other'},{url,newTab:true}]) expect(()=>h.bridge.requestTool('browser_open_tab',args,signal,1000,sid)).toThrow()
+    expect(()=>h.bridge.requestTool('browser_follow_tab',{tabId:1},signal,1000,sid)).toThrow()
+    const result=h.bridge.requestTool('browser_open_tab',{url},signal,1000,sid)
+    await waitFor(()=>h.frames.some(frame=>frame.t==='tool.call'&&frame.name==='browser_open_tab'))
+    const frame=h.frames.find((frame):frame is Extract<BridgeFrame,{t:'tool.call'}>=>frame.t==='tool.call'&&frame.name==='browser_open_tab')!
+    send(h.ws,{t:'tool.result',id:frame.id,action:frame.action,ok:true,result:{text:'reference prepared'}})
+    expect(await result).toEqual({text:'reference prepared'})
+    expect(h.ledger.get(frame.id)).toMatchObject({effect:'write',state:'returned'})
+    expect(()=>h.bridge.requestTool('browser_open_tab',{url},signal,1000,sid)).toThrow()
+    expect(h.ledger.get('old-site-write')).toMatchObject({state:'unresolved'});expect(h.ledger.get('old-site-write')).not.toHaveProperty('nativeReview')
+    expect(()=>h.bridge.requestTool('browser_click',{},signal,1000,sid)).toThrowError(expect.objectContaining({code:'write-blocked-unconfirmed',notDispatched:true}))
+  })
+
   it('persists unconfirmed readback, refuses a queued second write, and still dispatches a scoped audit read', async () => {
     const h = await connectedLedger(true), signal = new AbortController().signal, sid = 'ordinary-audit'
     const first = h.bridge.requestTool('browser_click', {}, signal, 1000, sid)

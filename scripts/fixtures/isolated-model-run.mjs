@@ -13,7 +13,7 @@ import { startDshBackend } from '../../benchmark/lib/dsh-process.mjs'
 import { startExtensionBrowser } from '../../benchmark/lib/extension-browser.mjs'
 import { within } from '../../benchmark/lib/extension-connection.mjs'
 
-export async function startIsolatedModelRun({ repo, origin, startUrl, artifacts, goal, programs, guardSource, imports = '', patch = '', workspacePath, materials = [], criteria = [] }) {
+export async function startIsolatedModelRun({ repo, origin, startUrl, artifacts, goal, programs, guardSource, imports = '', patch = '', workspacePath, materials = [], criteria = [], extensionDir, promptViaRpc = false }) {
   const require = createRequire(join(repo, 'package.json')), bridgeRequire = createRequire(join(repo, 'packages/browser/bridge-browser/package.json'))
   const cli = join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'lib/bin.js')
   const root = await mkdtemp(join(tmpdir(), 'stride-model-fixture-')), home = join(root, 'home')
@@ -64,7 +64,7 @@ let requests=0;ctx.on('agent/request',(_p,next)=>{if(++requests>80)throw Error('
     host = await startDshBackend({ backend: 'extension', port, repoRoot: repo, benchmarkRoot: join(repo, 'benchmark'), runtimeRoot: join(root, 'runtime'),
       startUrl, deferSessionCreate: true, extraPatch: modelPatch + '\n' + workspacePatch + '\n' + patch + '\n- insert:\n    - id: synthetic-acceptance\n      name: ' + JSON.stringify(pathToFileURL(fixture).href) + '\n' })
     console.log(JSON.stringify({ phase: 'isolated-browser', realModel }))
-    browser = await startExtensionBrowser({ repoRoot: repo, benchmarkRoot: join(repo, 'benchmark'), bridgeUrl: `ws://127.0.0.1:${port}/ext/bridge`, issuePairingCode: () => host.issuePairingCode(), trustedOrigin: origin })
+    browser = await startExtensionBrowser({ repoRoot: repo, benchmarkRoot: join(repo, 'benchmark'), bridgeUrl: `ws://127.0.0.1:${port}/ext/bridge`, issuePairingCode: () => host.issuePairingCode(), trustedOrigin: origin, extensionDir })
     async function rpc(method, payload) {
       return browser.panel.evaluate(({ method, payload }) => new Promise((done, fail) => {
         const port = window.__acceptancePort ??= chrome.runtime.connect({ name: 'dsh-panel' }), id = crypto.randomUUID()
@@ -88,7 +88,9 @@ let requests=0;ctx.on('agent/request',(_p,next)=>{if(++requests>80)throw Error('
       })
       timer = setTimeout(() => { void host.client.rpc('session.cancel', { sessionId }).catch(() => {}); finish('test-timeout') }, timeoutMs)
       try {
-        const input = browser.panel.locator('.composer textarea'); await input.fill(realModel ? prompt : 'FIXTURE_CASE=' + key); await input.press('Enter')
+        const text = realModel ? prompt : 'FIXTURE_CASE=' + key
+        if (promptViaRpc) await host.client.rpc('session.prompt', { sessionId, mode: 'queue', content: [{ type: 'text', text }], clientTimeZone: 'Asia/Shanghai' })
+        else { const input = browser.panel.locator('.composer textarea'); await input.fill(text); await input.press('Enter') }
         const reason = await within(done, timeoutMs + 5000, 'isolated model turn')
         assert.ok(reason === 'completed' || allowInterrupted && reason === 'aborted', 'Unexpected model turn end: ' + reason)
       } finally { clearTimeout(timer); off(); await writeFile(join(artifacts, key + '-events.json'), JSON.stringify(events, null, 2), { mode: 0o600 }) }

@@ -54,7 +54,7 @@ import {
 import { SessionPurgeError } from './session-purge.ts'
 import { verifyToken } from './token.ts'
 import type { PairingStore } from './pairing.ts'
-import type { BrowserRunStore, BrowserRunExecution } from './run-store.ts'
+import { BrowserRunStoreError, type BrowserRunStore, type BrowserRunExecution } from './run-store.ts'
 import { browserRunPanelRpc, browserRunPanelFailure, type RunPanelStore } from './run-panel.ts'
 import { TaskBriefError, taskBriefInputSchema, type TaskBriefStore } from './task-brief.ts'
 import { TASK_BRIEF_GET, TASK_BRIEF_SAVE, TASK_BRIEF_REVIEW, TASK_BRIEF_OPEN } from './task-brief-contract.ts'
@@ -136,7 +136,7 @@ export interface BridgeServerDeps {
   /** Production always provides the durable ledger; optional for transport-only unit fixtures. */
   dispatches?: Pick<BrowserDispatchLedger, 'prepare' | 'markSent' | 'settle' | 'get'>
   /** Trusted Host async execution scopes; never caller/model-supplied ids. */
-  runs?: Pick<BrowserRunStore, 'executionFor' | 'assertDispatchAuthority' | 'assertObservationAuthority' | 'retargetPaused' | 'startTask'> & RunPanelStore
+  runs?: Pick<BrowserRunStore, 'executionFor' | 'assertDispatchAuthority' | 'assertObservationAuthority' | 'assertTargetPreparationAuthority' | 'retargetPaused' | 'startTask'> & RunPanelStore
     & Partial<Pick<BrowserRunStore, 'pauseDisconnectedTask' | 'pauseLostTargetTask'>>
   tasks?: Pick<BrowserTaskRuntime, 'selectTarget' | 'approval'> & Partial<Pick<BrowserTaskRuntime, 'validateTarget'>>
   recovery?: NativeRecovery
@@ -218,6 +218,12 @@ export function messageToText(data: Buffer | ArrayBuffer | Buffer[]): string {
  * Token-authenticated bridge server. Construct once per plugin instance;
  * dispose with {@link close}.
  */
+function authorityFailure(error: unknown, fallback: string): BridgeToolError {
+  return error instanceof BrowserRunStoreError && error.code === 'reconciliation-required'
+    ? new BridgeToolError('write-blocked-unconfirmed', 'A previous browser write requires native per-operation review. Observations and authorized reference-tab preparation remain available; page edits and submissions remain blocked.', true)
+    : new BridgeToolError('action-failed', fallback, true)
+}
+
 export class BridgeServer {
   private readonly wss = new WebSocketServer({ noServer: true })
   private current: ReadyConnection | null = null
@@ -226,6 +232,7 @@ export class BridgeServer {
   private readonly runTargets = new Map<string, { sessionId: string; controlRevision: number; connectionId: string; id: string }>()
   private readonly operations = new Set<Promise<unknown>>()
   private readonly writeTurns = new Map<string | undefined, Promise<unknown>>()
+  private readonly referencePermits = new Map<string, { owner: ReadyConnection; url: string; expiresAt: number; consumed?: true }>()
   private queuedWrites = 0
   private closed = false
   private disposal: Promise<void> | undefined
@@ -269,8 +276,17 @@ export class BridgeServer {
     sessionId?: string,
   ): Promise<unknown> {
     let execution: BrowserRunExecution | undefined
+    let referencePermit: (() => boolean) | undefined
+    const offeredReference = name === 'browser_open_tab' ? this.consumeReference(sessionId, args) : undefined
     try { execution = this.deps.runs?.executionFor(sessionId, isReadOnlyBrowserTool(name) ? 'observe' : 'dispatch') }
-    catch { throw new BridgeToolError('action-failed', 'Browser run execution context is missing, expired or not permitted to dispatch. Re-establish the run context before further actions.', true) }
+    catch (error) {
+      if (error instanceof BrowserRunStoreError && error.code === 'reconciliation-required' && name === 'browser_open_tab'
+        && (referencePermit = offeredReference) !== undefined) {
+        try { execution = this.deps.runs?.executionFor(sessionId, 'prepare-target') }
+        catch (inner) { throw authorityFailure(inner, 'Reference observation cannot start while browser work is active.') }
+        if (this.deps.dispatches === undefined) throw new BridgeToolError('internal', 'Reference preparation requires durable recording.', true)
+      } else throw authorityFailure(error, 'Browser run execution context is missing, expired or not permitted to dispatch. Re-establish the run context before further actions.')
+    }
     if (execution !== undefined) {
       if (isRunTabMutation(name)) throw new BridgeToolError('execution-denied', 'Run-bound tab creation, follow and close are unavailable. Pause the task and use its selected-page continuation control.', true)
       if (this.deps.dispatches === undefined) throw new BridgeToolError('internal', 'Run-scoped browser dispatch requires a durable ledger', true)
@@ -321,7 +337,7 @@ export class BridgeServer {
         ...(sessionId === undefined ? {} : { sessionId }) })).digest('hex')
       return this.sendTool(conn, id, name, copied, signal, expiresAt, { actionId, requestDigest }, sessionId)
     }
-    const send = () => this.recordAndSend(conn, id, name, copied, signal, expiresAt, sessionId, execution, targetBinding)
+    const send = () => this.recordAndSend(conn, id, name, copied, signal, expiresAt, sessionId, execution, targetBinding, referencePermit)
     return this.track(isReadOnlyBrowserTool(name) ? send() : this.orderedWrite(sessionId, send))
   }
 
@@ -359,7 +375,7 @@ export class BridgeServer {
     return true
   }
 
-  private async recordAndSend(conn: ReadyConnection, id: string, name: string, args: Record<string, unknown>, signal: AbortSignal, expiresAt: number, sessionId?: string, execution?: BrowserRunExecution, targetBinding?: string): Promise<unknown> {
+  private async recordAndSend(conn: ReadyConnection, id: string, name: string, args: Record<string, unknown>, signal: AbortSignal, expiresAt: number, sessionId?: string, execution?: BrowserRunExecution, targetBinding?: string, referencePermit?: () => boolean): Promise<unknown> {
     const ledger = this.deps.dispatches!
     let action: ToolActionIdentity
     try {
@@ -370,7 +386,7 @@ export class BridgeServer {
         ...(conn.installationId === undefined ? {} : { installationId: conn.installationId }) })
       if (prepared.state !== 'prepared' || prepared.identityVersion !== 4) throw new Error('request already consumed or incompatible')
       action = { actionId: prepared.actionId, requestDigest: prepared.requestDigest }
-      let stopped = this.beforeDispatch(conn, signal, expiresAt, sessionId, execution, isReadOnlyBrowserTool(name))
+      let stopped = this.beforeDispatch(conn, signal, expiresAt, sessionId, execution, name, id, referencePermit)
       if (stopped !== undefined) {
         await ledger.settle(id, { state: 'not_sent', reason: stopped.reason })
         throw stopped.error
@@ -378,7 +394,7 @@ export class BridgeServer {
       // Conservative crash boundary: persistence commits before socket.send.
       // A crash between these two operations is unresolved, never safe to retry.
       await ledger.markSent(id)
-      stopped = this.beforeDispatch(conn, signal, expiresAt, sessionId, execution, isReadOnlyBrowserTool(name))
+      stopped = this.beforeDispatch(conn, signal, expiresAt, sessionId, execution, name, id, referencePermit)
       if (stopped !== undefined) {
         await ledger.settle(id, { state: 'not_sent', reason: stopped.reason })
         throw stopped.error
@@ -387,22 +403,23 @@ export class BridgeServer {
       if (error instanceof BridgeToolError) throw error
       throw new BridgeToolError('internal', 'browser dispatch could not be durably recorded; no action was sent', true)
     }
-    return this.sendTool(conn, id, name, args, signal, expiresAt, action, sessionId, execution, targetBinding)
+    return this.sendTool(conn, id, name, args, signal, expiresAt, action, sessionId, execution, targetBinding, referencePermit)
   }
 
-  private beforeDispatch(conn: ReadyConnection, signal: AbortSignal, expiresAt: number, sessionId?: string, execution?: BrowserRunExecution, readOnly = false): { reason: 'cancelled' | 'expired' | 'connection-closed'; error: BridgeToolError } | undefined {
+  private beforeDispatch(conn: ReadyConnection, signal: AbortSignal, expiresAt: number, sessionId?: string, execution?: BrowserRunExecution, name = '', ownRequestId?: string, referencePermit?: () => boolean): { reason: 'cancelled' | 'expired' | 'connection-closed'; error: BridgeToolError } | undefined {
     if (signal.aborted) return { reason: 'cancelled', error: new BridgeToolError('bridge-closed', 'tool call cancelled before dispatch', true) }
     if (this.closed || this.current !== conn || conn.ws.readyState !== WebSocket.OPEN) return { reason: 'connection-closed', error: new BridgeToolError('bridge-closed', 'extension connection changed before dispatch', true) }
     if (Date.now() >= expiresAt) return { reason: 'expired', error: new BridgeToolError('timeout', 'browser action expired before dispatch', true) }
     try {
-      if (this.deps.runs?.executionFor(sessionId, readOnly ? 'observe' : 'dispatch') !== execution) throw new Error('execution context changed')
-    } catch {
-      return { reason: 'cancelled', error: new BridgeToolError('action-failed', 'Browser execution authority changed or a previous write requires reconciliation; no action was sent', true) }
+      if (referencePermit !== undefined && !referencePermit()) throw new Error('reference admission expired')
+      if (this.deps.runs?.executionFor(sessionId, isReadOnlyBrowserTool(name) ? 'observe' : referencePermit !== undefined ? 'prepare-target' : 'dispatch', ownRequestId) !== execution) throw new Error('execution context changed')
+    } catch (error) {
+      return { reason: 'cancelled', error: authorityFailure(error, 'Browser execution authority changed; no action was sent') }
     }
     return undefined
   }
 
-  private sendTool(conn: ReadyConnection, id: string, name: string, args: Record<string, unknown>, signal: AbortSignal, expiresAt: number, action: ToolActionIdentity, sessionId?: string, execution?: BrowserRunExecution, targetBinding?: string): Promise<unknown> {
+  private sendTool(conn: ReadyConnection, id: string, name: string, args: Record<string, unknown>, signal: AbortSignal, expiresAt: number, action: ToolActionIdentity, sessionId?: string, execution?: BrowserRunExecution, targetBinding?: string, referencePermit?: () => boolean): Promise<unknown> {
     const confirmation: ToolDispatchConfirmation = { id, action,
       execution: execution === undefined ? { kind: 'legacy' } : { kind: 'run', runId: execution.runId, controlRevision: execution.controlRevision },
       ...(targetBinding === undefined ? {} : { targetBinding }),
@@ -417,6 +434,7 @@ export class BridgeServer {
           if (signal.aborted || this.current !== conn || conn.abort.signal.aborted || Date.now() >= expiresAt) return false
           try {
             if (isReadOnlyBrowserTool(name)) this.deps.runs?.assertObservationAuthority(execution, sessionId)
+            else if (referencePermit !== undefined) { if (!referencePermit()) return false; this.deps.runs?.assertTargetPreparationAuthority(execution, sessionId, id) }
             else this.deps.runs?.assertDispatchAuthority(execution, sessionId)
             return true
           } catch { return false }
@@ -512,6 +530,25 @@ export class BridgeServer {
     })
     await Promise.all(pumps)
     while (this.operations.size > 0) await Promise.allSettled([...this.operations])
+  }
+
+  /** Host-administrator authorization for one exact user-designated reference. No page grant or ledger review. */
+  authorizeReference(sessionId: string, rawUrl: string): { expiresAt: number } {
+    const url = taskPageUrl(rawUrl), owner = this.current
+    if (!url || !/^[a-zA-Z0-9_-]{1,200}$/.test(sessionId) || owner === null) throw Error('reference-unavailable')
+    this.deps.runs?.assertObservationAuthority(undefined, sessionId)
+    for (const [sid, permit] of this.referencePermits) if (permit.owner !== owner || permit.expiresAt <= Date.now()) this.referencePermits.delete(sid)
+    if (this.referencePermits.size >= 128 && !this.referencePermits.has(sessionId)) throw Error('reference-unavailable')
+    const expiresAt = Date.now() + 120000
+    this.referencePermits.set(sessionId, { owner, url, expiresAt })
+    return { expiresAt }
+  }
+  private consumeReference(sessionId: string | undefined, args: Record<string, unknown>): (() => boolean) | undefined {
+    if (sessionId === undefined || args.newTab === true) return
+    const permit = this.referencePermits.get(sessionId)
+    if (!permit || permit.consumed || permit.owner !== this.current || permit.expiresAt <= Date.now() || taskPageUrl(args.url) !== permit.url) return
+    permit.consumed = true
+    return () => this.referencePermits.get(sessionId) === permit && this.current === permit.owner && Date.now() < permit.expiresAt
   }
 
   /** @returns whether an authenticated extension is currently connected. */
@@ -1024,6 +1061,7 @@ export class BridgeServer {
     const conn = this.current
     if (conn === null) return
     this.current = null
+    this.referencePermits.clear()
     // Keep the transport interruption classified as connection loss before
     // execution cancellation. These waiters settle asynchronously after disk.
     for (const pending of this.pendingTools.values()) if (pending.owner === conn) {

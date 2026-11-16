@@ -154,6 +154,11 @@ export async function startDshBackend({
       if (backend !== 'extension') throw new Error('pairing is only available for the extension backend')
       return issuePairingCode(baseUrl, adminToken)
     },
+    async permitReference(sessionId, url) {
+      const response = await fetch(baseUrl + '/ext/bridge-pairing', { method: 'POST', headers: { authorization: 'Bearer ' + adminToken, 'content-type': 'application/json' }, body: JSON.stringify({ action: 'permit-reference', sessionId, url }), signal: AbortSignal.timeout(5000) })
+      if (!response.ok) throw Error('Isolated reference admission failed')
+      return response.json()
+    },
     async listInstallations() {
       if (backend !== 'extension') throw new Error('pairing is only available for the extension backend')
       return listInstallations(baseUrl, adminToken)

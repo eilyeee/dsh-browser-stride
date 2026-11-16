@@ -1,3 +1,4 @@
+import { isObservationTargetTool } from './protocol.ts'
 /**
  * Durable browser-run records for trusted Host plugins. This service does not
  * dispatch tools or expose an RPC. Trusted Host execution scopes gate browser
@@ -261,7 +262,7 @@ export class BrowserRunStore {
   }
 
   /** Resolve the calling async chain, not the latest run belonging to a session. */
-  executionFor(sessionId?: string, purpose: 'dispatch' | 'observe' = 'dispatch'): BrowserRunExecution | undefined {
+  executionFor(sessionId?: string, purpose: 'dispatch' | 'observe' | 'prepare-target' = 'dispatch', ownRequestId?: string): BrowserRunExecution | undefined {
     this.assertOpen()
     if (this.writeFaulted) throw new BrowserRunStoreError('storage-unavailable')
     const context = executionContext.getStore()
@@ -274,6 +275,7 @@ export class BrowserRunStore {
       return execution
     }
     if (purpose === 'observe') this.assertObservationAuthority(undefined, sessionId)
+    else if (purpose === 'prepare-target') this.assertTargetPreparationAuthority(undefined, sessionId, ownRequestId)
     else this.assertDispatchAuthority(undefined, sessionId)
     return undefined
   }
@@ -292,6 +294,17 @@ export class BrowserRunStore {
     // pause/stop drains the old job before ordinary chat can audit the page.
     if ([...this.executions].some(context => context.execution.sessionId === sessionId)) throw new BrowserRunStoreError('session-busy')
     if (this.list(asSessionId(sessionId)).some(run => run.state === 'running' || run.state === 'stopping')) throw new BrowserRunStoreError('session-busy')
+  }
+
+  /** Prepare an observation target without clearing any site's uncertain write. */
+  assertTargetPreparationAuthority(execution: BrowserRunExecution | undefined, sessionId?: string, ownRequestId?: string): void {
+    if (execution !== undefined) { this.assertDispatchAuthority(execution, sessionId); return }
+    this.assertObservationAuthority(undefined, sessionId)
+    // Unattributed calls never acquire this scoped exception.
+    if (sessionId === undefined) return
+    const blocked = this.dispatches.list(sessionId).some(row => row.requestId !== ownRequestId && row.effect === 'write'
+      && (row.state === 'prepared' || row.state === 'sent_unconfirmed' || isObservationTargetTool(row.name) && requiresDispatchReview(row)))
+    if (blocked) throw new BrowserRunStoreError('reconciliation-required')
   }
 
   /** Revalidate the captured Host object from another async chain, never wire ids. */

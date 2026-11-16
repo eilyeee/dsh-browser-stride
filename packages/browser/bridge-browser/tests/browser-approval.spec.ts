@@ -3,6 +3,18 @@ import { BrowserApprovalGate } from '../src/browser-approval.ts'
 import { BridgeToolError } from '../src/server.ts'
 
 describe('browser approval retry boundary', () => {
+  it('permits only target preparation after uncertain page input, and fences uncertain target changes themselves', async () => {
+    const gate = new BrowserApprovalGate(), agent = {}, change = vi.fn(async () => 'reference')
+    await expect(gate.request(agent, async () => { throw new BridgeToolError('timeout', 'unknown field result') }, 'browser_type')).rejects.toThrow()
+    await expect(gate.request(agent, change, 'browser_open_tab')).resolves.toBe('reference')
+    await expect(gate.request(agent, change, 'browser_follow_tab')).rejects.toMatchObject({ code: 'write-blocked-unconfirmed' })
+    for (const name of ['browser_click', 'browser_type', 'browser_select', 'browser_navigate', 'browser_close_tab']) await expect(gate.request(agent, change, name)).rejects.toMatchObject({ code: 'write-blocked-unconfirmed' })
+    await expect(gate.request(agent, async () => { throw new BridgeToolError('timeout', 'unknown open') }, 'browser_open_tab')).rejects.toThrow('unknown open')
+    await expect(gate.request(agent, change, 'browser_follow_tab')).rejects.toMatchObject({ code: 'write-blocked-unconfirmed' })
+    await expect(gate.request(agent, async () => 'observed', 'browser_snapshot')).resolves.toBe('observed')
+    expect(change).toHaveBeenCalledTimes(1)
+  })
+
   it('permits another writable control after readonly refusal without clearing earlier uncertainty', async () => {
     const gate = new BrowserApprovalGate(), agent = {}, work = vi.fn(async () => 'editable')
     const refusal = new BridgeToolError('field-readonly', 'Read-only field')
@@ -58,7 +70,7 @@ describe('browser approval retry boundary', () => {
   it('also fences an unconfirmed successful field readback without claiming business success', async () => {
     const gate = new BrowserApprovalGate(), agent = {}
     await gate.request(agent, async () => ({ feedback: { version: 1, state: 'readback-unconfirmed', businessChange: 'not-verified' } }), 'browser_type')
-    await expect(gate.request(agent, async () => 'repeat', 'browser_type')).rejects.toThrow('Do not issue another write')
+    await expect(gate.request(agent, async () => 'repeat', 'browser_type')).rejects.toThrow('Do not edit the page')
     await expect(gate.request(agent, async () => 'readback', 'browser_get_text')).resolves.toBe('readback')
   })
   it('releases only an authenticated no-selection failure for new observations or another method', async () => {

@@ -51,6 +51,24 @@ async function running(store: BrowserRunStore) {
 }
 
 describe('durable Host browser run records', () => {
+  it('allows attributed target preparation after site uncertainty without acknowledging it or granting page writes', async () => {
+    const {store} = await setup(), sid = input().sessionId
+    const old = {requestId:'old-site-write',connectionId:'old',sessionId:sid,name:'browser_click',args:{},expiresAt:Date.now()+60000}
+    await store.dispatches.prepare(old);await store.dispatches.markSent(old.requestId);await store.dispatches.settle(old.requestId,{state:'unresolved',reason:'connection-closed'})
+    expect(store.executionFor(sid,'prepare-target')).toBeUndefined()
+    expect(()=>store.executionFor(sid)).toThrow('reconciliation-required')
+    expect(()=>store.executionFor(undefined,'prepare-target')).toThrow('reconciliation-required')
+    const open = {...old,requestId:'own-open',name:'browser_open_tab'}
+    await store.dispatches.prepare(open)
+    expect(()=>store.executionFor(sid,'prepare-target')).toThrow('reconciliation-required')
+    expect(store.executionFor(sid,'prepare-target',open.requestId)).toBeUndefined()
+    await store.dispatches.markSent(open.requestId)
+    expect(store.executionFor(sid,'prepare-target',open.requestId)).toBeUndefined()
+    await store.dispatches.settle(open.requestId,{state:'unresolved',reason:'connection-closed'})
+    expect(()=>store.executionFor(sid,'prepare-target')).toThrow('reconciliation-required')
+    expect(store.dispatches.get(old.requestId)).toMatchObject({state:'unresolved'});expect(store.dispatches.get(old.requestId)).not.toHaveProperty('nativeReview')
+  })
+
   it('permits ordinary read-only auditing of a drained uncertain run without clearing its write fence', async () => {
     const { store } = await setup()
     const run = await running(store)

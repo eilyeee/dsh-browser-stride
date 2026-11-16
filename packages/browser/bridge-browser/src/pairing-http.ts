@@ -146,8 +146,10 @@ export function createPairingRoute(store: PairingStore, server: BridgeServer, ad
             respond(res, 400, { error: 'invalid request' })
             return
           }
-          const request = input as { action?: unknown; installationId?: unknown }
-          if (request.action === 'issue') {
+          const request = input as { action?: unknown; installationId?: unknown; sessionId?: unknown; url?: unknown }
+          if (request.action === 'permit-reference' && typeof request.sessionId === 'string' && typeof request.url === 'string') {
+            respond(res, 200, server.authorizeReference(request.sessionId, request.url))
+          } else if (request.action === 'issue') {
             respond(res, 200, store.issue())
           } else if (request.action === 'list') {
             respond(res, 200, { installations: await store.list() })

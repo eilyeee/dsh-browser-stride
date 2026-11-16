@@ -9,6 +9,20 @@ package versions currently identify development builds, not supported releases.
 
 ### Fixed
 
+- Development build 0.1.21 lets drained, attributed ordinary conversations open
+  or reuse an exact reference URL with a two-minute, one-use Host-owner admission while earlier site writes remain
+  unresolved. The old records and write fence are preserved; page edits,
+  navigation of the current page, closing tabs and managed tab mutations are
+  still fenced. The admission is session/connection-bound, cannot be issued by model tools, and disallows forced copies. Direct follow remains fenced. Active writes and unresolved open/follow operations refuse
+  target preparation, including after restart. Native permission checks and
+  the durable write queue still apply to these recorded tab operations.
+- Reconciliation failures now explain the pending-write review instead of
+  reporting a missing execution context. Benchmark suite 31 separates this
+  admission/guidance change. A synthetic smoke keeps an old failed site receipt,
+  opens/reads a reference and checks that a save is refused before dispatch.
+
+### Fixed
+
 - Development build 0.1.20 reports native toolbar authorization failures instead
   of silently showing an empty page list. Pinned/unsupported pages, browser access,
   grouping, persistence and changed-page failures have fixed localized messages;

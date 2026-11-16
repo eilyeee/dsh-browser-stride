@@ -438,3 +438,8 @@ function isRespondError(value: unknown): value is Extract<RespondResult, { ok: f
     && (value as Record<string, unknown>).details !== null
     && !Array.isArray((value as Record<string, unknown>).details)
 }
+
+/** Native tab preparation can support an audit; it remains a recorded write. */
+export function isObservationTargetTool(name: string): boolean {
+  return name === 'browser_open_tab' || name === 'browser_follow_tab'
+}
