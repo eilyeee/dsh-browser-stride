@@ -120,6 +120,9 @@ export class ElementIds {
     this.observation = undefined
   }
 
+  /** No action may reuse focus after native input invalidates the observation. */
+  hasCurrentObservation(): boolean { return this.observation?.url === location.href }
+
   /** Focus inside a component is not a substitute for an exposed control reference. */
   isObservedActionTarget(element: Element): boolean {
     const index = this.idByElement.get(element)

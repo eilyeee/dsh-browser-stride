@@ -100,7 +100,7 @@ export const DEFAULT_SNAPSHOT_MAX_CHARS = 32_000
 export const MIN_SNAPSHOT_MAX_CHARS = 500
 
 /** Shared ordering/recording policy; unknown tools are conservatively writes. */
-const READ_ONLY_BROWSER_TOOLS = new Set(['browser_snapshot', 'browser_screenshot', 'browser_get_text', 'browser_measure_layout', 'browser_wait', 'browser_list_tabs'])
+const READ_ONLY_BROWSER_TOOLS = new Set(['browser_snapshot', 'browser_screenshot', 'browser_get_diagnostics', 'browser_get_text', 'browser_measure_layout', 'browser_wait', 'browser_list_tabs'])
 export function isReadOnlyBrowserTool(name: string): boolean { return READ_ONLY_BROWSER_TOOLS.has(name) }
 const TAB_TOOLS = new Set(['browser_open_tab', 'browser_list_tabs', 'browser_follow_tab', 'browser_close_tab'])
 export function isPageBrowserTool(name: string): boolean { return !TAB_TOOLS.has(name) }
@@ -196,6 +196,10 @@ export interface BridgeCaps {
   elementReadScope?: boolean
   /** Delta snapshots require a named, current and fully rendered baseline. */
   snapshotBase?: boolean
+  /** Native panel-owned, bounded Chrome Console/Network metadata. */
+  pageDiagnostics?: boolean
+  /** Native one-use acknowledgement of uncertainty; never business verification. */
+  manualRecovery?: boolean
   /** Bounded supported design-view zoom control and readback. */
   designViewZoom?: boolean
   /** Session task notes and per-criterion reports; not execution authority. */
@@ -396,6 +400,8 @@ function isCaps(value: unknown): value is BridgeCaps {
     && (caps.elementScroll === undefined || typeof caps.elementScroll === 'boolean')
     && (caps.elementReadScope === undefined || typeof caps.elementReadScope === 'boolean')
     && (caps.snapshotBase === undefined || typeof caps.snapshotBase === 'boolean')
+    && (caps.pageDiagnostics === undefined || typeof caps.pageDiagnostics === 'boolean')
+    && (caps.manualRecovery === undefined || typeof caps.manualRecovery === 'boolean')
     && (caps.designViewZoom === undefined || typeof caps.designViewZoom === 'boolean')
     && (caps.taskNotes === undefined || typeof caps.taskNotes === 'boolean')
     && (caps.taskNotesUnavailable === undefined || typeof caps.taskNotesUnavailable === 'boolean')

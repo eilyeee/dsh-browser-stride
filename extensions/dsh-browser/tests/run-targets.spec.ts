@@ -13,6 +13,15 @@ function fixture(capacity = 5000) {
   return { targets, runs, capture, select: (tab: Partial<ToolTargetIdentity>) => { selected = { ...selected, ...tab } } }
 }
 describe('run target pins', () => {
+  it('loses a managed pin on native intervention without losing the underlying page grant', () => {
+    const { targets, runs, capture } = fixture(), target = capture()
+    const pin = runs.join(scope, 'session-a', target)!; expect(pin.accept()).toBe(true)
+    targets.invalidateObservation(1)
+    expect(target.current()).toBe(true); expect(pin.current()).toBe(false)
+    expect(runs.takeLost()).toMatchObject([{ payload: { runId: scope.runId, targetBinding: pin.id } }])
+    expect(runs.join(scope, 'session-a', capture(), pin.id)).toBeUndefined()
+    expect(runs.prepare({ ...scope, controlRevision: 2 }, 'session-a', capture())).toBeDefined()
+  })
   it('reports a lost prepared pin once and never restores it or its notification owner', () => {
     const { runs, targets, capture } = fixture()
     const prepared = runs.prepare(scope, 'session-a', capture())!

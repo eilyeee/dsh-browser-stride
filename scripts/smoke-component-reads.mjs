@@ -108,7 +108,7 @@ export const inject=['llm','tools','agents'];export function apply(ctx){${realMo
       const task=kind==='requirements'?'使用 Anchor 的当前引用，在其所在树内读取 #requirements，再测量 #customer 相对 #header 的间距，报告 requirementSpacing 与 measuredGap（CSS px）。':kind==='privacy'?'使用 Anchor 的当前引用读取其所在组件正文，确认两个可识别敏感值的副本均已遮罩，不能复述任何敏感片段。':kind==='recovery'?'先使用 Anchor 当前引用和 .duplicate 做范围正文读取；如果不唯一，改用同一树的 #requirements，保持同一需求判据，报告 requirementSpacing。':kind==='slots'?'使用 Anchor 的当前引用读取组件正文，报告实际显示的插槽文字（slotText）及空插槽的默认文字（fallbackText），不要把未分配或隐藏的内容当作正文。':'使用 Anchor 当前引用和 #properties 区域调用 browser_read_design_styles，报告 width、height 和 borderRadius；只使用面板明确数值。'
       const reportFields=kind==='requirements'?'requirementSpacing、measuredGap 均为数字':kind==='recovery'?'requirementSpacing 为数字':kind==='slots'?'slotText、fallbackText 为原文字符串':kind==='inspector'?'width、height、borderRadius 为带 px 的字符串':'没有额外字段'
       const settleTask=kind==='settle-continuous'?'点击一次 Start updates 后调用一次 browser_wait；此组件持续变化，请如实报告 settled=false，不能把超时当作已稳定。不重复点击，不保存。':'点击一次 Start updates 后调用一次 browser_wait；然后重新快照，使用新 Anchor 引用读取组件正文，确认 Component ready: 24px，并报告 settled=true。'
-      const baseTask=kind==='base-current'?'先取完整快照，保存它的 Observation 编号；用此编号和 delta=true 请求增量；再用相同旧编号请求一次，确认退回完整；最后不带编号请求 delta=true，确认返回完整。':kind==='base-region'?'先以 .scope 请求快照，确认选择器不唯一而拒绝；然后读取 #left 完整快照，复制其 Observation 编号，用该编号和 delta=true 读取 #right，确认区域变化返回完整。':'先取完整快照并确认字符预算截断标记；再复制它的 Observation 编号请求 delta=true，确认返回完整且说明 previous-render-clipped。';
+      const baseTask=kind==='base-current'?'先取完整快照，保存它的 Observation 编号；用此编号和 delta=true 请求增量；再用相同旧编号请求一次，确认仍返回完整；最后不带编号请求 delta=true，确认返回完整。':kind==='base-region'?'先以 .scope 请求快照，确认选择器不唯一而拒绝；然后读取 #left 完整快照，复制其 Observation 编号，用该编号和 delta=true 读取 #right，确认返回完整并说明模型投影未确认。':'先取完整快照并确认字符预算截断标记；再复制它的 Observation 编号请求 delta=true，确认返回完整且说明 model-projection-not-attested。';
       const prompt=realModel?(baseOnly?`只读当前已授权的本地合成页，会话已绑定。${baseTask}仅调用 browser_snapshot（可在 run_code 中组织，不操作文件或网页）。编号应从返回正文的 Observation 行提取，不用 elementRef 或安全边界 nonce。不输入、不点击、不保存、不读其他页面。较长快照可只打印头部与截断标记的检查结果，不必打印全部正文。完成后仅返回 JSON：marker 为 COMPONENT_MODEL_DONE，goalReached 为布尔值，baselineBehaviorVerified 为布尔值，reason 为实际工具依据。`:(settleOnly?`当前是已授权的本地合成组件测试页，会话已绑定。从 browser_snapshot 开始。${settleTask}只允许点击 Start updates 一次以启动本地计时器；不输入、不点 Save、不访问文件或其他网站。读取正文必须携带当前 Anchor 引用。完成即停止。仅返回 JSON：marker 为 COMPONENT_MODEL_DONE，goalReached 为布尔值，settled 为上述实际结果，reason 为工具依据。`:`只读当前已授权的本地合成页，当前会话已绑定，从 browser_snapshot 开始，不重新绑定标签。${task}所有正文、布局和样式读取都必须带当前 Anchor 的 elementRef，不读取文档对照。不输入、不点击、不保存、不操作文件或其他网站。完成本轮指定读取后立即报告；没有观察到的信息保持未知，不补造或穷举猜测选择器。本轮仅返回 JSON：marker 为 COMPONENT_MODEL_DONE，goalReached 为布尔值，reason 为实际读取依据，${reportFields}。不要查询或补充其他任务字段。`)):'COMPONENT_CASE='+kind
       cancelTimer=setTimeout(()=>{void host.client.rpc('session.cancel',{sessionId}).catch(()=>{});finish('test-timeout')},realModel?240000:45000)
       const input=browser.panel.locator('.composer textarea');await input.fill(prompt);await input.press('Enter')
@@ -124,18 +124,12 @@ export const inject=['llm','tools','agents'];export function apply(ctx){${realMo
       if(baseOnly){
         const snaps=calls.filter(c=>c.name==='browser_snapshot').map(c=>({error:c.isError,args:typeof c.arguments==='string'?JSON.parse(c.arguments):c.arguments??c.args,text:(c.content??[]).filter(b=>b.type==='text').map(b=>b.text).join('\n')}));
         const full=c=>!c.error&&/^Observation: obs_/m.test(c.text)&&!c.text.includes('Page change v');
-        if(kind==='base-current'){
-          const delta=snaps.find(c=>!c.error&&c.text.includes('Page change v'));assert.ok(delta);
-          assert.ok(delta.text.includes('base: '+delta.args.baseObservationId));
-          assert.ok(snaps.some(c=>full(c)&&c.args.baseObservationId===delta.args.baseObservationId&&c.text.includes('base-unavailable')));
-          assert.ok(snaps.some(c=>full(c)&&c.args.delta===true&&c.args.baseObservationId===undefined));
-        }else if(kind==='base-region'){
-          assert.ok(snaps.some(c=>c.error&&c.args.region==='.scope'));
-          assert.ok(snaps.some(c=>full(c)&&c.args.region==='#right'&&c.args.baseObservationId&&c.text.includes('region-changed')));
-        }else{
-          assert.ok(snaps.some(c=>full(c)&&c.text.includes('…(truncated to the snapshot character budget)')));
-          assert.ok(snaps.some(c=>full(c)&&c.args.delta===true&&c.args.baseObservationId&&c.text.includes('previous-render-clipped')));
-        }
+        const requestedDelta=snaps.filter(c=>!c.error&&c.args.delta===true&&c.args.baseObservationId);
+        assert.ok(requestedDelta.length>0);
+        for(const value of requestedDelta){assert.ok(full(value));assert.ok(value.text.includes('model-projection-not-attested'))}
+        if(kind==='base-current')assert.ok(snaps.some(c=>full(c)&&c.args.delta===true&&c.args.baseObservationId===undefined));
+        else if(kind==='base-region')assert.ok(snaps.some(c=>c.error&&c.args.region==='.scope'));
+        else assert.ok(snaps.some(c=>full(c)&&c.text.includes('…(truncated to the snapshot character budget)')));
       }else if(settleOnly){
         const clicks=calls.filter(c=>c.name==='browser_click');assert.equal(clicks.length,1);assert.equal(clicks[0].isError,false)
         const waits=calls.filter(c=>c.name==='browser_wait');assert.equal(waits.length,1);assert.equal(waits[0].isError,false)

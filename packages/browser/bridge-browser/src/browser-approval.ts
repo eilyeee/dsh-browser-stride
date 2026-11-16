@@ -2,7 +2,7 @@ import { BridgeToolError } from './server.ts'
 import { isReadOnlyBrowserTool } from './protocol.ts'
 import { failureFeedback, parseToolFeedback } from './tool-feedback.ts'
 
-export const UNCERTAIN_WRITE_GUIDANCE = 'A previous browser write has an unconfirmed result. Read the current page and check the business state. Do not issue another write in this turn or repeat the submission. Report the uncertainty and ask the user before continuing.'
+export const UNCERTAIN_WRITE_GUIDANCE = 'A previous browser write has an unconfirmed result. Read the current page and check the business state. Do not issue another write or repeat the submission. A new turn does not clear the durable fence. Report the uncertainty and ask for native per-operation review before continuing.'
 
 export const APPROVAL_RETRY_GUIDANCE = 'Browser approvals are paused for this turn. Stop browser calls and tell the user to return to the DSH Stride extension, then send a new message to retry and confirm the new request. Do not retry automatically or use another access method.'
 export const DESIGN_VIEW_RETRY_GUIDANCE = 'Design-view preparation failed for this turn. Stop browser calls and ask the user to enlarge the design view manually, then send a new message before continuing. Do not guess canvas points or retry via other tools.'

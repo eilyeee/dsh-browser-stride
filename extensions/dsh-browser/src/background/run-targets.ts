@@ -14,19 +14,19 @@ export class RunTargetRegistry {
   /** A user-selected future revision; never usable as an unscoped first pin. */
   prepare(scope: Extract<ToolExecutionScope, { kind: 'run' }>, sessionId: string, target: ToolTargetLease): Pick<RunTargetBinding, 'id' | 'current'> | undefined {
     const key = JSON.stringify([scope.runId, scope.controlRevision])
-    if (!target.current() || this.entries.has(key) || [...this.prepared.values()].some(value => value.key === key)
+    if (!target.current() || !target.observationCurrent() || this.entries.has(key) || [...this.prepared.values()].some(value => value.key === key)
       || this.entries.size + this.prepared.size >= this.capacity) return
     const binding: Binding = { scope: { ...scope }, sessionId, id: this.makeId(), target, awaiting: true, lost: false }
     this.prepared.set(binding.id, { key, binding })
     const owner = this.owner
-    return Object.freeze({ id: binding.id, current: () => this.owner === owner && !binding.lost && binding.target.current()
+    return Object.freeze({ id: binding.id, current: () => this.owner === owner && !binding.lost && binding.target.current() && binding.target.observationCurrent()
       && (this.prepared.get(binding.id)?.binding === binding || this.entries.get(key) === binding) })
   }
 
   discardPrepared(id: string): void { this.prepared.delete(id) }
 
   join(scope: Extract<ToolExecutionScope, { kind: 'run' }>, sessionId: string, target: ToolTargetLease, expected?: string): RunTargetBinding | undefined {
-    if (!target.current()) return
+    if (!target.current() || !target.observationCurrent()) return
     const key = JSON.stringify([scope.runId, scope.controlRevision])
     let entry = this.entries.get(key)
     if (entry === undefined) {
@@ -43,12 +43,12 @@ export class RunTargetRegistry {
       this.entries.set(key, entry)
     }
     if (entry.lost || entry.sessionId !== sessionId || (expected !== undefined && entry.id !== expected)
-      || !entry.target.sameBinding() || entry.target.target.tabId !== target.target.tabId
+      || !entry.target.sameBinding() || !entry.target.observationCurrent() || entry.target.target.tabId !== target.target.tabId
       || entry.target.target.windowId !== target.target.windowId) return
     const binding = entry
     const owner = this.owner
     const current = () => this.owner === owner && !binding.lost && this.entries.get(key) === binding
-      && binding.target.sameBinding() && (!binding.awaiting || binding.target.current())
+      && binding.target.sameBinding() && binding.target.observationCurrent() && (!binding.awaiting || binding.target.current())
     return Object.freeze({ id: entry.id, current, accept: () => {
       if (!current() || !target.current()) return false
       binding.awaiting = false
@@ -61,7 +61,7 @@ export class RunTargetRegistry {
     const result: { payload: BrowserTaskTargetLoss; owned(): boolean }[] = []
     const owner = this.owner
     const visit = (key: string, binding: Binding) => {
-      if (binding.lost || (binding.target.sameBinding() && (!binding.awaiting || binding.target.current()))) return
+      if (binding.lost || (binding.target.sameBinding() && binding.target.observationCurrent() && (!binding.awaiting || binding.target.current()))) return
       binding.lost = true
       result.push({ payload: { runId: binding.scope.runId, controlRevision: binding.scope.controlRevision,
         sessionId: binding.sessionId, targetBinding: binding.id },

@@ -32,6 +32,48 @@ function fixture() {
 }
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
+describe('shared read debugger lease', () => {
+  it('releases its temporary connection but never a visual or automatic owner', async () => {
+    const h = fixture()
+    const first = await h.pages.acquireReadLease(42, () => true, () => true)
+    await first.release(); expect(h.detach).toHaveBeenCalledTimes(1)
+    const second = await h.pages.acquireReadLease(42, () => true, () => true)
+    await h.pages.prepareViewportCapture(42, () => true, () => true)
+    await second.release(); expect(h.detach).toHaveBeenCalledTimes(1)
+    await h.pages.detachVisual(42)
+    await h.pages.attachCreated(42, () => true)
+    const automatic = await h.pages.acquireReadLease(42, () => true, () => true)
+    await automatic.command('Runtime.disable'); await automatic.release()
+    expect(h.pages.has(42)).toBe(true)
+    expect(h.commands.mock.calls.some(([, method]) => method === 'Runtime.disable')).toBe(false)
+  })
+  it('refuses arbitrary commands and events from another tab or child session', async () => {
+    const h = fixture(); let current = true
+    const lease = await h.pages.acquireReadLease(42, () => current, () => current)
+    const listener = vi.fn(); lease.subscribe(listener)
+    h.event({ tabId: 7 }, 'Runtime.consoleAPICalled', {})
+    h.event({ tabId: 42, sessionId: 'child' }, 'Runtime.consoleAPICalled', {})
+    expect(listener).not.toHaveBeenCalled()
+    await expect(lease.command('Runtime.evaluate' as never)).rejects.toThrow('not allowed')
+    await expect(lease.command('Network.getResponseBody' as never)).rejects.toThrow('not allowed')
+    current = false
+    await expect(lease.command('Network.enable')).rejects.toThrow('revoked')
+    h.event({ tabId: 42 }, 'Runtime.consoleAPICalled', {})
+    expect(listener).not.toHaveBeenCalled()
+    await lease.release()
+  })
+  it('tracks default native unique contexts without confusing a reused numeric ID', async () => {
+    const h = fixture(); await h.pages.attachCreated(42, () => true)
+    h.event({ tabId: 42 }, 'Runtime.executionContextCreated', { context: { id: 7, uniqueId: 'a', auxData: { frameId: 'main', isDefault: true } } })
+    const lease = await h.pages.acquireReadLease(42, () => true, () => true)
+    expect(lease.contexts()).toEqual([{ id: 7, uniqueId: 'a', frameId: 'main' }])
+    h.event({ tabId: 42 }, 'Runtime.executionContextCreated', { context: { id: 7, uniqueId: 'b', auxData: { frameId: 'main', isDefault: true } } })
+    h.event({ tabId: 42 }, 'Runtime.executionContextDestroyed', { executionContextId: 7, executionContextUniqueId: 'a' })
+    expect(lease.contexts()).toEqual([{ id: 7, uniqueId: 'b', frameId: 'main' }])
+    await lease.release()
+  })
+})
+
 describe('new-tab debugger transport', () => {
   it('captures an explicitly authorized native target without querying or activating the human tab', async () => {
     const h = fixture()

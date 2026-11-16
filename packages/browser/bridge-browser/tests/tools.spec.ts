@@ -5,12 +5,12 @@ import { BridgeToolError } from '../src/server.ts'
 import { BROWSER_TOOL_NAMES, registerBrowserTools } from '../src/tools.ts'
 
 describe('registerBrowserTools', () => {
-  it.each([undefined, ' obs_test '])('forwards only an explicit snapshot baseline and disables implicit deltas: %s', async baseObservationId => {
+  it.each([undefined, ' obs_test '])('uses full model snapshots without attested baseline projection: %s', async baseObservationId => {
     const h = makeHarness(); registerBrowserTools(h.ctx, h.bridge, { toolTimeoutMs: 1000, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
     const tool = h.registered.find(item => item.name === 'browser_snapshot')!.definition.execute as (a: unknown, e: unknown) => Promise<unknown>
     const signal = new AbortController().signal
     await tool({ delta: true, ...(baseObservationId === undefined ? {} : { baseObservationId }), sessionId: 'forged', internalBase: 'forged' }, { signal })
-    expect(h.requestTool).toHaveBeenCalledWith('browser_snapshot', baseObservationId === undefined ? { delta: false } : { delta: true, baseObservationId: 'obs_test' }, signal, 1000)
+    expect(h.requestTool).toHaveBeenCalledWith('browser_snapshot', { delta: false }, signal, 1000)
   })
   it.each([null, 1, '', 'x'.repeat(201)])('refuses malformed snapshot baseline data before dispatch: %s', async baseObservationId => {
     const h = makeHarness(); registerBrowserTools(h.ctx, h.bridge, { toolTimeoutMs: 1000, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
@@ -28,6 +28,16 @@ describe('registerBrowserTools', () => {
     expect(JSON.stringify(result.content)).toContain('read-only for direct editing')
     expect(JSON.stringify(result.content)).not.toContain('synthetic-secret')
     expect(JSON.stringify(result.content)).not.toContain('executor diagnostic')
+  })
+  it('does not treat a rendered snapshot or an explicit baseline ID as model delivery proof', async () => {
+    const h = makeHarness(); registerBrowserTools(h.ctx, h.bridge, { toolTimeoutMs: 1000, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
+    const execute = h.registered.find(item => item.name === 'browser_snapshot')!.definition.execute as (a: unknown, e: unknown) => Promise<{ text: string; coverage: { complete: boolean; projection: string } }>
+    h.requestTool.mockResolvedValueOnce({ text: 'Raw snapshot' })
+    const result = await execute({ delta: true, baseObservationId: 'obs_00000000-0000-4000-8000-000000000001' }, { signal: new AbortController().signal })
+    expect(result.text).toContain('model-projection-not-attested')
+    expect(result.coverage).toMatchObject({ complete: false, projection: 'not-attested', metadataAvailable: false })
+    h.requestTool.mockResolvedValueOnce({ text: 'PRIVATE-BODY', coverage: { complete: true, headers: 'PRIVATE-HEADER' } })
+    await expect(execute({}, { signal: new AbortController().signal })).rejects.toThrow('invalid snapshot coverage')
   })
   function makeHarness() {
     const registered: { name: string; definition: Record<string, unknown> }[] = []
@@ -74,11 +84,11 @@ describe('registerBrowserTools', () => {
     await expect(tool('browser_screenshot')({}, { agent, signal })).rejects.toThrow('paused for this turn')
     await expect(tool('browser_read_design_styles')({}, { agent, signal })).rejects.toThrow('paused for this turn')
     expect(h.requestTool).toHaveBeenCalledTimes(1)
-    await expect(tool('browser_snapshot')({}, { agent: other, signal })).resolves.toEqual({ text: 'ok' })
+    await expect(tool('browser_snapshot')({}, { agent: other, signal })).resolves.toMatchObject({ text: expect.stringContaining('ok'), coverage: { complete: false, projection: 'not-attested' } })
     const on = h.ctx.on as ReturnType<typeof vi.fn>
     const event = on.mock.calls.find(([name]) => name === 'session/event')![1]
     event({ id: agent.id }, { type: 'turn/start' })
-    await expect(tool('browser_snapshot')({}, { agent, signal })).resolves.toEqual({ text: 'ok' })
+    await expect(tool('browser_snapshot')({}, { agent, signal })).resolves.toMatchObject({ text: expect.stringContaining('ok'), coverage: { complete: false, projection: 'not-attested' } })
     expect(h.requestTool).toHaveBeenCalledTimes(3)
   })
 
@@ -122,6 +132,21 @@ describe('registerBrowserTools', () => {
     expect(registered.map((r) => r.name).sort()).toEqual([...BROWSER_TOOL_NAMES].sort())
     expect(disposers.size).toBe(BROWSER_TOOL_NAMES.length)
     for (const dispose of disposers.values()) dispose()
+  })
+
+  it('validates diagnostic metadata again at the Host and never renders injected fields', async () => {
+    const h = makeHarness(); registerBrowserTools(h.ctx, h.bridge, { toolTimeoutMs: 1000, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
+    const tool = h.registered.find(item => item.name === 'browser_get_diagnostics')!.definition
+    const execute = tool.execute as (a: unknown, e: unknown) => Promise<{ text: string }>
+    const exec = { signal: new AbortController().signal }
+    const valid = { version: 1, captureId: 'diag_00000000-0000-4000-8000-000000000001', startedAt: 1, scope: 'authorized-top-document', complete: false,
+      omitted: ['headers', 'bodies'], dropped: 0, entries: [] }
+    h.requestTool.mockResolvedValueOnce(valid)
+    expect((await execute({}, exec)).text).toContain('not proof of business success')
+    h.requestTool.mockResolvedValueOnce({ ...valid, headers: { authorization: 'PRIVATE-AUTH' } })
+    await expect(execute({}, exec)).rejects.toThrow('invalid page diagnostic')
+    await expect(Promise.resolve().then(() => execute({ limit: 101 }, exec))).rejects.toThrow('limit')
+    expect(h.requestTool).toHaveBeenCalledTimes(2)
   })
 
   it('reads inspector fields through the existing authorized text action and original session', async () => {

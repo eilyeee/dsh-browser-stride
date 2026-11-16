@@ -142,6 +142,42 @@ async function taskRpc(h: { ws: WebSocket; frames: BridgeFrame[] }, method: stri
 }
 
 describe('recorded tool dispatch', () => {
+  it('persists unconfirmed readback, refuses a queued second write, and still dispatches a scoped audit read', async () => {
+    const h = await connectedLedger(true), signal = new AbortController().signal, sid = 'ordinary-audit'
+    const first = h.bridge.requestTool('browser_click', {}, signal, 1000, sid)
+    const second = h.bridge.requestTool('browser_click', {}, signal, 1000, sid).catch(error => error)
+    await waitFor(() => h.frames.some(frame => frame.t === 'tool.call'))
+    const call = h.frames.find((frame): frame is Extract<BridgeFrame, { t: 'tool.call' }> => frame.t === 'tool.call')!
+    expect(h.frames.filter(frame => frame.t === 'tool.call')).toHaveLength(1)
+    send(h.ws, { t: 'tool.result', id: call.id, action: call.action, ok: true, result: { text: 'not confirmed', feedback: { version: 1, state: 'readback-unconfirmed', businessChange: 'not-verified' } } })
+    await first
+    expect(await second).toBeInstanceOf(BridgeToolError)
+    expect(h.ledger.get(call.id)?.receipt).toEqual({ ok: true, readbackUnconfirmed: true })
+    const read = h.bridge.requestTool('browser_snapshot', {}, signal, 1000, sid)
+    await waitFor(() => h.frames.filter(frame => frame.t === 'tool.call').length === 2)
+    const snapshot = h.frames.filter((frame): frame is Extract<BridgeFrame, { t: 'tool.call' }> => frame.t === 'tool.call')[1]!
+    expect(snapshot.name).toBe('browser_snapshot')
+    send(h.ws, { t: 'tool.result', id: snapshot.id, action: snapshot.action, ok: true, result: { text: 'current state' } })
+    expect(await read).toEqual({ text: 'current state' })
+    expect(() => h.bridge.requestTool('browser_press', { key: 'Enter' }, signal, 1000, sid)).toThrow()
+  })
+  it('allows post-pause read-only review through every durable dispatch boundary without resuming a run', async () => {
+    const h = await connectedLedger(true), sid = asSessionId('paused-audit')
+    const queued = await h.storage.store.create({ sessionId: sid, requiredCriteriaIds: ['saved'] })
+    const run = await h.storage.store.transition(queued.runId, queued.version, 'running')
+    await h.ledger.prepare({ requestId: 'lost-write', connectionId: 'old', sessionId: sid, runId: run.runId, controlRevision: run.controlRevision,
+      name: 'browser_click', args: {}, expiresAt: Date.now() + 60000 })
+    await h.ledger.markSent('lost-write'); await h.ledger.settle('lost-write', { state: 'unresolved', reason: 'connection-closed' })
+    await h.storage.store.control(run.runId, run.version, 'pause')
+    const read = h.bridge.requestTool('browser_snapshot', {}, new AbortController().signal, 1000, sid)
+    await waitFor(() => h.frames.some(frame => frame.t === 'tool.call'))
+    const call = h.frames.find((frame): frame is Extract<BridgeFrame, { t: 'tool.call' }> => frame.t === 'tool.call')!
+    expect(call.execution).toEqual({ kind: 'legacy' })
+    send(h.ws, { t: 'tool.result', id: call.id, action: call.action, ok: true, result: { text: 'audit only' } })
+    expect(await read).toEqual({ text: 'audit only' })
+    expect(h.storage.store.get(run.runId)?.state).toBe('paused')
+    expect(() => h.bridge.requestTool('browser_click', {}, new AbortController().signal, 1000, sid)).toThrow()
+  })
   it.each(['browser_click_at', 'browser_measure_layout', 'browser_set_design_zoom'])('reports unsupported %s before sending or recording an action', async name => {
     const h = await connectedLedger()
     expect(() => h.bridge.requestTool(name, {}, new AbortController().signal))
@@ -1136,6 +1172,25 @@ describe('BridgeServer', () => {
     expect(call.args).toEqual(host && extension ? args : { delta: false })
     send(ws, { t: 'tool.result', id: call.id, action: call.action, ok: true, result: { text: 'Synthetic snapshot' } })
     expect(await pending).toEqual({ text: 'Synthetic snapshot' }); ws.close()
+  })
+  it.each([[false, false], [false, true], [true, false], [true, true]])('requires both peers for native diagnostics, host=%s extension=%s', async (host, extension) => {
+    const h = await startBridge({ caps: { ...CAPS, pageDiagnostics: host } }); harnesses.push(h)
+    const { ws, frames } = await connect(h.url)
+    send(ws, { t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: TOKEN, caps: { ...CAPS, pageDiagnostics: extension } })
+    await waitFor(() => frames.some(frame => frame.t === 'hello.ok'))
+    const hello = frames.find((frame): frame is Extract<BridgeFrame, { t: 'hello.ok' }> => frame.t === 'hello.ok')!
+    expect(hello.caps.pageDiagnostics === true).toBe(host && extension)
+    if (!host || !extension) {
+      expect(() => h.bridge.requestTool('browser_get_diagnostics', { limit: 30 }, new AbortController().signal)).toThrow('updated Chrome extension')
+      expect(frames.some(frame => frame.t === 'tool.call')).toBe(false)
+    } else {
+      const pending = h.bridge.requestTool('browser_get_diagnostics', { limit: 30 }, new AbortController().signal)
+      await waitFor(() => frames.some(frame => frame.t === 'tool.call'))
+      const call = frames.find((frame): frame is Extract<BridgeFrame, { t: 'tool.call' }> => frame.t === 'tool.call')!
+      send(ws, { t: 'tool.result', id: call.id, action: call.action, ok: true, result: { synthetic: true } })
+      expect(await pending).toEqual({ synthetic: true })
+    }
+    ws.close()
   })
   it('preserves the authenticated no-selection error code across wire-v4', async () => {
     const h = await startBridge({ caps: { ...CAPS, designViewZoom: true } }); harnesses.push(h)

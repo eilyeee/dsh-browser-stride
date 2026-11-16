@@ -1,10 +1,10 @@
 /** Metadata and pause/stop controls; native target handoff is handled by the server. */
 import { z } from 'zod'
 import { asRunId, asSessionId } from './contracts/ids.ts'
-import { summarizeActionFacts } from './contracts/outcome.ts'
 import { isTerminal } from './contracts/run.ts'
-import { BrowserRunStoreError, type BrowserRunStore, type BrowserRunRecord } from './run-store.ts'
+import { BrowserRunStoreError, summarizeReviewedFacts, type BrowserRunStore, type BrowserRunRecord } from './run-store.ts'
 import { taskBudgetExhausted } from './task-budget.ts'
+import { requiresDispatchReview } from './dispatch-ledger.ts'
 import { BROWSER_RUN_LIST_LIMIT, BRIDGE_RUN_LIST_METHOD, BRIDGE_RUN_CONTROL_METHOD, type BrowserRunList, type BrowserRunSummary } from './protocol.ts'
 
 export type RunPanelStore = Pick<BrowserRunStore, 'list' | 'get' | 'control' | 'dispatches'>
@@ -22,9 +22,8 @@ function priority(run: BrowserRunRecord): number {
 }
 
 function reconciliationRequired(store: RunPanelStore, sessionId: string): boolean {
-  return store.list(asSessionId(sessionId)).some(run => run.recoveryRequired || summarizeActionFacts(run.facts).pendingReconciliation.length > 0)
-    || store.dispatches.list(sessionId).some(row => row.effect === 'write'
-      && (row.state === 'unresolved' || (row.state === 'returned' && row.receipt?.ok === false)))
+  return store.list(asSessionId(sessionId)).some(run => run.recoveryRequired || summarizeReviewedFacts(run).pendingReconciliation.length > 0)
+    || store.dispatches.list(sessionId).some(requiresDispatchReview)
 }
 
 function summary(run: BrowserRunRecord, requiresReconciliation: boolean, pendingWrites: boolean, newPage?: (run: BrowserRunRecord) => boolean): BrowserRunSummary {
@@ -34,7 +33,7 @@ function summary(run: BrowserRunRecord, requiresReconciliation: boolean, pending
   return { runId: run.runId, sessionId: run.sessionId, state: run.state, version: run.version,
     controlRevision: run.controlRevision, updatedAt: run.updatedAt, recoveryRequired: run.recoveryRequired, requiresReconciliation,
     ...(run.pauseReason === undefined ? {} : { pauseReason: run.pauseReason }),
-    canRetarget: run.state === 'paused' && hasBudget && !run.recoveryRequired && !requiresReconciliation && !pendingWrites,
+    canRetarget: (run.state === 'paused' || run.state === 'blocked') && hasBudget && !run.recoveryRequired && !requiresReconciliation && !pendingWrites,
     ...(run.task === undefined ? {} : { task: { ...run.task,
       canStart, ...(newPage === undefined ? {} : { canStartNewPage: canStart }) } }),
     controls: [...(run.state === 'running' || run.state === 'queued' ? ['pause' as const] : []),

@@ -3,11 +3,11 @@ import { join, resolve } from 'node:path'
 import { chromium, findChromiumExecutable } from './chromium.mjs'
 import { configurePanelConnection, installConnectionProbe, within } from './extension-connection.mjs'
 
-export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl, pairingCode, issuePairingCode, deferPairing = false, trustedOrigin, connectTimeoutMs = 30_000, actionTimeoutMs = 8_000, chromiumArgs = [], onPhase }) {
+export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl, pairingCode, issuePairingCode, deferPairing = false, trustedOrigin, connectTimeoutMs = 30_000, actionTimeoutMs = 8_000, chromiumArgs = [], onPhase, extensionDir: suppliedExtensionDir }) {
   if (!deferPairing && typeof issuePairingCode !== 'function' && (typeof pairingCode !== 'string' || !/^[a-f0-9]{32}$/u.test(pairingCode))) {
     throw new Error('a fresh extension pairing code is required')
   }
-  const extensionDir = resolve(repoRoot, 'extensions/dsh-browser/dist')
+  const extensionDir = suppliedExtensionDir === undefined ? resolve(repoRoot, 'extensions/dsh-browser/dist') : resolve(suppliedExtensionDir)
   const executablePath = await findChromiumExecutable(undefined, { requireExtensions: true })
   if (executablePath === undefined) throw new Error('no Chromium executable found; set PLAYWRIGHT_CHROMIUM_PATH')
   const tempParent = resolve(benchmarkRoot, '.tmp')

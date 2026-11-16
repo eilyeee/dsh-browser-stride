@@ -59,6 +59,9 @@ import { browserRunPanelRpc, browserRunPanelFailure, type RunPanelStore } from '
 import { TaskBriefError, taskBriefInputSchema, type TaskBriefStore } from './task-brief.ts'
 import { TASK_BRIEF_GET, TASK_BRIEF_SAVE, TASK_BRIEF_REVIEW, TASK_BRIEF_OPEN } from './task-brief-contract.ts'
 import { briefSessionItems, openSessionBrief, saveSessionBrief } from './task-brief-sessions.ts'
+import { parseToolFeedback } from './tool-feedback.ts'
+import { NativeRecoveryError, type NativeRecovery } from './native-recovery.ts'
+import { NATIVE_RECOVERY_PREPARE, NATIVE_RECOVERY_CONFIRM, recoveryDecisionsSchema } from './native-review.ts'
 
 /**
  * Host management methods that must not be granted by browser pairing alone.
@@ -133,9 +136,10 @@ export interface BridgeServerDeps {
   /** Production always provides the durable ledger; optional for transport-only unit fixtures. */
   dispatches?: Pick<BrowserDispatchLedger, 'prepare' | 'markSent' | 'settle' | 'get'>
   /** Trusted Host async execution scopes; never caller/model-supplied ids. */
-  runs?: Pick<BrowserRunStore, 'executionFor' | 'assertDispatchAuthority' | 'retargetPaused' | 'startTask'> & RunPanelStore
+  runs?: Pick<BrowserRunStore, 'executionFor' | 'assertDispatchAuthority' | 'assertObservationAuthority' | 'retargetPaused' | 'startTask'> & RunPanelStore
     & Partial<Pick<BrowserRunStore, 'pauseDisconnectedTask' | 'pauseLostTargetTask'>>
   tasks?: Pick<BrowserTaskRuntime, 'selectTarget' | 'approval'> & Partial<Pick<BrowserTaskRuntime, 'validateTarget'>>
+  recovery?: NativeRecovery
   /**
    * Test seam: force the remote address seen by the privilege gate. The
    * sandbox cannot bind arbitrary loopback literals, so the non-loopback
@@ -181,6 +185,8 @@ interface ReadyConnection {
   elementScroll: boolean
   elementReadScope: boolean
   snapshotBase: boolean
+  pageDiagnostics: boolean
+  manualRecovery: boolean
   designViewZoom: boolean
 }
 
@@ -219,6 +225,8 @@ export class BridgeServer {
   /** Kept across socket replacement; a new connection cannot borrow an old pin. */
   private readonly runTargets = new Map<string, { sessionId: string; controlRevision: number; connectionId: string; id: string }>()
   private readonly operations = new Set<Promise<unknown>>()
+  private readonly writeTurns = new Map<string | undefined, Promise<unknown>>()
+  private queuedWrites = 0
   private closed = false
   private disposal: Promise<void> | undefined
 
@@ -261,7 +269,7 @@ export class BridgeServer {
     sessionId?: string,
   ): Promise<unknown> {
     let execution: BrowserRunExecution | undefined
-    try { execution = this.deps.runs?.executionFor(sessionId) }
+    try { execution = this.deps.runs?.executionFor(sessionId, isReadOnlyBrowserTool(name) ? 'observe' : 'dispatch') }
     catch { throw new BridgeToolError('action-failed', 'Browser run execution context is missing, expired or not permitted to dispatch. Re-establish the run context before further actions.', true) }
     if (execution !== undefined) {
       if (isRunTabMutation(name)) throw new BridgeToolError('execution-denied', 'Run-bound tab creation, follow and close are unavailable. Pause the task and use its selected-page continuation control.', true)
@@ -274,6 +282,9 @@ export class BridgeServer {
       throw new BridgeToolError('bridge-closed', 'no browser extension is connected to the bridge', true)
     }
     if (name === 'browser_snapshot' && args.delta === true && args.baseObservationId === undefined) args = { ...args, delta: false }
+    if (name === 'browser_get_diagnostics' && !conn.pageDiagnostics) {
+      throw new BridgeToolError('content-unavailable', 'Page diagnostics require an updated Chrome extension and Host Bridge.', true)
+    }
     if (name === 'browser_snapshot' && args.baseObservationId !== undefined && !conn.snapshotBase) {
       throw new BridgeToolError('content-unavailable', 'Explicit snapshot baselines require an updated extension and Host Bridge. Omit the base and request a full snapshot.', true)
     }
@@ -310,7 +321,21 @@ export class BridgeServer {
         ...(sessionId === undefined ? {} : { sessionId }) })).digest('hex')
       return this.sendTool(conn, id, name, copied, signal, expiresAt, { actionId, requestDigest }, sessionId)
     }
-    return this.track(this.recordAndSend(conn, id, name, copied, signal, expiresAt, sessionId, execution, targetBinding))
+    const send = () => this.recordAndSend(conn, id, name, copied, signal, expiresAt, sessionId, execution, targetBinding)
+    return this.track(isReadOnlyBrowserTool(name) ? send() : this.orderedWrite(sessionId, send))
+  }
+
+  /** Settle the preceding durable receipt before another write's admission. */
+  private orderedWrite<T>(sessionId: string | undefined, work: () => Promise<T>): Promise<T> {
+    if (this.queuedWrites >= 64) throw new BridgeToolError('action-failed', 'Browser write queue is full. Wait for current operations to finish.', true)
+    this.queuedWrites++
+    const next = (this.writeTurns.get(sessionId) ?? Promise.resolve()).catch(() => {}).then(work)
+    this.writeTurns.set(sessionId, next)
+    void next.finally(() => {
+      this.queuedWrites--
+      if (this.writeTurns.get(sessionId) === next) this.writeTurns.delete(sessionId)
+    }).catch(() => {})
+    return next
   }
 
   private expectedRunTarget(execution: BrowserRunExecution, conn: ReadyConnection): string | undefined {
@@ -345,7 +370,7 @@ export class BridgeServer {
         ...(conn.installationId === undefined ? {} : { installationId: conn.installationId }) })
       if (prepared.state !== 'prepared' || prepared.identityVersion !== 4) throw new Error('request already consumed or incompatible')
       action = { actionId: prepared.actionId, requestDigest: prepared.requestDigest }
-      let stopped = this.beforeDispatch(conn, signal, expiresAt, sessionId, execution)
+      let stopped = this.beforeDispatch(conn, signal, expiresAt, sessionId, execution, isReadOnlyBrowserTool(name))
       if (stopped !== undefined) {
         await ledger.settle(id, { state: 'not_sent', reason: stopped.reason })
         throw stopped.error
@@ -353,7 +378,7 @@ export class BridgeServer {
       // Conservative crash boundary: persistence commits before socket.send.
       // A crash between these two operations is unresolved, never safe to retry.
       await ledger.markSent(id)
-      stopped = this.beforeDispatch(conn, signal, expiresAt, sessionId, execution)
+      stopped = this.beforeDispatch(conn, signal, expiresAt, sessionId, execution, isReadOnlyBrowserTool(name))
       if (stopped !== undefined) {
         await ledger.settle(id, { state: 'not_sent', reason: stopped.reason })
         throw stopped.error
@@ -365,12 +390,12 @@ export class BridgeServer {
     return this.sendTool(conn, id, name, args, signal, expiresAt, action, sessionId, execution, targetBinding)
   }
 
-  private beforeDispatch(conn: ReadyConnection, signal: AbortSignal, expiresAt: number, sessionId?: string, execution?: BrowserRunExecution): { reason: 'cancelled' | 'expired' | 'connection-closed'; error: BridgeToolError } | undefined {
+  private beforeDispatch(conn: ReadyConnection, signal: AbortSignal, expiresAt: number, sessionId?: string, execution?: BrowserRunExecution, readOnly = false): { reason: 'cancelled' | 'expired' | 'connection-closed'; error: BridgeToolError } | undefined {
     if (signal.aborted) return { reason: 'cancelled', error: new BridgeToolError('bridge-closed', 'tool call cancelled before dispatch', true) }
     if (this.closed || this.current !== conn || conn.ws.readyState !== WebSocket.OPEN) return { reason: 'connection-closed', error: new BridgeToolError('bridge-closed', 'extension connection changed before dispatch', true) }
     if (Date.now() >= expiresAt) return { reason: 'expired', error: new BridgeToolError('timeout', 'browser action expired before dispatch', true) }
     try {
-      if (this.deps.runs?.executionFor(sessionId) !== execution) throw new Error('execution context changed')
+      if (this.deps.runs?.executionFor(sessionId, readOnly ? 'observe' : 'dispatch') !== execution) throw new Error('execution context changed')
     } catch {
       return { reason: 'cancelled', error: new BridgeToolError('action-failed', 'Browser execution authority changed or a previous write requires reconciliation; no action was sent', true) }
     }
@@ -390,7 +415,11 @@ export class BridgeServer {
           : payload.targetBinding !== undefined && this.bindRunTarget(execution, conn, payload.targetBinding),
         authorityCurrent: () => {
           if (signal.aborted || this.current !== conn || conn.abort.signal.aborted || Date.now() >= expiresAt) return false
-          try { this.deps.runs?.assertDispatchAuthority(execution, sessionId); return true } catch { return false }
+          try {
+            if (isReadOnlyBrowserTool(name)) this.deps.runs?.assertObservationAuthority(execution, sessionId)
+            else this.deps.runs?.assertDispatchAuthority(execution, sessionId)
+            return true
+          } catch { return false }
         }, finish: (settlement, value, error) => {
         if (this.pendingTools.get(id) !== pending) return
         clearTimeout(timer)
@@ -535,6 +564,8 @@ export class BridgeServer {
           ...(frame.caps.elementScroll === true && this.deps.caps.elementScroll === true ? { elementScroll: true } : {}),
           ...(frame.caps.elementReadScope === true && this.deps.caps.elementReadScope === true ? { elementReadScope: true } : {}),
           ...(frame.caps.snapshotBase === true && this.deps.caps.snapshotBase === true ? { snapshotBase: true } : {}),
+          ...(frame.caps.pageDiagnostics === true && this.deps.caps.pageDiagnostics === true ? { pageDiagnostics: true } : {}),
+          ...(frame.caps.manualRecovery === true && this.deps.caps.manualRecovery === true ? { manualRecovery: true } : {}),
           ...(frame.caps.designViewZoom === true && this.deps.caps.designViewZoom === true ? { designViewZoom: true } : {}),
           snapshotMaxChars: Math.min(this.deps.caps.snapshotMaxChars, frame.caps.snapshotMaxChars),
           maxInteractiveItems: Math.min(this.deps.caps.maxInteractiveItems, frame.caps.maxInteractiveItems),
@@ -597,7 +628,7 @@ export class BridgeServer {
         }
       }
     })()
-    this.current = { connectionId: randomUUID(), ws, remoteAddress, abort, pump, ping, orderedSessionRpcs: new Map(), confirmedTools: new Set(), lostRunTargets: new Set(), taskTargetLoss: caps.taskTargetLoss === true, visualViewport: caps.visualViewport === true, layoutMetrics: caps.layoutMetrics === true, elementScroll: caps.elementScroll === true, elementReadScope: caps.elementReadScope === true, snapshotBase: caps.snapshotBase === true, designViewZoom: caps.designViewZoom === true,
+    this.current = { connectionId: randomUUID(), ws, remoteAddress, abort, pump, ping, orderedSessionRpcs: new Map(), confirmedTools: new Set(), lostRunTargets: new Set(), taskTargetLoss: caps.taskTargetLoss === true, visualViewport: caps.visualViewport === true, layoutMetrics: caps.layoutMetrics === true, elementScroll: caps.elementScroll === true, elementReadScope: caps.elementReadScope === true, snapshotBase: caps.snapshotBase === true, pageDiagnostics: caps.pageDiagnostics === true, manualRecovery: caps.manualRecovery === true, designViewZoom: caps.designViewZoom === true,
       ...(installationId === undefined ? {} : { installationId }) }
     sendFrame(ws, { t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps, ...(credential === undefined ? {} : { credential }) })
     ws.once('close', () => {
@@ -697,7 +728,7 @@ export class BridgeServer {
         const run = runs.get(asRunId(payload.runId))
         const eligible = run?.task !== undefined && run.sessionId === payload.sessionId
           && ['queued', 'running', 'paused'].includes(run.state)
-          && (run.controlRevision === payload.controlRevision || (run.state === 'paused' && run.controlRevision + 2 === payload.controlRevision))
+          && (run.controlRevision === payload.controlRevision || (['paused', 'blocked'].includes(run.state) && run.controlRevision + 2 === payload.controlRevision))
         if (!eligible) {
           sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true, result: { accepted: false } })
           return
@@ -832,6 +863,26 @@ export class BridgeServer {
       sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true, result: { ...pending.confirmation, confirmed: true } })
       return
     }
+    if (frame.method.startsWith('bridge.browserRecovery.')) {
+      try {
+        if (conn.manualRecovery !== true || this.deps.recovery === undefined) throw new NativeRecoveryError('review-unavailable')
+        const id = z.string().min(1).max(200).refine(value => value.trim() === value)
+        let result: unknown
+        if (frame.method === NATIVE_RECOVERY_PREPARE) {
+          const payload = z.strictObject({ sessionId: id }).parse(frame.payload)
+          result = this.deps.recovery.prepare(payload.sessionId, conn.connectionId, conn)
+        } else if (frame.method === NATIVE_RECOVERY_CONFIRM) {
+          const payload = z.strictObject({ sessionId: id, reviewId: id, decisions: recoveryDecisionsSchema }).parse(frame.payload)
+          await this.deps.recovery.confirm(payload.sessionId, payload.reviewId, payload.decisions, conn.connectionId, conn, conn.abort.signal)
+          result = { reviewed: true, resumed: false, completed: false }
+        } else throw new NativeRecoveryError('review-unavailable')
+        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true, result })
+      } catch (error) {
+        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false, error: {
+          code: error instanceof NativeRecoveryError ? error.code : 'review-unavailable', message: 'Native review was not confirmed. Refresh, inspect current business state, and review again.' } })
+      }
+      return
+    }
     const management = PRIVILEGED_METHODS.has(frame.method)
       || frame.method.startsWith('settings.') || frame.method.startsWith('credentials.')
     const forbidden = management && this.deps.allowHostManagement !== true
@@ -938,12 +989,13 @@ export class BridgeServer {
   }
 
   private settleTool(conn: ReadyConnection, id: string, action: ToolActionIdentity, ok: boolean, payload: unknown): void {
-    const settlement: DispatchSettlement = { state: 'returned', receipt: transportReceipt(ok, ok ? undefined : payloadCode(payload)) }
+    const settlement: DispatchSettlement = { state: 'returned', receipt: transportReceipt(ok, ok ? undefined : payloadCode(payload),
+      ok && isRecord(payload) && parseToolFeedback(payload.feedback)?.state === 'readback-unconfirmed') }
     const pending = this.pendingTools.get(id)
     if (pending !== undefined) {
       if (pending.owner !== conn || pending.action.actionId !== action.actionId || pending.action.requestDigest !== action.requestDigest) return
       if (ok && !pending.confirmed) {
-        pending.finish({ state: 'returned', receipt: transportReceipt(false, 'execution-denied') }, undefined,
+        pending.finish({ state: 'returned', receipt: transportReceipt(false, 'execution-denied', false, true) }, undefined,
           new BridgeToolError('execution-denied', 'The extension returned success without execution confirmation. Check the page before another write.'))
         return
       }

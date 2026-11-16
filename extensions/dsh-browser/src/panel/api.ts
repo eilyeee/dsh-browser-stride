@@ -14,6 +14,7 @@ import type { ApprovalDecision, ApprovalRequest } from '../security/approval.ts'
 import { parsePageSelection, type PageSelection } from '../selection.ts'
 import { getUiLocale } from '../i18n.ts'
 import type { BrowserPairingStatus } from '../background/pairing-client.ts'
+import type { RecoveryDecisions, RecoveryReply } from '@eilyeee/dsh-browser-stride/src/native-review.ts'
 
 /** Panel-side subset of the extension settings. */
 export type PanelSettings = Settings
@@ -94,6 +95,9 @@ interface SessionResumeHintMessage {
 }
 
 export interface PageAccessStatus { activeGranted: boolean; controlledGranted: boolean; controlledTabId: number | null; revocableTabId: number | null; pages?: AffinityTab[] }
+export interface PageDiagnosticsStatus { enabled: boolean; captureId?: string; startedAt?: number; count: number; dropped: number }
+export interface PageDiagnosticsRequest { action: 'start' | 'stop' | 'status'; sessionId: string; tabId: number; revision: number; expectedUrl: string; captureId?: string }
+export type PageRecoveryRequest = Omit<PageDiagnosticsRequest, 'action' | 'captureId'> & ({ action: 'prepare' } | { action: 'confirm'; reviewId: string; decisions: RecoveryDecisions })
 
 type BackgroundMessage = ({ type: 'page-access' } & PageAccessStatus) | RpcResultMessage | RespondResultMessage | SettingsResultMessage | (Omit<SettingsResultMessage, 'type'> & { type: 'browser-pairing.unpair.result' | 'page-access.revoke.result' }) | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | (Omit<TabAffinityRebindResultMessage, 'type'> & { type: 'browser-run.retarget.result' | 'tab-affinity.unbind.result' }) | SelectionMessage | SessionResumeHintMessage | { type: 'browser-pairing'; status: BrowserPairingStatus }
 
@@ -119,6 +123,8 @@ function panelRpcError(failure: RpcFailurePayload | undefined, fallbackMessage: 
 
 /** The panel API surface. */
 export interface PanelApi {
+  pageRecovery(request: PageRecoveryRequest): Promise<RecoveryReply>
+  pageDiagnostics(request: PageDiagnosticsRequest): Promise<PageDiagnosticsStatus>
   startBrowserPairing(bridgeUrl: string): Promise<void>
   cancelBrowserPairing(): Promise<void>
   unpairBrowser(): Promise<void>
@@ -178,8 +184,17 @@ export function connectPanel(): PanelApi {
 
   function onMessage(message: unknown): void {
     if (typeof message !== 'object' || message === null) return
-    const msg = message as BackgroundMessage
+    const msg = message as BackgroundMessage | { type: 'page-diagnostics.result' | 'page-recovery.result'; id: string; ok: boolean; result?: PageDiagnosticsStatus | RecoveryReply; error?: RpcFailurePayload }
     switch (msg.type) {
+      case 'page-recovery.result':
+      case 'page-diagnostics.result': {
+        const entry = pending.get(msg.id)
+        if (entry === undefined) break
+        pending.delete(msg.id)
+        if (msg.ok && msg.result !== undefined) entry.resolve(msg.result)
+        else entry.reject(panelRpcError(msg.error, getUiLocale() === 'zh' ? '诊断请求未能确认' : 'Diagnostics request was not confirmed'))
+        break
+      }
       case 'browser-pairing':
         for (const listener of pairingListeners) listener(msg.status)
         break
@@ -373,6 +388,30 @@ export function connectPanel(): PanelApi {
   }
 
   return {
+    pageRecovery(request) {
+      const id = crypto.randomUUID()
+      return new Promise<RecoveryReply>((resolve, reject) => {
+        const timer = setTimeout(() => { pending.delete(id); reject(new PanelRpcError('timeout', getUiLocale() === 'zh' ? '人工核对未能确认，请刷新核对状态' : 'Manual review was not confirmed; refresh its state')) }, 30000)
+        const entry = { resolve: (value: unknown) => { clearTimeout(timer); resolve(value as RecoveryReply) }, reject: (error: Error) => { clearTimeout(timer); reject(error) } }
+        pending.set(id, entry)
+        void send({ ...request, type: 'page-recovery', id }, { kind: 'rpc', id }).catch((error: unknown) => {
+          if (pending.get(id) !== entry) return
+          pending.delete(id); entry.reject(connectionError(error))
+        })
+      })
+    },
+    pageDiagnostics(request) {
+      const id = crypto.randomUUID()
+      return new Promise<PageDiagnosticsStatus>((resolve, reject) => {
+        const timer = setTimeout(() => { pending.delete(id); reject(new PanelRpcError('timeout', getUiLocale() === 'zh' ? '诊断请求未能确认，请核对状态' : 'Diagnostics request was not confirmed; check status')) }, 15000)
+        const entry = { resolve: (value: unknown) => { clearTimeout(timer); resolve(value as PageDiagnosticsStatus) }, reject: (error: Error) => { clearTimeout(timer); reject(error) } }
+        pending.set(id, entry)
+        void send({ ...request, type: 'page-diagnostics', id }, { kind: 'rpc', id }).catch((error: unknown) => {
+          if (pending.get(id) !== entry) return
+          pending.delete(id); entry.reject(connectionError(error))
+        })
+      })
+    },
     onPageAccess(callback) { pageAccessListeners.add(callback); return () => { pageAccessListeners.delete(callback) } },
     revokePageAccess(tabId) {
       const id = crypto.randomUUID()

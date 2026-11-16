@@ -5,6 +5,7 @@ import { z } from 'zod'
 import { canonicalize, makeActionId } from './contracts/ids.ts'
 import { isReadOnlyBrowserTool } from './protocol.ts'
 import { toolCommandMaterial } from './tool-identity.ts'
+import { nativeReviewSchema, type NativeReview } from './native-review.ts'
 
 const id = z.string().min(1).max(200).refine(value => value.trim() === value)
 const time = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER)
@@ -13,11 +14,15 @@ const errorCode = z.enum([
   'no-active-tab', 'content-unavailable', 'action-failed', 'timeout', 'bridge-closed', 'bad-args', 'internal', 'unknown',
   'action-duplicate', 'action-conflict', 'receipt-unavailable', 'execution-denied',
 ])
-const receipt = z.strictObject({ ok: z.boolean(), errorCode: errorCode.optional() })
-  .refine(value => value.ok ? value.errorCode === undefined : value.errorCode !== undefined)
-export function transportReceipt(ok: boolean, code?: string): z.infer<typeof receipt> {
+const receipt = z.strictObject({ ok: z.boolean(), errorCode: errorCode.optional(), readbackUnconfirmed: z.literal(true).optional(), notApplied: z.literal(true).optional() })
+  .refine(value => value.ok ? value.errorCode === undefined && value.notApplied === undefined : value.errorCode !== undefined && value.readbackUnconfirmed === undefined)
+// Packaged fixed pre-effect errors. Peer text and arbitrary unknown codes are
+// never promoted to this classification; a view menu may still be open.
+const NO_EFFECT_CODES = new Set(['element-stale', 'target-navigated', 'permission-required', 'approval-denied', 'approval-unavailable', 'approval-timeout', 'no-active-tab', 'bad-args', 'field-readonly', 'design-zoom-not-selected'])
+export function transportReceipt(ok: boolean, code?: string, readbackUnconfirmed = false, notApplied = false): z.infer<typeof receipt> {
   const parsed = errorCode.safeParse(code)
-  return ok ? { ok: true } : { ok: false, errorCode: parsed.success ? parsed.data : 'unknown' }
+  return ok ? { ok: true, ...(readbackUnconfirmed ? { readbackUnconfirmed: true as const } : {}) }
+    : { ok: false, errorCode: parsed.success ? parsed.data : 'unknown', ...((notApplied || NO_EFFECT_CODES.has(code ?? '')) ? { notApplied: true as const } : {}) }
 }
 const recordSchema = z.strictObject({
   actionId: id, requestId: id, connectionId: id,
@@ -33,10 +38,16 @@ const recordSchema = z.strictObject({
   dispatchMarkedAt: time.optional(), settledAt: time.optional(),
   interruption: z.strictObject({ reason, at: time }).optional(),
   receipt: receipt.optional(),
+  nativeReview: nativeReviewSchema.optional(),
+  nativeReviewInvalidated: z.boolean().optional(),
+  previousNativeReview: nativeReviewSchema.optional(),
 }).superRefine((row, ctx) => {
   const marked = row.dispatchMarkedAt !== undefined
   const settled = row.settledAt !== undefined
   const valid = row.expiresAt > 0
+    && (row.nativeReview === undefined || (row.effect === 'write' && (row.state === 'unresolved' || row.state === 'returned') && row.nativeReview.reviewedAt >= row.preparedAt))
+    && (row.nativeReviewInvalidated !== true || row.nativeReview !== undefined)
+    && (row.previousNativeReview === undefined || row.nativeReview !== undefined)
     && ((row.runId === undefined) === (row.controlRevision === undefined))
     && (row.targetBinding === undefined || (row.runId !== undefined && row.identityVersion === 4))
     && (row.runId === undefined || (row.sessionId !== undefined && row.identityVersion !== undefined))
@@ -54,6 +65,11 @@ const recordSchema = z.strictObject({
 })
 
 export type DispatchRecord = z.infer<typeof recordSchema>
+/** A late receipt invalidates an earlier human review, including a successful receipt. */
+export function requiresDispatchReview(row: DispatchRecord): boolean {
+  return row.effect === 'write' && (row.nativeReview === undefined || row.nativeReviewInvalidated === true)
+    && (row.state === 'unresolved' || row.state === 'returned' && (row.receipt?.ok === false && row.receipt.notApplied !== true || row.receipt?.readbackUnconfirmed === true) || row.nativeReviewInvalidated === true)
+}
 export type DispatchSettlement =
   | { state: 'not_sent' | 'unresolved'; reason: z.infer<typeof reason> }
   | { state: 'returned'; receipt: z.infer<typeof receipt> }
@@ -160,13 +176,25 @@ export class BrowserDispatchLedger {
           return structuredClone(row)
         }
         if (row.state !== 'sent_unconfirmed' && row.state !== 'unresolved') throw new DispatchLedgerError('invalid-state')
-        return this.save({ ...row, state: 'returned', settledAt: now, receipt: result.receipt })
+        return this.save({ ...row, state: 'returned', settledAt: now, receipt: result.receipt,
+          ...(row.nativeReview === undefined ? {} : { nativeReviewInvalidated: true }) })
       }
       if (row.state === 'returned' || row.state === result.state) return structuredClone(row)
       if (row.state !== 'prepared' && row.state !== 'sent_unconfirmed') throw new DispatchLedgerError('invalid-state')
       if (result.state === 'unresolved' && row.state !== 'sent_unconfirmed') throw new DispatchLedgerError('invalid-state')
       return this.save({ ...row, state: result.state, settledAt: now,
         interruption: { reason: result.reason, at: now } })
+    })
+  }
+
+  /** Preserve the original transport outcome and command identity after native review. */
+  review(requestId: string, requestDigest: string, review: NativeReview): Promise<DispatchRecord> {
+    const parsed = nativeReviewSchema.parse(review)
+    return this.exclusive(async () => {
+      const row = this.require(requestId)
+      if (row.requestDigest !== requestDigest || !requiresDispatchReview(row)) throw new DispatchLedgerError('invalid-state')
+      return this.save({ ...row, nativeReview: parsed, nativeReviewInvalidated: false,
+        ...(row.nativeReview === undefined ? {} : { previousNativeReview: row.nativeReview }) })
     })
   }
 

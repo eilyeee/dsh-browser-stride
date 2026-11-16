@@ -11,6 +11,44 @@ afterEach(() => {
 })
 
 describe('panel protocol', () => {
+  it('correlates a manual review offer/commit and does not replay an uncertain acknowledgement', async () => {
+    vi.useFakeTimers()
+    let receive: ((message: unknown) => void) | undefined
+    const postMessage = vi.fn()
+    vi.stubGlobal('chrome', { runtime: { connect: vi.fn(() => ({ postMessage,
+      onMessage: { addListener: (callback: (message: unknown) => void) => { receive = callback } }, onDisconnect: { addListener: vi.fn() } })) } })
+    const api = connectPanel(), scope = { sessionId: 'selected', tabId: 42, revision: 3, expectedUrl: 'https://example.test/' }
+    const first = api.pageRecovery({ ...scope, action: 'prepare' })
+    const sent = postMessage.mock.calls[0]![0]
+    expect(sent).toMatchObject({ ...scope, action: 'prepare', type: 'page-recovery' })
+    const offer = { reviewId: 'review-synthetic', expiresAt: 12345, observationRequestId: 'observation', items: [{ key: 'w:action', kind: 'write', label: 'browser_click' }] }
+    receive?.({ type: 'page-recovery.result', id: sent.id, ok: true, result: offer })
+    expect(await first).toEqual(offer)
+    const second = api.pageRecovery({ ...scope, action: 'confirm', reviewId: offer.reviewId, decisions: [{ key: 'w:action', decision: 'applied' }] }).catch(error => error)
+    await vi.advanceTimersByTimeAsync(30000)
+    expect(await second).toMatchObject({ code: 'timeout' })
+    expect(postMessage).toHaveBeenCalledTimes(2)
+  })
+  it('correlates native diagnostic requests and never replays an uncertain enable', async () => {
+    vi.useFakeTimers()
+    let receive: ((message: unknown) => void) | undefined
+    const postMessage = vi.fn()
+    vi.stubGlobal('chrome', { runtime: { connect: vi.fn(() => ({ postMessage,
+      onMessage: { addListener: (callback: (message: unknown) => void) => { receive = callback } }, onDisconnect: { addListener: vi.fn() } })) } })
+    const api = connectPanel()
+    const request = { action: 'start' as const, sessionId: 'selected', tabId: 42, revision: 3, expectedUrl: 'https://example.test/' }
+    const first = api.pageDiagnostics(request)
+    const sent = postMessage.mock.calls[0]![0]
+    expect(sent).toMatchObject({ ...request, type: 'page-diagnostics' })
+    const result = { enabled: true, captureId: 'diag_synthetic', count: 0, dropped: 0 }
+    receive?.({ type: 'page-diagnostics.result', id: 'foreign', ok: true, result })
+    receive?.({ type: 'page-diagnostics.result', id: sent.id, ok: true, result })
+    expect(await first).toEqual(result)
+    const second = api.pageDiagnostics(request).catch(error => error)
+    await vi.advanceTimersByTimeAsync(15000)
+    expect(await second).toMatchObject({ code: 'timeout' })
+    expect(postMessage).toHaveBeenCalledTimes(2)
+  })
   it('correlates DSH unpairing and never retries an uncertain timeout', async () => {
     vi.useFakeTimers()
     let receive: ((message: unknown) => void) | undefined

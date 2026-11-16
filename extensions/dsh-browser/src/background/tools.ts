@@ -29,6 +29,8 @@ import { debuggerPages, sendPageMessage, PageDispatchRevoked, type PageDispatch 
 import type { CreatedPageAccess } from './page-access.ts'
 
 import { capturePageScreenshot, consumeVisualObservation, hasVisualObservation, type VisualAuthority } from './visual.ts'
+import { pageDiagnostics } from './diagnostics.ts'
+import { contentObservationSchema, snapshotCoverageSchema, type SnapshotCoverage } from '@eilyeee/dsh-browser-stride/src/snapshot-observation.ts'
 
 /** A tool call from the bridge. */
 export interface ToolCall {
@@ -39,6 +41,8 @@ export interface ToolCall {
   expiresAt?: number
   /** Owning Agent session, when supplied by a current bridge. */
   sessionId?: string
+  /** Trusted background-only scope, stripped/replaced by dispatchToolCall. */
+  observationScope?: string
 }
 
 /** The wire answer for one tool call. */
@@ -108,17 +112,26 @@ export const TAB_MANAGEMENT_TOOL_NAMES = new Set([
 const NAVIGATION_SNAPSHOT_GUIDANCE = 'Navigation completed and the current page snapshot is included below. Use it directly instead of taking an immediate duplicate snapshot.'
 const pendingInjections = new Map<number, Promise<void>>()
 const snapshotDocumentsByTab = new Map<number, Map<number, string>>()
+const snapshotScopesByTab = new Map<number, Map<number, string>>()
+const snapshotEpochsByTab = new Map<number, Map<number, { key: string; id: string }>>()
 const snapshotGenerationByTab = new Map<number, object>()
+export function hasScopedSnapshot(tabId: number, scope: string): boolean {
+  return snapshotDocumentsByTab.get(tabId)?.has(0) === true && snapshotScopesByTab.get(tabId)?.get(0) === scope
+}
 
 /** Invalidate captured documents and any in-flight observation for a tab. */
 export function resetTabSnapshot(tabId: number): void {
   snapshotDocumentsByTab.delete(tabId)
+  snapshotScopesByTab.delete(tabId)
+  snapshotEpochsByTab.delete(tabId)
   if (snapshotGenerationByTab.has(tabId)) snapshotGenerationByTab.set(tabId, {})
 }
 
 /** Forget a closed tab without letting an in-flight snapshot recreate its state. */
 export function forgetTabSnapshot(tabId: number): void {
   snapshotDocumentsByTab.delete(tabId)
+  snapshotScopesByTab.delete(tabId)
+  snapshotEpochsByTab.delete(tabId)
   snapshotGenerationByTab.delete(tabId)
 }
 
@@ -136,6 +149,8 @@ export function isTabManagementTool(name: string): boolean {
 export interface TabManagementContext {
   /** Skip all browser approval prompts after the user enables unrestricted access. */
   unrestrictedAccess: boolean
+  /** Actual worker/connection, selected session and Host control revision. */
+  observationScope?: string
   /** Original document, permission, connection and Host scope for visual observations. */
   visualAuthority?: VisualAuthority
   /** Immutable admission scope contains no authorized pages; return no metadata. */
@@ -377,7 +392,7 @@ async function snapshotAllFrames(
   budget: ContentBudget,
   current?: () => boolean,
 ): Promise<ToolAnswer> {
-  const generation = snapshotGenerationByTab.get(tabId) ?? {}
+  const generation = {}
   snapshotGenerationByTab.set(tabId, generation)
   // Reserve the secure wrapper, frame headers and bounded error/omission notes
   // before asking content scripts to mint references. The wrapper must never
@@ -386,6 +401,7 @@ async function snapshotAllFrames(
   let remaining = Math.max(0, bodyBudget - FRAME_NOTES_CHARS)
   const selected: TabFrame[] = []
   for (const frame of frames) {
+    if (selected.length >= 64) break
     const overhead = (frame.frameId === 0 ? 0 : frameHeader(frame).length + 1) + FRAME_ERROR_CHARS + 1
     if (overhead > remaining && frame.frameId !== 0) break
     selected.push(frame)
@@ -417,36 +433,54 @@ async function snapshotAllFrames(
 
   const sections: string[] = []
   const capturedDocuments = new Map<number, string>()
+  const capturedEpochs = new Map<number, { key: string; id: string }>()
+  const coverageFrames: SnapshotCoverage['frames'] = []
   for (let index = 0; index < settled.length; index += 1) {
     const outcome = settled[index]!
     const frame = selected[index]!
     if (outcome.status === 'rejected') {
       if (frame.frameId === 0) throw outcome.reason
+      coverageFrames.push({ frameId: frame.frameId, status: 'unreadable' })
       sections.push(frameHeader(frame), '(This iframe was inaccessible or destroyed while loading.)')
       continue
     }
     const answer = outcome.value.response
     if ('budgetInsufficient' in outcome.value) {
+      coverageFrames.push({ frameId: frame.frameId, status: 'omitted-budget' })
       sections.push(frameHeader(frame), '(This iframe was omitted because its snapshot budget was too small.)')
       continue
     }
     if (!isToolAnswer(answer)) {
       if (frame.frameId === 0) return unavailable('The page content script returned an invalid response.')
+      coverageFrames.push({ frameId: frame.frameId, status: 'unreadable' })
       sections.push(frameHeader(frame), '(This iframe returned an invalid response.)')
       continue
     }
     const text = answerText(answer)
     if (text === undefined) {
       if (frame.frameId === 0) return answer
+      coverageFrames.push({ frameId: frame.frameId, status: 'unreadable' })
       sections.push(frameHeader(frame), '(This iframe could not be read.)')
       continue
     }
     if (text.length > (budgets.get(frame.frameId)?.maxChars ?? 0)) {
       if (frame.frameId === 0) return unavailable('The page snapshot exceeded its assigned budget. Update the bridge and extension together.')
+      coverageFrames.push({ frameId: frame.frameId, status: 'omitted-budget' })
       sections.push(frameHeader(frame), '(This iframe exceeded its snapshot budget.)')
       continue
     }
-    capturedDocuments.set(frame.frameId, frameDocumentKey(frame))
+    const key = frameDocumentKey(frame), previousEpoch = snapshotEpochsByTab.get(tabId)?.get(frame.frameId)
+    const epoch = previousEpoch?.key === key ? previousEpoch : { key, id: `doc_${crypto.randomUUID()}` }
+    const rawObservation = (answer.result as { observation?: unknown }).observation
+    const parsed = contentObservationSchema.safeParse(rawObservation)
+    if (rawObservation !== undefined && !parsed.success) {
+      if (frame.frameId === 0) return unavailable('Invalid snapshot coverage metadata. Reload the updated extension and page.')
+      coverageFrames.push({ frameId: frame.frameId, status: 'unreadable' }); continue
+    }
+    capturedEpochs.set(frame.frameId, epoch)
+    capturedDocuments.set(frame.frameId, key)
+    coverageFrames.push({ frameId: frame.frameId, documentEpoch: epoch.id, status: parsed.success ? 'captured' : 'metadata-unavailable',
+      ...(parsed.success ? { observation: parsed.data } : {}) })
     if (frame.frameId === 0) sections.push(text)
     else sections.push(frameHeader(frame), text)
   }
@@ -456,7 +490,16 @@ async function snapshotAllFrames(
   if (selected.length < frames.length) sections.push('\n(Additional iframes omitted by the snapshot budget.)')
 
   snapshotDocumentsByTab.set(tabId, capturedDocuments)
-  return { ok: true, result: { text: wrapUntrustedContent(sections.join('\n'), budget.maxChars) } }
+  snapshotEpochsByTab.set(tabId, capturedEpochs)
+  if (call.observationScope === undefined) snapshotScopesByTab.delete(tabId)
+  else snapshotScopesByTab.set(tabId, new Map([...capturedDocuments.keys()].map(frameId => [frameId, call.observationScope!])))
+  const coverage = snapshotCoverageSchema.parse({ version: 1, complete: false, projection: 'not-attested', metadataAvailable: true, range: 'listed-frames',
+    omittedFrames: frames.length - selected.length, frames: coverageFrames,
+    missing: ['closed-roots', 'canvas-image-layers', 'non-dom-state', 'unlisted-frames',
+      ...(coverageFrames.some(frame => frame.status === 'unreadable') ? ['frame-errors'] : []),
+      ...(selected.length < frames.length || coverageFrames.some(frame => frame.status === 'omitted-budget') ? ['frame-budget'] : []),
+      ...(coverageFrames.some(frame => frame.status === 'metadata-unavailable') ? ['legacy-metadata'] : [])] })
+  return { ok: true, result: { text: wrapUntrustedContent(sections.join('\n'), budget.maxChars), coverage } }
 }
 
 function frameHeader(frame: TabFrame): string {
@@ -488,7 +531,8 @@ async function snapshotAfterNavigation(
   )
   const snapshot = answerText(answer)
   if (snapshot === undefined) return undefined
-  return { ok: true, result: { text: `${prefix}\n\n${snapshot}` } }
+  const coverage = (answer.result as { coverage?: unknown }).coverage
+  return { ok: true, result: { text: `${prefix}\n\n${snapshot}`, ...(coverage === undefined ? {} : { coverage }) } }
 }
 
 async function dispatchOnce(
@@ -506,8 +550,17 @@ async function dispatchOnce(
   if (isCancelled(call, signal)) return cancelled()
   if (targetStillAllowed?.() === false) return targetChanged()
   const requestCurrent = () => !isCancelled(call, signal) && targetStillAllowed?.() !== false
+  const scopeError = validateObservationScope(call, tabId)
+  if (scopeError !== undefined) return scopeError
   if (call.name === 'browser_snapshot') return snapshotAllFrames(tabId, frames, call, budget, requestCurrent)
   if (call.name === 'browser_screenshot') return capturePageScreenshot(tabId, requestCurrent, visualAuthority)
+  if (call.name === 'browser_get_diagnostics') {
+    if (call.sessionId === undefined || !Number.isSafeInteger(call.args.limit) || Number(call.args.limit) < 1 || Number(call.args.limit) > 100) {
+      return { ok: false, error: { code: 'bad-args', message: 'Diagnostics require the current session and a limit from 1 to 100.' } }
+    }
+    try { return { ok: true, result: await pageDiagnostics.read(tabId, requestCurrent, call.sessionId, Number(call.args.limit)) } }
+    catch { return unavailable('Enable page diagnostics in the extension panel for this session and document, then reproduce the problem. Captures stop after navigation, revocation or ten minutes.') }
+  }
   if (call.name === 'browser_click_at' && !consumeVisualObservation(tabId, call.args.screenshotRef, visualAuthority)) {
     return staleScreenshot()
   }
@@ -523,6 +576,7 @@ async function dispatchOnce(
   if (isCancelled(call, signal)) return cancelled()
   if (targetStillAllowed?.() === false) return targetChanged()
   const hasSnapshotBaseline = snapshotDocumentsByTab.get(tabId)?.get(frameId) === frameDocumentKey(frame)
+    && (call.observationScope === undefined || snapshotScopesByTab.get(tabId)?.get(frameId) === call.observationScope)
   const deltaBoundary = budget.maxChars - MAX_ACTION_STATUS_CHARS - ACTION_DELTA_GUIDANCE.length - 3
   const deltaChars = Math.max(0, untrustedContentBudget(deltaBoundary) - (frame.frameId === 0 ? 0 : frameHeader(frame).length + 1))
   const requestPageDelta = includeActionDelta && hasSnapshotBaseline && ACTION_DELTA_TOOLS.has(call.name) && deltaChars > 0
@@ -599,7 +653,23 @@ async function dispatchOnce(
     return { ok: true, result: { text: wrapUntrustedContent(text, budget.maxChars) } }
   }
   const candidatePageContent = requestPageDelta ? answerPageContent(response) : undefined
-  const pageContent = candidatePageContent !== undefined && candidatePageContent.length <= deltaChars ? candidatePageContent : undefined
+  let pageContent = candidatePageContent !== undefined && candidatePageContent.length <= deltaChars ? candidatePageContent : undefined
+  let coverage: SnapshotCoverage | undefined
+  if (pageContent !== undefined) {
+    const observation = (response.result as { observation?: unknown }).observation
+    const parsed = contentObservationSchema.safeParse(observation)
+    if (observation !== undefined && !parsed.success) pageContent = undefined
+    else {
+      const key = frameDocumentKey(frame), epochs = snapshotEpochsByTab.get(tabId) ?? new Map()
+      const previous = epochs.get(frame.frameId)
+      const epoch = previous?.key === key ? previous : { key, id: `doc_${crypto.randomUUID()}` }
+      epochs.set(frame.frameId, epoch); snapshotEpochsByTab.set(tabId, epochs)
+      coverage = snapshotCoverageSchema.parse({ version: 1, complete: false, projection: 'not-attested', metadataAvailable: true,
+        range: 'selected-frame', omittedFrames: 0, frames: [{ frameId: frame.frameId, documentEpoch: epoch.id,
+          status: parsed.success ? 'captured' : 'metadata-unavailable', ...(parsed.success ? { observation: parsed.data } : {}) }],
+        missing: ['closed-roots', 'canvas-image-layers', 'non-dom-state', 'unlisted-frames', ...parsed.success ? [] : ['legacy-metadata']] })
+    }
+  }
   const boundedStatus = text.length <= MAX_ACTION_STATUS_CHARS ? text : `${text.slice(0, MAX_ACTION_STATUS_CHARS - 1)}…`
   const feedback = parseToolFeedback((response.result as { feedback?: unknown } | undefined)?.feedback)
   return {
@@ -607,6 +677,7 @@ async function dispatchOnce(
     result: {
       text: pageContent === undefined ? text : wrapActionDelta(boundedStatus, pageContent, frame, budget.maxChars),
       ...(feedback === undefined ? {} : { feedback }),
+      ...(coverage === undefined ? {} : { coverage }),
     },
   }
 }
@@ -782,7 +853,10 @@ export async function dispatchToolCall(
   targetStillAllowed?: () => boolean,
   tabManagement: TabManagementContext = { unrestrictedAccess: false },
 ): Promise<ToolAnswer> {
-  if ((call.name === 'browser_screenshot' || call.name === 'browser_click_at') && call.args.frame !== undefined) {
+  // Never accept a scope smuggled as a top-level wire field or model argument.
+  const { observationScope: _untrustedScope, ...request } = call
+  call = { ...request, ...(tabManagement.observationScope === undefined ? {} : { observationScope: tabManagement.observationScope }) }
+  if ((call.name === 'browser_screenshot' || call.name === 'browser_click_at' || call.name === 'browser_get_diagnostics') && call.args.frame !== undefined) {
     return { ok: false, error: { code: 'bad-args', message: 'Visual tools operate on the main document only.' } }
   }
   if (call.name === 'browser_click_at' && !['x', 'y'].every(key => typeof call.args[key] === 'number'
@@ -800,7 +874,7 @@ export async function dispatchToolCall(
   // Privacy boundary: with sharing off, no page content may leave the page.
   if (!tabManagement.unrestrictedAccess
     && sharePageContent === 'off'
-    && (call.name === 'browser_snapshot' || call.name === 'browser_get_text' || call.name === 'browser_screenshot' || call.name === 'browser_measure_layout')) {
+    && (call.name === 'browser_snapshot' || call.name === 'browser_get_text' || call.name === 'browser_screenshot' || call.name === 'browser_measure_layout' || call.name === 'browser_get_diagnostics')) {
     return { ok: false, error: { code: 'action-failed', message: 'Page content sharing is disabled in Settings > Page content sharing.' } }
   }
   const tab = targetTab ?? (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]
@@ -930,6 +1004,8 @@ function validateFrameTarget(call: ToolCall, frames: TabFrame[]): ToolAnswer | u
 }
 
 function validateElementTarget(call: ToolCall, tabId: number, frames: TabFrame[]): ToolAnswer | undefined {
+  const scopeError = validateObservationScope(call, tabId)
+  if (scopeError !== undefined) return scopeError
   if (call.name !== 'browser_click' && call.name !== 'browser_type' && call.name !== 'browser_select'
     && !(['browser_scroll', 'browser_get_text', 'browser_measure_layout'].includes(call.name) && call.args.elementRef !== undefined)) return undefined
   if (typeof call.args.elementRef !== 'string' || parseElementRef(call.args.elementRef) === undefined) {
@@ -942,6 +1018,15 @@ function validateElementTarget(call: ToolCall, tabId: number, frames: TabFrame[]
     return unavailable('The element reference does not belong to the current document. Call browser_snapshot again for current frame and index values.', 'target-navigated')
   }
   return undefined
+}
+
+function validateObservationScope(call: ToolCall, tabId: number): ToolAnswer | undefined {
+  const needsObservation = ['browser_click', 'browser_type', 'browser_select', 'browser_press', 'browser_scroll', 'browser_set_design_zoom'].includes(call.name)
+    || ['browser_get_text', 'browser_measure_layout'].includes(call.name) && call.args.elementRef !== undefined
+  if (!needsObservation || call.observationScope === undefined) return
+  if (snapshotScopesByTab.get(tabId)?.get(requestedFrame(call.args)) !== call.observationScope) {
+    return unavailable('This conversation/task needs a fresh snapshot of the selected document before DOM input or reference-based reads.', 'element-stale')
+  }
 }
 
 function sameApprovalBoundary(before: ApprovalPrompt, after: ApprovalPrompt): boolean {
@@ -1005,6 +1090,7 @@ export async function dispatchOpenTab(
   keepUnbound = false,
   authorizeCreatedTab?: (tabId: number) => Promise<void>,
   createdTabAccess?: (tabId: number) => CreatedPageAccess,
+  observationScope?: (tabId: number) => string | undefined,
 ): Promise<ToolAnswer> {
   if (isCancelled(call, signal)) return cancelled()
   const parsed = parseHttpUrl(call.args.url)
@@ -1125,9 +1211,11 @@ export async function dispatchOpenTab(
   }
 
   try {
+    const { observationScope: _wireScope, ...snapshotCall } = call
+    const scope = observationScope?.(tabId)
     const snapshot = await snapshotAfterNavigation(
       tabId,
-      call,
+      { ...snapshotCall, ...(scope === undefined ? {} : { observationScope: scope }) },
       status,
       budget ?? { maxItems: 60, maxChars: DEFAULT_SNAPSHOT_MAX_CHARS },
       () => !isCancelled(call, signal) && targetStillAllowed(tabId),

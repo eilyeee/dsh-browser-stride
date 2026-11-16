@@ -119,6 +119,60 @@ describe('isNavigationCandidateTool', () => {
 })
 
 describe('dispatchToolCall', () => {
+  it('binds DOM input and anchored reads to the current session/task observation owner', async () => {
+    resetTabSnapshot(777)
+    const h = mockChrome({ tab: { id: 777, url: 'https://example.test/' }, respond: () => OK })
+    const call = (name: string, scope: string, args: Record<string, unknown> = {}) => dispatchToolCall({ id: crypto.randomUUID(), name, args },
+      'auto', undefined, undefined, undefined, { id: 777, url: 'https://example.test/' }, () => true, { unrestrictedAccess: true, observationScope: scope })
+    expect((await call('browser_press', 'a', { key: 'Enter' })).error?.code).toBe('element-stale')
+    expect(h.sendMessage).not.toHaveBeenCalled()
+    expect((await call('browser_snapshot', 'a')).ok).toBe(true)
+    expect((await call('browser_press', 'a', { key: 'Enter' })).ok).toBe(true)
+    expect((await call('browser_press', 'b', { key: 'Enter' })).error?.code).toBe('element-stale')
+    await call('browser_snapshot', 'b')
+    const before = h.sendMessage.mock.calls.length
+    expect((await call('browser_get_text', 'a', { elementRef: 'obs_00000000-0000-4000-8000-000000000001:1' })).error?.code).toBe('element-stale')
+    expect(h.sendMessage).toHaveBeenCalledTimes(before)
+    expect((await call('browser_press', 'b', { key: 'Enter' })).ok).toBe(true)
+    resetTabSnapshot(777)
+    expect((await call('browser_press', 'b', { key: 'Enter' })).error?.code).toBe('element-stale')
+  })
+  it('does not let a superseded snapshot overwrite the latest observation owner', async () => {
+    resetTabSnapshot(778); let finish!: (value: ToolAnswer) => void, reads = 0
+    const held = new Promise<ToolAnswer>(resolve => { finish = resolve })
+    mockChrome({ tab: { id: 778, url: 'https://example.test/' }, respond: message => (message as { action?: string }).action === 'browser_snapshot' && ++reads === 1 ? held : OK })
+    const call = (name: string, scope: string) => dispatchToolCall({ id: crypto.randomUUID(), name, args: name === 'browser_press' ? { key: 'Enter' } : {} },
+      'auto', undefined, undefined, undefined, { id: 778, url: 'https://example.test/' }, () => true, { unrestrictedAccess: true, observationScope: scope })
+    const first = call('browser_snapshot', 'a'); await vi.waitFor(() => expect(reads).toBe(1))
+    expect((await call('browser_snapshot', 'b')).ok).toBe(true)
+    finish(OK); expect((await first).ok).toBe(false)
+    expect((await call('browser_press', 'b')).ok).toBe(true)
+    expect((await call('browser_press', 'a')).error?.code).toBe('element-stale')
+  })
+  it('reports legacy metadata as unknown and rotates document epochs on native document changes', async () => {
+    resetTabSnapshot(779)
+    const frames = [{ frameId: 0, parentFrameId: -1, documentId: 'a', url: 'https://example.test/' }]
+    mockChrome({ tab: { id: 779, url: 'https://example.test/' }, frames, respond: () => OK })
+    const read = async () => (await dispatchToolCall(CALL, 'auto', undefined, undefined, undefined, { id: 779, url: frames[0]!.url })).result as { coverage: { complete: false; projection: string; frames: Array<{ status: string; documentEpoch: string }> } }
+    const first = await read(), second = await read()
+    expect(first.coverage).toMatchObject({ complete: false, projection: 'not-attested', frames: [{ status: 'metadata-unavailable' }] })
+    expect(second.coverage.frames[0]!.documentEpoch).toBe(first.coverage.frames[0]!.documentEpoch)
+    frames[0]!.documentId = 'b'
+    expect((await read()).coverage.frames[0]!.documentEpoch).not.toBe(first.coverage.frames[0]!.documentEpoch)
+  })
+  it('rejects malformed frame coverage without echoing its body and bounds the reported frame inventory', async () => {
+    resetTabSnapshot(780)
+    mockChrome({ tab: { id: 780, url: 'https://example.test/' }, respond: () => ({ ok: true, result: { text: 'PRIVATE-BODY', observation: { complete: true } } }) })
+    const malformed = await dispatchToolCall(CALL, 'auto', undefined, undefined, undefined, { id: 780, url: 'https://example.test/' })
+    expect(malformed.ok).toBe(false); expect(JSON.stringify(malformed)).not.toContain('PRIVATE-BODY')
+    const frames = Array.from({ length: 81 }, (_, frameId) => ({ frameId, parentFrameId: frameId === 0 ? -1 : 0, documentId: `document-${frameId}`, url: 'https://example.test/' }))
+    mockChrome({ tab: { id: 781, url: 'https://example.test/' }, frames, respond: () => OK })
+    const result = await dispatchToolCall(CALL, 'auto', { maxChars: 32000, maxItems: 60 }, undefined, undefined, { id: 781, url: 'https://example.test/' })
+    expect(result.ok).toBe(true)
+    const coverage = (result.result as { coverage: { frames: unknown[]; omittedFrames: number; missing: string[] } }).coverage
+    expect(coverage.frames.length).toBeLessThanOrEqual(64); expect(coverage.omittedFrames).toBeGreaterThanOrEqual(17)
+    expect(coverage.missing).toContain('frame-budget')
+  })
   it.each([[1, .5], [-.1, .5], [.3, Infinity], [.3, NaN]])('rejects invalid image fractions %s, %s before native reads or approval', async (x, y) => {
     const h = mockChrome({ tab: { id: 7, url: 'https://example.com' } })
     const authorize = vi.fn(async () => 'approved' as const)

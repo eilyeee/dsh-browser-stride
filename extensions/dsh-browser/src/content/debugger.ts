@@ -3,8 +3,12 @@ import { runAction, ActionError, resetDeltaState } from './actions.ts'
 import { visualViewportState } from './visual.ts'
 import { ElementIds } from './ids.ts'
 import { DEFAULT_SNAPSHOT_MAX_CHARS } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
+import { watchNativeInput } from './native-input.ts'
 
 const ids = new ElementIds()
+const inputGlobal = globalThis as typeof globalThis & { __strideNativeInput?: () => void }
+inputGlobal.__strideNativeInput?.()
+inputGlobal.__strideNativeInput = watchNativeInput(ids)
 const visualGlobal = globalThis as typeof globalThis & { __strideVisualState?: { dispose: () => void } }
 visualGlobal.__strideVisualState?.dispose()
 visualGlobal.__strideVisualState = visualViewportState
@@ -27,6 +31,7 @@ Object.defineProperty(globalThis, '__strideDebuggerAction', {
     try {
       const result = await runAction(message.action ?? '', message.args ?? {}, {
         ids,
+        requireObservation: true,
         budget: { maxForms: 30, maxItems: 60, maxChars: DEFAULT_SNAPSHOT_MAX_CHARS, ...message.budget },
         includePageDelta: message.includePageDelta === true,
       })

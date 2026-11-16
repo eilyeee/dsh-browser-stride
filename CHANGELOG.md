@@ -7,7 +7,47 @@ package versions currently identify development builds, not supported releases.
 
 ## [Unreleased]
 
+### Added
+
+- Development build 0.1.19 binds snapshot references to native page, session and
+  execution ownership, invalidates them after native pointer/key intervention,
+  and reports bounded frame/collection coverage. Model projection is not attested;
+  explicit model delta requests therefore return bounded full snapshots. This
+  is a live DOM subset, not the complete generic observation envelope or automatic
+  account/tenant identification. Benchmark suite 29 separates these semantics.
+- Development build 0.1.19 adds native per-operation uncertainty review after
+  a drained conversation and fresh same-connection observation. Human decisions
+  remain separate from original facts/receipts and never verify criteria, replay
+  writes or resume tasks automatically. Late receipts invalidate earlier review.
+- Unconfirmed readback persists even after a successful tool receipt. Ordinary
+  sessions retain their write fence across turns/restarts while scoped audit
+  reads remain available. Expired managed contexts cannot fall back to chat.
+- Host writes settle in a bounded per-session queue before later admission;
+  explicit selected-page continuation also accepts reconciled blocked tasks
+  while retaining their goal and cumulative limits.
+- Development build 0.1.19 adds Chrome panel-owned Console/Network diagnostics.
+  Native activation is scoped to the selected conversation and top document;
+  the model has only a bounded read tool. Captures clear on control/document
+  changes, disconnection, panel close or ten minutes. Records contain fixed
+  error types, locations and route templates/statuses, never console messages,
+  query values, original URLs, headers or bodies. Past events, child frames and
+  workers are omitted; diagnostics do not verify business persistence.
+- Diagnostic and visual reads share the owned debugger attachment. Read leases
+  cannot evaluate scripts, request bodies or dispatch input; cleanup preserves
+  the automatic DOM controller and existing screenshot owner. Both peers must
+  negotiate the optional capability; old peers retain their existing tools.
+- A local synthetic smoke exercises native activation/stop and one model tool
+  read on isolated Chrome. Its scripted and default-model modes record separate
+  evidence, including exact bundle hashes; neither establishes regular-browser
+  or real-business acceptance.
+
 ### Test infrastructure
+
+- Separate synthetic workflow, native observation and standalone upgrade smokes
+  cover existing material tabs, model project edits and independent save/layout
+  checks; trusted intervention and bounded coverage; and preserved history,
+  pairing, notes and idle tasks in one disposable home/profile. Their evidence
+  does not establish regular-browser or supplied-business-project acceptance.
 
 - Component fixtures append markup through a template fragment instead of the
   unsupported ShadowRoot.insertAdjacentHTML. Both smokes require completed

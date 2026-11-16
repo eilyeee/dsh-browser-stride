@@ -51,6 +51,49 @@ async function running(store: BrowserRunStore) {
 }
 
 describe('durable Host browser run records', () => {
+  it('permits ordinary read-only auditing of a drained uncertain run without clearing its write fence', async () => {
+    const { store } = await setup()
+    const run = await running(store)
+    await store.dispatches.prepare({ requestId: 'audit-write', connectionId: 'synthetic', sessionId: run.sessionId,
+      runId: run.runId, controlRevision: run.controlRevision, name: 'browser_click', args: {}, expiresAt: Date.now() + 60000 })
+    await store.dispatches.markSent('audit-write')
+    await store.dispatches.settle('audit-write', { state: 'unresolved', reason: 'connection-closed' })
+    await store.control(run.runId, run.version, 'pause')
+    expect(store.executionFor(run.sessionId, 'observe')).toBeUndefined()
+    expect(() => store.assertObservationAuthority(undefined, run.sessionId)).not.toThrow()
+    expect(() => store.executionFor(run.sessionId)).toThrow('reconciliation-required')
+    expect(store.dispatches.get('audit-write')).toMatchObject({ state: 'unresolved' })
+    expect(store.dispatches.get('audit-write')?.receipt).toBeUndefined()
+    expect(() => store.executionFor(undefined, 'observe')).toThrow('reconciliation-required')
+  })
+  it('refuses unaffiliated reads while a managed executor runs, and never revives a detached callback', async () => {
+    const { store } = await setup(); const run = await running(store)
+    expect(() => store.executionFor(run.sessionId, 'observe')).toThrow('session-busy')
+    let detached!: () => Promise<unknown>
+    await store.withExecution(run.runId, run.controlRevision, async () => {
+      const execution = store.executionFor(run.sessionId, 'observe')
+      expect(execution?.runId).toBe(run.runId)
+      let release!: () => void
+      const wait = new Promise<void>(resolve => { release = resolve })
+      const result = wait.then(() => store.executionFor(run.sessionId, 'observe')).catch(error => error)
+      detached = async () => { release(); return result }
+    })
+    await store.control(run.runId, run.version, 'pause')
+    expect(await detached()).toMatchObject({ code: 'execution-context-expired' })
+    expect(store.executionFor(run.sessionId, 'observe')).toBeUndefined()
+  })
+  it('allows an explicit selected-page continuation from a reconciled blocked task without resetting its budget', async () => {
+    const { store } = await setup()
+    const queued = await store.create({ ...input(), task: newBrowserTask('Preserve this goal') })
+    let run = await store.startTask(queued.runId, queued.version, () => {})
+    run = await store.updateTask(run.runId, task => ({ ...task, modelRequests: 2, toolCalls: 3 }))
+    const blocked = await store.transition(run.runId, run.version, 'blocked')
+    let bound = -1
+    const continued = await store.retargetPaused(blocked.runId, blocked.version, blocked.controlRevision, revision => { bound = revision })
+    expect(continued).toMatchObject({ state: 'running', controlRevision: blocked.controlRevision + 2, task: { goal: 'Preserve this goal', modelRequests: 2, toolCalls: 3 } })
+    expect(bound).toBe(continued.controlRevision)
+    await expect(store.retargetPaused(blocked.runId, blocked.version, blocked.controlRevision, () => {})).rejects.toMatchObject({ code: 'stale-version' })
+  })
   it.each((['activeMs', 'modelRequests', 'toolCalls'] as const).flatMap(counter =>
     (['start', 'transition', 'resume', 'retarget'] as const).map(entry => ({ counter, entry }))))(
     'refuses $entry before native target attachment when $counter is exhausted', async ({ counter, entry }) => {

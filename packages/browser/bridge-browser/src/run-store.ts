@@ -12,9 +12,10 @@ import { canonicalize, asActionId, asObservationId, asControlRevision, asRunId, 
 import { BROWSER_ERROR_CODES } from './contracts/errors.ts'
 import { validateActionFact, summarizeActionFacts, type ActionFact } from './contracts/outcome.ts'
 import { assertTransition, decideCompletion, dispatchGate, isTerminal, nextControlRevision, requestPause, requestResume, requestStop } from './contracts/run.ts'
-import { BrowserDispatchLedger } from './dispatch-ledger.ts'
+import { BrowserDispatchLedger, requiresDispatchReview } from './dispatch-ledger.ts'
 import { taskSchema, type BrowserTask } from './task-contract.ts'
 import { taskBudgetExhausted } from './task-budget.ts'
+import { nativeReviewSchema, type NativeReview } from './native-review.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context { browserRuns: BrowserRunStore }
@@ -59,6 +60,8 @@ const runSchema = z.strictObject({
   createdAt: counter, updatedAt: counter,
   requiredCriteriaIds: criteria,
   recoveryRequired: z.boolean(),
+  nativeFactReviews: z.array(z.strictObject({ actionId: id, review: nativeReviewSchema })).max(256).optional(),
+  recoveryReview: nativeReviewSchema.omit({ decision: true }).optional(),
   pauseReason: z.enum(['browser-disconnected', 'page-unavailable']).optional(),
   facts: z.array(factSchema).max(256),
   task: taskSchema.optional(),
@@ -66,14 +69,23 @@ const runSchema = z.strictObject({
   if (run.pauseReason !== undefined && (run.state !== 'paused' || run.task === undefined)) ctx.addIssue({ code: 'custom', message: 'invalid pause reason' })
   if (run.updatedAt < run.createdAt) ctx.addIssue({ code: 'custom', message: 'invalid timestamps' })
   if (new Set(run.facts.map(fact => fact.actionId)).size !== run.facts.length) ctx.addIssue({ code: 'custom', message: 'duplicate action id' })
+  if (new Set(run.nativeFactReviews?.map(value => value.actionId)).size !== (run.nativeFactReviews?.length ?? 0)
+    || run.nativeFactReviews?.some(value => !run.facts.some(fact => fact.actionId === value.actionId))) ctx.addIssue({ code: 'custom', message: 'invalid native fact review' })
   if (run.facts.some(fact => fact.controlRevision > run.controlRevision)) ctx.addIssue({ code: 'custom', message: 'future action revision' })
   if (run.state === 'completed' && (run.recoveryRequired || decideCompletion({
-    requiredCriteriaIds: run.requiredCriteriaIds, ...summarizeActionFacts(run.facts),
+    requiredCriteriaIds: run.requiredCriteriaIds, ...summarizeReviewedFacts(run),
   }).status !== 'complete')) ctx.addIssue({ code: 'custom', message: 'unverified completion' })
 })
 
 /** Version is a compare-and-swap record version; controlRevision is authority. */
 export type BrowserRunRecord = z.infer<typeof runSchema>
+
+/** Native reviews resolve a write fence without creating a verified criterion. */
+export function summarizeReviewedFacts(run: { facts: readonly ActionFact[]; nativeFactReviews?: readonly { actionId: string }[] | undefined }): ReturnType<typeof summarizeActionFacts> {
+  const summary = summarizeActionFacts(run.facts)
+  const reviewed = new Set(run.nativeFactReviews?.map(value => value.actionId))
+  return { ...summary, pendingReconciliation: summary.pendingReconciliation.filter(actionId => !reviewed.has(actionId)) }
+}
 
 /** Host-owned metadata; never accepted from a page, model argument or RPC. */
 export interface BrowserRunExecution {
@@ -123,6 +135,7 @@ export class BrowserRunStore {
   private writeFaulted = false
   private disposal: Promise<void> | undefined
   private readonly executions = new Set<ExecutionContext>()
+  private readonly nativeReviews = new Set<string>()
   /** Synchronous fence while an unavailable native target's durable pause is queued. */
   private readonly unavailableTargets = new Map<RunId, number>()
   private constructor(private readonly domain: RunDomain, readonly dispatches: BrowserDispatchLedger) {}
@@ -248,7 +261,7 @@ export class BrowserRunStore {
   }
 
   /** Resolve the calling async chain, not the latest run belonging to a session. */
-  executionFor(sessionId?: string): BrowserRunExecution | undefined {
+  executionFor(sessionId?: string, purpose: 'dispatch' | 'observe' = 'dispatch'): BrowserRunExecution | undefined {
     this.assertOpen()
     if (this.writeFaulted) throw new BrowserRunStoreError('storage-unavailable')
     const context = executionContext.getStore()
@@ -260,14 +273,32 @@ export class BrowserRunStore {
       if (sessionId !== undefined && execution.sessionId !== sessionId) throw new BrowserRunStoreError('execution-session-mismatch')
       return execution
     }
-    this.assertDispatchAuthority(undefined, sessionId)
+    if (purpose === 'observe') this.assertObservationAuthority(undefined, sessionId)
+    else this.assertDispatchAuthority(undefined, sessionId)
     return undefined
+  }
+
+  /** Read-only audit after an executor has stopped; this never clears uncertainty. */
+  assertObservationAuthority(execution: BrowserRunExecution | undefined, sessionId?: string): void {
+    if (execution !== undefined) { this.assertDispatchAuthority(execution, sessionId); return }
+    this.assertOpen()
+    if (this.writeFaulted) throw new BrowserRunStoreError('storage-unavailable')
+    // Preserve trusted legacy reads when no scoped recovery/active run exists.
+    // An unattributed caller cannot use the recovery observation exception.
+    if (sessionId === undefined) { this.assertDispatchAuthority(undefined); return }
+    if (!id.safeParse(sessionId).success) throw new BrowserRunStoreError('execution-session-mismatch')
+    if (this.nativeReviews.has(sessionId)) throw new BrowserRunStoreError('session-busy')
+    // A stopped async chain must not turn into an unaffiliated read. Native
+    // pause/stop drains the old job before ordinary chat can audit the page.
+    if ([...this.executions].some(context => context.execution.sessionId === sessionId)) throw new BrowserRunStoreError('session-busy')
+    if (this.list(asSessionId(sessionId)).some(run => run.state === 'running' || run.state === 'stopping')) throw new BrowserRunStoreError('session-busy')
   }
 
   /** Revalidate the captured Host object from another async chain, never wire ids. */
   assertDispatchAuthority(execution: BrowserRunExecution | undefined, sessionId?: string): void {
     this.assertOpen()
     if (this.writeFaulted) throw new BrowserRunStoreError('storage-unavailable')
+    if (sessionId === undefined ? this.nativeReviews.size > 0 : this.nativeReviews.has(sessionId)) throw new BrowserRunStoreError('session-busy')
     if (execution !== undefined) {
       const context = [...this.executions].find(item => item.execution === execution)
       if (context === undefined || !context.active || context.controller.signal.aborted) throw new BrowserRunStoreError('execution-context-expired')
@@ -276,10 +307,11 @@ export class BrowserRunStore {
       if (sessionId !== undefined && execution.sessionId !== sessionId) throw new BrowserRunStoreError('execution-session-mismatch')
       return
     }
+    this.assertTransportReconciled(sessionId === undefined ? undefined : asSessionId(sessionId), 'managed')
     for (const [, run] of this.domain.table('runs').entries()) {
       if (sessionId !== undefined && sessionId !== run.sessionId) continue
       this.assertTransportReconciled(run.sessionId, 'managed')
-      if (run.recoveryRequired || summarizeActionFacts(run.facts).pendingReconciliation.length > 0) throw new BrowserRunStoreError('reconciliation-required')
+      if (run.recoveryRequired || summarizeReviewedFacts(run).pendingReconciliation.length > 0) throw new BrowserRunStoreError('reconciliation-required')
       if (!isTerminal(run.state) && run.state !== 'queued') throw new BrowserRunStoreError('execution-context-required')
     }
   }
@@ -335,7 +367,7 @@ export class BrowserRunStore {
       if (state === 'running') { this.assertReconciled(run); this.assertSessionAvailable(run); this.assertTaskBudget(run) }
       if (state === 'completed') {
         this.assertReconciled(run)
-        if (decideCompletion({ requiredCriteriaIds: run.requiredCriteriaIds, ...summarizeActionFacts(run.facts) }).status !== 'complete') throw new BrowserRunStoreError('invalid-state')
+        if (decideCompletion({ requiredCriteriaIds: run.requiredCriteriaIds, ...summarizeReviewedFacts(run) }).status !== 'complete') throw new BrowserRunStoreError('invalid-state')
       }
       return this.save({ ...run, state })
     })
@@ -359,7 +391,7 @@ export class BrowserRunStore {
     return this.exclusive(async () => {
       if (signal?.aborted) throw new BrowserRunStoreError('cancelled')
       const run = this.current(runId, expectedVersion)
-      if (run.state !== 'paused') throw new BrowserRunStoreError('invalid-state')
+      if (run.state !== 'paused' && run.state !== 'blocked') throw new BrowserRunStoreError('invalid-state')
       if (run.controlRevision !== expectedRevision) throw new BrowserRunStoreError('stale-control-revision')
       this.assertReconciled(run)
       this.assertSessionAvailable(run)
@@ -388,6 +420,54 @@ export class BrowserRunStore {
       if (run.state === 'queued' || run.state === 'completed' || parsed.controlRevision > run.controlRevision) throw new BrowserRunStoreError('invalid-state')
       return this.save({ ...run, facts: [...run.facts, parsed] })
     })
+  }
+
+  /** Trusted native review only: preserve facts, revoke old authority, never resume. */
+  async reviewSession(input: { sessionId: string; review: Omit<NativeReview, 'decision'>;
+    writes: Array<{ requestId: string; digest: string; decision: NativeReview['decision'] }>;
+    runs: Array<{ runId: RunId; expectedVersion: number; acknowledgeRecovery: boolean; facts: Array<{ actionId: string; decision: NativeReview['decision'] }> }>;
+  }, validate: () => void, signal: AbortSignal): Promise<void> {
+    const parsed = z.strictObject({ sessionId: id,
+      review: nativeReviewSchema.omit({ decision: true }),
+      writes: z.array(z.strictObject({ requestId: id, digest: z.string().regex(/^[a-f0-9]{64}$/), decision: z.enum(['applied', 'not-applied']) })).max(64),
+      runs: z.array(z.strictObject({ runId: id.transform(asRunId), expectedVersion: counter, acknowledgeRecovery: z.boolean(),
+        facts: z.array(z.strictObject({ actionId: id, decision: z.enum(['applied', 'not-applied']) })).max(256) })).max(64),
+    }).parse(JSON.parse(canonicalize(input)))
+    if (this.nativeReviews.has(parsed.sessionId)) throw new BrowserRunStoreError('session-busy')
+    this.nativeReviews.add(parsed.sessionId)
+    let changed = false
+    try {
+      await this.exclusive(async () => {
+        if (signal.aborted) throw new BrowserRunStoreError('cancelled')
+        if ([...this.executions].some(context => context.execution.sessionId === parsed.sessionId)
+          || this.list(asSessionId(parsed.sessionId)).some(run => run.state === 'running' || run.state === 'stopping')) throw new BrowserRunStoreError('session-busy')
+        validate()
+        for (const item of parsed.runs) {
+          const run = this.require(item.runId)
+          if (run.sessionId !== parsed.sessionId || run.version !== item.expectedVersion) throw new BrowserRunStoreError('stale-version')
+          if (item.facts.some(value => !summarizeReviewedFacts(run).pendingReconciliation.includes(asActionId(value.actionId)))) throw new BrowserRunStoreError('action-conflict')
+        }
+        for (const item of parsed.writes) {
+          if (signal.aborted) throw new BrowserRunStoreError('cancelled')
+          if (this.dispatches.get(item.requestId)?.sessionId !== parsed.sessionId) throw new BrowserRunStoreError('action-conflict')
+          changed = true
+          await this.dispatches.review(item.requestId, item.digest, { ...parsed.review, decision: item.decision })
+        }
+        for (const item of parsed.runs) {
+          if (signal.aborted) throw new BrowserRunStoreError('cancelled')
+          const run = this.require(item.runId)
+          changed = true
+          await this.save({ ...run, state: run.state === 'blocked' ? 'paused' : run.state,
+            controlRevision: asControlRevision(nextControlRevision(run.controlRevision, 'target_changed')),
+            recoveryRequired: item.acknowledgeRecovery ? false : run.recoveryRequired,
+            ...(item.acknowledgeRecovery ? { recoveryReview: parsed.review } : {}),
+            nativeFactReviews: [...(run.nativeFactReviews ?? []), ...item.facts.map(value => ({ actionId: value.actionId, review: { ...parsed.review, decision: value.decision } }))] })
+        }
+      })
+    } catch (error) {
+      if (changed) this.writeFaulted = true // Multi-domain partial commit must fail closed until reopen.
+      throw error
+    } finally { this.nativeReviews.delete(parsed.sessionId) }
   }
 
   /** Serialize deletion with run controls; pausing does not release ownership. */
@@ -425,13 +505,14 @@ export class BrowserRunStore {
   }
   private current(runId: RunId, expectedVersion: number): BrowserRunRecord {
     const run = this.require(runId)
+    if (this.nativeReviews.has(run.sessionId)) throw new BrowserRunStoreError('session-busy')
     if (!Number.isSafeInteger(expectedVersion) || run.version !== expectedVersion) throw new BrowserRunStoreError('stale-version')
     return run
   }
   private assertSessionAvailable(run: BrowserRunRecord): void {
     const others = [...this.domain.table('runs').entries()].map(([, other]) => other)
       .filter(other => other.runId !== run.runId && other.sessionId === run.sessionId)
-    if (others.some(other => other.recoveryRequired || summarizeActionFacts(other.facts).pendingReconciliation.length > 0)) throw new BrowserRunStoreError('reconciliation-required')
+    if (others.some(other => other.recoveryRequired || summarizeReviewedFacts(other).pendingReconciliation.length > 0)) throw new BrowserRunStoreError('reconciliation-required')
     if (others.some(other => other.state === 'running' || other.state === 'stopping')) throw new BrowserRunStoreError('session-busy')
   }
   private assertTaskBudget(run: BrowserRunRecord): void {
@@ -441,15 +522,13 @@ export class BrowserRunStore {
     this.assertTransportReconciled(run.sessionId, pending)
     let current: BrowserRunRecord | undefined = run
     while (current !== undefined) {
-      if (current.recoveryRequired || summarizeActionFacts(current.facts).pendingReconciliation.length > 0) throw new BrowserRunStoreError('reconciliation-required')
+      if (current.recoveryRequired || summarizeReviewedFacts(current).pendingReconciliation.length > 0) throw new BrowserRunStoreError('reconciliation-required')
       current = current.parentRunId === undefined ? undefined : this.require(current.parentRunId)
     }
   }
-  private assertTransportReconciled(sessionId: SessionId, pending: 'all' | 'managed' | 'none'): void {
-    const unsettled = this.dispatches.list(sessionId).some(row => row.effect === 'write' && (
-      row.state === 'unresolved' || (row.state === 'returned' && row.receipt?.ok === false)
-      || ((row.state === 'prepared' || row.state === 'sent_unconfirmed') && (pending === 'all' || (pending === 'managed' && row.runId !== undefined)))
-    ))
+  private assertTransportReconciled(sessionId: SessionId | undefined, pending: 'all' | 'managed' | 'none'): void {
+    const unsettled = this.dispatches.list(sessionId).some(row => requiresDispatchReview(row)
+      || row.effect === 'write' && (row.state === 'prepared' || row.state === 'sent_unconfirmed') && (pending === 'all' || pending === 'managed' && row.runId !== undefined))
     if (unsettled) throw new BrowserRunStoreError('reconciliation-required')
   }
   private async save(run: BrowserRunRecord): Promise<BrowserRunRecord> {

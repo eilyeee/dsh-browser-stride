@@ -283,6 +283,8 @@ describe('background bridge lifecycle', () => {
     socket.open(); await Promise.resolve()
     socket.receive({ t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION,
       caps: { textOnly: true, snapshotMaxChars: 32000, maxInteractiveItems: 60, designViewZoom: true } })
+    socket.receive({ t: 'tool.call', id: 'zoom-fresh-observation', name: 'browser_snapshot', args: {}, expiresAt: Date.now() + 10000 })
+    await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'zoom-fresh-observation', ok: true })))
     socket.receive({ t: 'tool.call', id: 'zoom-cancelled', name: 'browser_set_design_zoom', args: { percent: 150 }, expiresAt: Date.now() + 10000 })
     await vi.waitFor(() => expect(phases).toEqual(['prepare']))
     socket.receive({ t: 'tool.cancel', id: 'zoom-cancelled' })
@@ -1385,6 +1387,7 @@ describe('background bridge lifecycle', () => {
       }),
       tabSendMessage: async (_tabId, message) => {
         if ((message as { type?: unknown }).type !== 'DSH_ACTION') return undefined
+        if ((message as { action?: string }).action === 'browser_snapshot') return { ok: true, result: { text: 'Synthetic current page' } }
         actionMessages.push(message)
         throw new Error('Could not establish connection. Receiving end does not exist.')
       },
@@ -1404,6 +1407,8 @@ describe('background bridge lifecycle', () => {
       caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
     })
     await Promise.resolve()
+    socket.receive({ t: 'tool.call', id: 'recovery-fresh-observation', name: 'browser_snapshot', args: {}, expiresAt: Date.now() + 10000 })
+    await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'recovery-fresh-observation', ok: true })))
     socket.receive({
       t: 'tool.call',
       id: 'recovering-action',
@@ -1466,6 +1471,8 @@ describe('background bridge lifecycle', () => {
       caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
     })
     await new Promise((resolve) => { setTimeout(resolve, 0) })
+    socket.receive({ t: 'tool.call', id: 'restricted-fresh-observation', name: 'browser_snapshot', args: {}, expiresAt: Date.now() + 10000 })
+    await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'restricted-fresh-observation', ok: true })))
     holdTarget = true
     socket.receive({
       t: 'tool.call',

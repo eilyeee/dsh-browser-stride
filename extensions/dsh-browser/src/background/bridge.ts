@@ -158,7 +158,7 @@ export class BridgeClient {
 
       // Authenticate: hello must be accepted before any other traffic.
       const presentedToken = this.token
-      const offeredCaps: BridgeCaps = { textOnly: true, snapshotMaxChars: DEFAULT_SNAPSHOT_MAX_CHARS, maxInteractiveItems: 60, taskTargetLoss: true, layoutMetrics: true, elementScroll: true, elementReadScope: true, snapshotBase: true, designViewZoom: true, taskNotes: true, ...(import.meta.env.EXT_TARGET === 'firefox' ? {} : { visualViewport: true }) }
+      const offeredCaps: BridgeCaps = { textOnly: true, snapshotMaxChars: DEFAULT_SNAPSHOT_MAX_CHARS, maxInteractiveItems: 60, taskTargetLoss: true, layoutMetrics: true, elementScroll: true, elementReadScope: true, snapshotBase: true, designViewZoom: true, taskNotes: true, ...(import.meta.env.EXT_TARGET === 'firefox' ? {} : { visualViewport: true, pageDiagnostics: true, manualRecovery: true }) }
       socket.send(JSON.stringify({
         t: 'hello',
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
@@ -195,6 +195,8 @@ export class BridgeClient {
                 || (frame.caps.elementScroll === true && offeredCaps.elementScroll !== true)
                 || (frame.caps.elementReadScope === true && offeredCaps.elementReadScope !== true)
                 || (frame.caps.snapshotBase === true && offeredCaps.snapshotBase !== true)
+                || (frame.caps.pageDiagnostics === true && offeredCaps.pageDiagnostics !== true)
+                || (frame.caps.manualRecovery === true && offeredCaps.manualRecovery !== true)
                 || (frame.caps.designViewZoom === true && offeredCaps.designViewZoom !== true)
                 || (frame.caps.taskNotes === true && offeredCaps.taskNotes !== true)) {
                 this.rejectCompatibility(socket, 'incompatible')

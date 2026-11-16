@@ -16,6 +16,7 @@ import { visualViewportState } from './visual.ts'
 import { ElementIds } from './ids.ts'
 import { SelectionWatcher } from './selection.ts'
 import type { SnapshotBudget } from './snapshot.ts'
+import { watchNativeInput } from './native-input.ts'
 
 /** Negotiated snapshot budgets, patched in from the background via message. */
 let budget: SnapshotBudget = { maxItems: 60, maxForms: 30, maxChars: DEFAULT_SNAPSHOT_MAX_CHARS }
@@ -30,6 +31,7 @@ const CONTENT_SCRIPT_LISTENER = '__dshBrowserContentScriptListener__'
 const CONTENT_SELECTION_WATCHER = '__dshBrowserSelectionWatcher__'
 const CONTENT_LIFECYCLE_LISTENER = '__dshBrowserLifecycleListener__'
 const CONTENT_VISUAL_STATE = '__dshBrowserVisualState__'
+const CONTENT_NATIVE_INPUT = '__dshBrowserNativeInput__'
 type ContentListener = typeof onMessage
 
 /** A tool-call result for the bridge. */
@@ -44,6 +46,7 @@ function onMessage(message: unknown, _sender: chrome.runtime.MessageSender, send
   const msg = message as { type?: string }
   if (msg.type === 'DSH_PING') { sendResponse({ ok: true }); return }
   if (msg.type === 'DSH_DEACTIVATE') {
+    contentGlobal[CONTENT_NATIVE_INPUT]?.()
     selectionWatcher.dispose()
     visualViewportState.dispose()
     resetDeltaState(ids)
@@ -85,6 +88,7 @@ function onMessage(message: unknown, _sender: chrome.runtime.MessageSender, send
   const actionBudget = actionMsg.budget === undefined ? budget : { ...budget, ...actionMsg.budget }
   void runAction(action, args, {
     ids,
+    requireObservation: true,
     budget: actionBudget,
     includePageDelta: actionMsg.includePageDelta === true,
   }).then(
@@ -106,6 +110,7 @@ const contentGlobal = globalThis as typeof globalThis & {
   [CONTENT_SCRIPT_LISTENER]?: ContentListener
   [CONTENT_SELECTION_WATCHER]?: { dispose: () => void }
   [CONTENT_LIFECYCLE_LISTENER]?: (event?: Event) => void
+  [CONTENT_NATIVE_INPUT]?: () => void
 }
 const previousListener = contentGlobal[CONTENT_SCRIPT_LISTENER]
 if (previousListener !== undefined) {
@@ -115,6 +120,8 @@ if (previousListener !== undefined) {
 // releases them: `selectionchange` is a document listener, not an extension one.
 contentGlobal[CONTENT_SELECTION_WATCHER]?.dispose()
 contentGlobal[CONTENT_VISUAL_STATE]?.dispose()
+contentGlobal[CONTENT_NATIVE_INPUT]?.()
+contentGlobal[CONTENT_NATIVE_INPUT] = watchNativeInput(ids, () => { void chrome.runtime.sendMessage({ type: 'DSH_NATIVE_INPUT' }).catch(() => {}) })
 contentGlobal[CONTENT_VISUAL_STATE] = visualViewportState
 const previousLifecycle = contentGlobal[CONTENT_LIFECYCLE_LISTENER]
 if (previousLifecycle !== undefined) {

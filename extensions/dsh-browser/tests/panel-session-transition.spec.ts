@@ -53,6 +53,8 @@ describe('panel session transitions', () => {
     })
     const unsubscribe = (): void => {}
     panelApi = {
+      pageRecovery: vi.fn(async () => ({ reviewed: true, resumed: false, completed: false } as const)),
+      pageDiagnostics: vi.fn(async () => ({ enabled: false, count: 0, dropped: 0 })),
       startBrowserPairing: vi.fn(async () => {}),
       cancelBrowserPairing: vi.fn(async () => {}),
       onPageAccess: vi.fn(callback => { onPageAccess = callback; return () => {} }),

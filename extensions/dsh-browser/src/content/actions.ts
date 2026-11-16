@@ -25,10 +25,13 @@ import { DesignZoomNotSelectedError } from './design-zoom-error.ts'
 import { clearLanhuZoom, commitLanhuZoom, prepareLanhuZoom } from './lanhu-zoom.ts'
 import type { DesignZoomStep } from '../design-zoom-step.ts'
 import type { VisualObservation } from '@eilyeee/dsh-browser-stride/src/visual.ts'
+import type { ContentObservation } from '@eilyeee/dsh-browser-stride/src/snapshot-observation.ts'
+import type { SnapshotView } from './snapshot.ts'
 
 /** A settled action result. */
 export interface ActionResult {
   text: string
+  observation?: ContentObservation
   feedback?: { version: 1; state: 'observed' | 'dispatched' | 'readback-unconfirmed'; businessChange: 'not-verified' }
   designZoomStep?: DesignZoomStep
   /** Packaged controller metadata, never constructed by page-world scripts. */
@@ -224,12 +227,16 @@ function setNativeValue(input: HTMLInputElement | HTMLTextAreaElement, value: st
 export interface ActionContext {
   ids: ElementIds
   budget: SnapshotBudget
+  /** Installed controllers require a fresh observation before DOM input. */
+  requireObservation?: boolean
   /** Enabled only when the background may share page content without another approval. */
   includePageDelta?: boolean
 }
 
 /** Run one named action with its args. */
 export async function runAction(action: string, args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
+  if (ctx.requireObservation === true && ['browser_click', 'browser_type', 'browser_select', 'browser_press', 'browser_scroll', 'browser_set_design_zoom'].includes(action)
+    && !ctx.ids.hasCurrentObservation()) throw new ActionError('element-stale', 'The page was reloaded or native input changed its context. Take a fresh snapshot before DOM input.')
   // Capture the caller's reference before awaiting page events. Another call
   // may publish a different observation while this action is settling.
   ctx = { ...ctx }
@@ -324,7 +331,15 @@ function snapshotAction(args: Record<string, unknown>, ctx: ActionContext): Acti
   const rendered = renderSnapshotDetails(view, delta)
   snapshotByRegistry.set(ctx.ids, { view, budget: { ...ctx.budget }, regionNode, renderComplete: rendered.renderComplete })
   ctx.ids.publishObservation(view.observationId, rendered.targets, rendered.selects)
-  return { text: rendered.text }
+  return { text: rendered.text, observation: snapshotObservation(view, delta, rendered.renderComplete) }
+}
+
+function snapshotObservation(view: SnapshotView, delta: boolean, renderComplete: boolean): ContentObservation {
+  return { version: 1, observationId: view.observationId, ...(delta && view.baseObservationId ? { baseObservationId: view.baseObservationId } : {}),
+    kind: delta ? 'delta' : 'snapshot', observedAt: Date.now(), complete: false, renderComplete,
+    textScope: view.region === undefined ? 'main-text' : 'region-text', redaction: 'recognized-sensitive-values',
+    omitted: { mainCharacters: view.truncated.mainChars, controls: view.truncated.itemsDropped, fields: view.truncated.formsDropped,
+      selectsWithOmittedOptions: view.forms.filter(form => form.optionsTruncated).length, openTreeLimited: view.truncated.openTreeLimited === true } }
 }
 
 /** Delta state belongs to the content-script registry, not another instance. */
@@ -371,6 +386,7 @@ function withPageDelta(text: string, ctx: ActionContext, settled = true, state: 
     text,
     feedback,
     pageContent: rendered.text,
+    observation: snapshotObservation(view, delta, rendered.renderComplete),
   }
 }
 

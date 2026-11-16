@@ -7,9 +7,10 @@ interface Session {
   worlds: Map<number, { id: string; frameId: string }>
   context?: { document: string; id: string }
   preparing?: Promise<string>
+  defaultContexts?: Map<number, { frameId: string; uniqueId: string }>
 }
 interface Frame { id: string; loaderId: string; url: string }
-interface VisualConnection { valid: boolean; attached: boolean; current: () => boolean; preparing?: Promise<void>; closing?: Promise<void> }
+interface VisualConnection { valid: boolean; attached: boolean; current: () => boolean; preparing?: Promise<void>; closing?: Promise<void>; visualUsed?: boolean; readers?: Set<object>; defaultContexts?: Map<number, { frameId: string; uniqueId: string }> }
 interface Evaluation { result?: { value?: unknown }; exceptionDetails?: unknown }
 const CONTROLLER_WORLD = 'DSH Stride controller'
 const VISUAL_CAPTURES_KEY = 'dshVisualCaptures'
@@ -18,6 +19,15 @@ const VISUAL_CAPTURES_KEY = 'dshVisualCaptures'
 export interface PageDispatch {
   current?: () => boolean
   commit?: () => void
+}
+export type ReadDebugCommand = 'Page.enable' | 'Page.getFrameTree' | 'Runtime.enable' | 'Runtime.disable' | 'Network.enable' | 'Network.disable'
+/** A background-only lease; it cannot evaluate scripts, fetch bodies or issue input. */
+export interface ReadDebugLease {
+  current(): boolean
+  contexts(): Array<{ id: number; frameId: string; uniqueId: string }>
+  command<T>(method: ReadDebugCommand, params?: object): Promise<T>
+  subscribe(listener: (method: string, params?: Record<string, unknown>) => void): () => void
+  release(): Promise<void>
 }
 export class PageDispatchRevoked extends Error {
   constructor() { super('The original browser request was revoked before dispatch.') }
@@ -33,10 +43,12 @@ export class DebuggerPages {
   private captureRecovery?: Promise<void>
   private captureWrites = Promise.resolve()
   private source?: Promise<string>
+  private eventObservers = new Set<(target: chrome.debugger.DebuggerSession, method: string, params?: Record<string, unknown>) => void>()
   onDetached: (tabId: number) => void = () => {}
   constructor() {
     if (typeof chrome !== 'undefined') chrome.debugger?.onDetach.addListener(target => {
       if (target.tabId === undefined) return
+      this.emit(target, 'DSH.detached')
       const capture = this.captures.get(target.tabId)
       if (capture !== undefined) {
         capture.valid = false
@@ -51,6 +63,27 @@ export class DebuggerPages {
       this.onDetached(target.tabId)
     })
     if (typeof chrome !== 'undefined') chrome.debugger?.onEvent?.addListener((target, method, params) => {
+      if (target.tabId !== undefined && target.sessionId === undefined) {
+        const owner = this.sessions.get(target.tabId) ?? this.captures.get(target.tabId)
+        if (owner !== undefined) {
+          const contexts = owner.defaultContexts ??= new Map()
+          if (method === 'Runtime.executionContextCreated') {
+            const context = params?.context as { id?: number; uniqueId?: string; auxData?: { frameId?: string; isDefault?: boolean } } | undefined
+            if (Number.isSafeInteger(context?.id)) {
+              contexts.delete(context!.id!)
+              if (context?.auxData?.isDefault === true && typeof context.auxData.frameId === 'string'
+                && typeof context.uniqueId === 'string' && context.uniqueId.length <= 200 && contexts.size < 64) {
+                contexts.set(context.id!, { frameId: context.auxData.frameId, uniqueId: context.uniqueId })
+              }
+            }
+          } else if (method === 'Runtime.executionContextDestroyed') {
+            const value = params as { executionContextId?: number; executionContextUniqueId?: string }
+            const previous = contexts.get(value.executionContextId!)
+            if (previous !== undefined && (value.executionContextUniqueId === undefined || value.executionContextUniqueId === previous.uniqueId)) contexts.delete(value.executionContextId!)
+          } else if (method === 'Runtime.executionContextsCleared') contexts.clear()
+        }
+      }
+      this.emit(target, method, params as Record<string, unknown> | undefined)
       if (target.tabId === undefined || target.sessionId !== undefined) return
       const session = this.sessions.get(target.tabId)
       if (session === undefined) return
@@ -74,6 +107,11 @@ export class DebuggerPages {
         session.context = undefined
       }
     })
+  }
+  private emit(target: chrome.debugger.DebuggerSession, method: string, params?: Record<string, unknown>): void {
+    for (const observer of this.eventObservers) {
+      try { observer(target, method, params) } catch { /* observation must not interrupt native revocation */ }
+    }
   }
   has(tabId: number): boolean { return this.sessions.has(tabId) }
   private async detachRecordedVisual(tabId: number): Promise<void> {
@@ -155,7 +193,10 @@ export class DebuggerPages {
     }
   }
   /** Attach before measuring the viewport; Chrome's debug UI can resize it. */
-  async prepareViewportCapture(tabId: number, current: () => boolean, authorization: () => boolean): Promise<void> {
+  prepareViewportCapture(tabId: number, current: () => boolean, authorization: () => boolean): Promise<void> {
+    return this.prepareAttachment(tabId, current, authorization, true)
+  }
+  private async prepareAttachment(tabId: number, current: () => boolean, authorization: () => boolean, visual = false): Promise<void> {
     await this.recoverCaptures()
     if (!current() || !authorization()) throw new PageDispatchRevoked()
     if (this.has(tabId)) { this.session(tabId); return }
@@ -165,10 +206,11 @@ export class DebuggerPages {
     const live = this.captures.get(tabId)
     if (live !== undefined) {
       if (!live.attached) throw new Error('A visual connection is still being prepared.')
+      if (visual) live.visualUsed = true
       return
     }
     if (chrome.debugger === undefined) throw new Error('Chrome visual capture is unavailable.')
-    const lease: VisualConnection = { valid: true, attached: false, current: authorization }
+    const lease: VisualConnection = { valid: true, attached: false, current: authorization, visualUsed: visual }
     this.captures.set(tabId, lease)
     const preparing = (async () => {
       try {
@@ -193,6 +235,51 @@ export class DebuggerPages {
     })()
     lease.preparing = preparing
     try { await preparing } finally { if (lease.preparing === preparing) lease.preparing = undefined }
+  }
+  /** Reuse the one owned Chrome connection. Native capture consent stays with its caller. */
+  async acquireReadLease(tabId: number, current: () => boolean, authorization: () => boolean): Promise<ReadDebugLease> {
+    await this.prepareAttachment(tabId, current, authorization)
+    const session = this.sessions.get(tabId), capture = this.captures.get(tabId), owner = {}
+    let active = true
+    const subscriptions = new Set<() => void>()
+    const owned = (): boolean => active && current() && authorization()
+      && (session !== undefined ? this.sessions.get(tabId) === session && session.current()
+        : capture !== undefined && this.captures.get(tabId) === capture && capture.valid && capture.attached && capture.current())
+    if (!owned()) {
+      if (capture !== undefined && !capture.visualUsed && (capture.readers?.size ?? 0) === 0 && this.captures.get(tabId) === capture) await this.detachVisual(tabId)
+      throw new PageDispatchRevoked()
+    }
+    if (capture !== undefined) (capture.readers ??= new Set()).add(owner)
+    return {
+      current: owned,
+      contexts: () => !owned() ? [] : [...((session ?? capture)?.defaultContexts ?? new Map())].map(([id, value]) => ({ id, ...value })),
+      command: async <T>(method: ReadDebugCommand, params?: object): Promise<T> => {
+        if (!['Page.enable', 'Page.getFrameTree', 'Runtime.enable', 'Runtime.disable', 'Network.enable', 'Network.disable'].includes(method)) throw new Error('Read debugger command is not allowed.')
+        if (!owned()) throw new PageDispatchRevoked()
+        // An automatic DOM controller depends on Runtime events too.
+        if (method === 'Runtime.disable' && session !== undefined) return undefined as T
+        const result = await chrome.debugger.sendCommand({ tabId }, method, params) as T
+        if (!owned()) throw new PageDispatchRevoked()
+        if (method === 'Runtime.disable') (session ?? capture)?.defaultContexts?.clear()
+        return result
+      },
+      subscribe: listener => {
+        const receive = (target: chrome.debugger.DebuggerSession, method: string, params?: Record<string, unknown>): void => {
+          if (target.tabId === tabId && target.sessionId === undefined && owned()) listener(method, params)
+        }
+        this.eventObservers.add(receive)
+        const stop = (): void => { this.eventObservers.delete(receive); subscriptions.delete(stop) }
+        subscriptions.add(stop)
+        return stop
+      },
+      release: async () => {
+        if (!active) return
+        active = false
+        for (const stop of [...subscriptions]) stop()
+        capture?.readers?.delete(owner)
+        if (capture !== undefined && !capture.visualUsed && capture.readers?.size === 0 && this.captures.get(tabId) === capture) await this.detachVisual(tabId)
+      },
+    }
   }
   /** Only already-authorized native targets; never the currently visible personal tab. */
   async captureViewport(tabId: number, view: VisualObservation, current: () => boolean): Promise<string> {

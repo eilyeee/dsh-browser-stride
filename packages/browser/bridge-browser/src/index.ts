@@ -17,6 +17,7 @@
  * @module @eilyeee/dsh-browser-stride
  */
 
+import { NativeRecovery } from './native-recovery.ts'
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
@@ -311,6 +312,7 @@ function mountBridge(
   const server = new BridgeServer({
     token: tokenRes.token,
     pairing,
+    recovery: new NativeRecovery(runs, sid => ctx.agents.get(sid as import('@deepseek-ai/dsh-agent').Agent['id'])?.status === 'idle'),
     allowHostManagement: resolved.allowHostManagement,
     api,
     toolTimeoutMs: resolved.toolTimeoutMs,
@@ -321,6 +323,8 @@ function mountBridge(
       elementScroll: true,
       elementReadScope: true,
       snapshotBase: true,
+      pageDiagnostics: true,
+      manualRecovery: true,
       designViewZoom: true,
       release: bridgeRelease(),
       ...(briefs === undefined ? { taskNotesUnavailable: true } : {}),

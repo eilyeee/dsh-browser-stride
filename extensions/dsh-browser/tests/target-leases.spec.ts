@@ -5,6 +5,24 @@ import { TargetLeaseRegistry, type ToolTargetIdentity } from '../src/background/
 const target = (): ToolTargetIdentity => ({ tabId: 7, windowId: 3, url: 'https://example.test/form' })
 
 describe('receive-time browser target leases', () => {
+  it('revokes input/observation on native intervention while preserving page authority for diagnostics', () => {
+    const registry = new TargetLeaseRegistry(), value = target(), old = registry.capture('a', value, () => value)
+    registry.invalidateObservation(value.tabId)
+    expect(old.current()).toBe(true); expect(old.sameBinding()).toBe(true); expect(old.observationCurrent()).toBe(false)
+    const fresh = registry.capture('a', value, () => value)
+    expect(fresh.observationCurrent()).toBe(true); expect(fresh.observationScope).not.toBe(old.observationScope)
+  })
+  it('keeps an observation owner stable for one binding and rotates it across session/tab/worker ownership changes', () => {
+    const registry = new TargetLeaseRegistry(), value = target()
+    const capture = (sid = 'a') => registry.capture(sid, value, () => value).observationScope
+    const initial = capture()
+    expect(capture()).toBe(initial); expect(capture('b')).not.toBe(initial)
+    registry.invalidateDocument(value.tabId)
+    expect(capture()).toBe(initial) // Native frame/reset state owns document identity separately.
+    registry.invalidateSession('a'); expect(capture()).not.toBe(initial)
+    const beforeClose = capture(); registry.forgetTab(value.tabId); expect(capture()).not.toBe(beforeClose)
+    const beforeRestart = capture(); registry.revokeAll(); expect(capture()).not.toBe(beforeRestart)
+  })
   it('fences a page creation before any target exists, including away-and-back and owner changes', () => {
     const registry = new TargetLeaseRegistry()
     const before = registry.captureSession('session-a')

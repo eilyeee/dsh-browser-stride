@@ -18,6 +18,8 @@ import { connectPanel, PanelRpcError, type PanelApi, type PanelSettings, type Pa
 import { renderMarkdown } from './markdown.ts'
 import { TaskBriefPanel } from './TaskBriefPanel.tsx'
 import { VersionStatus } from './VersionStatus.tsx'
+import { DiagnosticsPanel } from './DiagnosticsPanel.tsx'
+import { RecoveryPanel } from './RecoveryPanel.tsx'
 import { TASK_BRIEF_SAVE, TASK_BRIEF_OPEN, type TaskBrief } from '@eilyeee/dsh-browser-stride/src/task-brief-contract.ts'
 import { clearBriefDraft, clearBriefDrafts } from './task-brief-drafts.ts'
 import whaleUrl from '../../assets/icons/deepseek-256.png'
@@ -2249,6 +2251,8 @@ export function App(): React.JSX.Element {
       </section>
       <VersionStatus caps={caps} locale={locale} />
       <ControlGroupStatus state={tabAffinity} pages={pageAccess.pages ?? []} copy={copy} onSelect={selectGroupPage} />
+      <DiagnosticsPanel api={api} sessionId={sessionRef.current} affinity={tabAffinity} available={state === 'connected' && caps?.pageDiagnostics === true && pageAccess.controlledGranted} locale={locale} />
+      <RecoveryPanel api={api} sessionId={sessionRef.current} affinity={tabAffinity} available={state === 'connected' && caps?.manualRecovery === true && pageAccess.controlledGranted} working={working || sessionSwitchBlocked} locale={locale} />
       <TaskBriefPanel api={api} sessionId={sessionRef.current} supported={caps?.taskNotes === true} connected={state === 'connected'} locale={locale}
         unavailable={caps?.taskNotesUnavailable === true} hostIdentity={taskBriefHost} canStartProject={!sessionSwitchBlocked} onProjectChat={brief => { void startNewSession(brief) }}
         pages={pageAccess.pages ?? []} selectedTabId={tabAffinity?.controlled?.tabId} onSelectPage={selectMaterialPage} canSelectPage={!sessionSwitchBlocked && tabAffinity !== null} />
