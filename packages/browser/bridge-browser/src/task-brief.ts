@@ -39,8 +39,11 @@ function specification(profile: string) {
     tables: { briefs: domainTable(recordSchema) } })
 }
 type BriefDomain = Domain<ReturnType<typeof specification>>
+export const TASK_PROGRESS_GUIDANCE = 'Report limits: at most 4 evidence items, each 1-500 characters; nextStep at most 500 characters. Observed reports need evidence; blocked or uncertain reports need a nextStep. Use an existing criterionId and no extra fields.'
 export class TaskBriefError extends Error {
-  constructor(readonly code: 'bad-request' | 'stale-version' | 'user-edited' | 'storage-unavailable' | 'session-unavailable' | 'closed' | 'cancelled' | 'not-found' | 'limit') { super(`Task notes: ${code}`) }
+  constructor(readonly code: 'bad-request' | 'stale-version' | 'user-edited' | 'storage-unavailable' | 'session-unavailable' | 'closed' | 'cancelled' | 'not-found' | 'limit', detail?: 'progress-shape') {
+    super(`Task notes: ${code}${detail === 'progress-shape' ? `. ${TASK_PROGRESS_GUIDANCE}` : ''}`)
+  }
 }
 export class TaskBriefStore {
   private tail: Promise<void> = Promise.resolve()
@@ -84,7 +87,8 @@ export class TaskBriefStore {
   report(sessionId: string, version: number, input: unknown, signal?: AbortSignal): Promise<TaskBrief> {
     return this.mutate(sessionId, version, signal, old => {
       const parsed = progressInputSchema.safeParse(input)
-      if (!parsed.success || !old.criteria.some(item => item.id === parsed.data?.criterionId)) throw new TaskBriefError('bad-request')
+      if (!parsed.success) throw new TaskBriefError('bad-request', 'progress-shape')
+      if (!old.criteria.some(item => item.id === parsed.data.criterionId)) throw new TaskBriefError('bad-request')
       return { ...old, progress: [...old.progress.filter(item => item.criterionId !== parsed.data.criterionId), { ...parsed.data, userConfirmed: false }] }
     })
   }

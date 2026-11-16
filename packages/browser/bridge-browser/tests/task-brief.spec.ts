@@ -76,6 +76,20 @@ describe('session task notes and reports', () => {
     await store.purge('s')
     expect(store.get('s').version).toBe(0)
   })
+  it('explains an oversized report without changing saved evidence, review or version', async () => {
+    const { store } = await setup()
+    const saved = await store.save('s', 0, input, 'user')
+    const observed = await store.report('s', saved.version, report)
+    const reviewed = await store.review('s', observed.version, 'form', true)
+    const privateEvidence = 'synthetic-private-evidence'
+    const error = await store.report('s', reviewed.version, { ...report, evidence: Array(5).fill(privateEvidence) }).catch(error => error)
+    expect(error).toMatchObject({ code: 'bad-request', message: expect.stringContaining('at most 4 evidence items') })
+    expect(error.message).not.toContain(privateEvidence)
+    expect(store.get('s')).toEqual(reviewed)
+    const corrected = await store.report('s', reviewed.version, { ...report, evidence: Array(4).fill('Synthetic observation') })
+    expect(corrected.version).toBe(reviewed.version + 1)
+    expect(corrected.progress[0]).toMatchObject({ evidence: Array(4).fill('Synthetic observation'), userConfirmed: false })
+  })
   it('rejects credential URLs, malformed roles, uncertain reports without a next step and cancelled writes', async () => {
     const { store } = await setup()
     for (const url of ['javascript:alert(1)', 'https://user:pass@example.com/', 'https://example.com/?token=synthetic']) {

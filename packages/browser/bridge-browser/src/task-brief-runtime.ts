@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { createUserMessage, type ContextFormed } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { TaskBriefError, TaskBriefStore } from './task-brief.ts'
+import { TaskBriefError, TaskBriefStore, TASK_PROGRESS_GUIDANCE } from './task-brief.ts'
 import type { TaskBrief, TaskBriefInput } from './task-brief-contract.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
@@ -46,7 +46,7 @@ export function registerTaskBrief(ctx: Context, store: TaskBriefStore | undefine
     parameters: {
       action: { type: 'string', enum: ['read', 'record', 'report', 'classify'], required: true },
       version: { type: 'number', description: 'Version from read; required for writes.' },
-      json: { type: 'string', description: 'record: JSON {goal,projectPath,materials:[{url,label,role:unknown|requirement|design|api|reference}],criteria:[{id,text}]}. report: JSON {criterionId,implementation:pending|implemented|blocked,observation:unverified|observed|uncertain,evidence:string[],nextStep}. classify: JSON {url,role:requirement|design|api|reference}, a suggestion only for an existing unknown-role material. Use observed only with readback evidence; explain missing conditions.' },
+      json: { type: 'string', description: 'record: JSON {goal,projectPath,materials:[{url,label,role:unknown|requirement|design|api|reference}],criteria:[{id,text}]}. report: JSON {criterionId,implementation:pending|implemented|blocked,observation:unverified|observed|uncertain,evidence:string[],nextStep}. classify: JSON {url,role:requirement|design|api|reference}, a suggestion only for an existing unknown-role material. Use observed only with readback evidence; explain missing conditions. ' + TASK_PROGRESS_GUIDANCE },
     },
     output: { schema: { type: 'object', additionalProperties: false, properties: { text: { type: 'string', required: true } } },
       render: (_args, value) => [{ type: 'text', text: (value as { text: string }).text }] },
