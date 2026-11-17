@@ -22,6 +22,8 @@ export interface TabAffinityState {
   active: AffinityTab | null
   /** Explicit user revocation, distinct from a closed tab. */
   detached?: true
+  /** Deny-only write status for the panel's own conversation. */
+  inputControl?: 'handoff-required' | 'unavailable'
 }
 
 export type TabTargetResolution =

@@ -9,6 +9,19 @@ package versions currently identify development builds, not supported releases.
 
 ### Added
 
+- Development build 0.1.28 adds operation time, bounded operation type and
+  uncertainty reason to native review lists, without storing input values or
+  deciding whether an action took effect. Changes to this context invalidate
+  the review offer. Older peers still parse the existing label field.
+- Trusted Host integrations can use `createReadbackVerifier` to require a fresh
+  independent backend read, the captured account/record scope, a newer record
+  version and exact postconditions. Evidence contains private artifact references
+  and a digest. This helper does not install a verifier for arbitrary sites.
+- Native page input now fences writes in affected ordinary conversations as
+  well as managed tasks. A fresh snapshot or model tab switch cannot acknowledge
+  takeover. Explicit native page selection/continuation is required; the deny
+  fence persists across worker restart without restoring acknowledgements.
+
 - Development build 0.1.27 reports a bounded, worker-local last native
   selection outcome for the calling conversation. It returns only a state
   and fixed failure code, expires after five minutes, and grants no authority.

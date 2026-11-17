@@ -1,4 +1,5 @@
 import { readFile, writeFile } from 'node:fs/promises'
+import { createReadbackVerifier } from '../../packages/browser/bridge-browser/src/readback-verifier.ts'
 
 export const name = 'stride-task-runtime-probe'
 export const inject = ['browserRuns', 'browserTasks', 'agents']
@@ -33,15 +34,18 @@ export function apply(ctx, config) {
     if (run.state === 'running') admittedRevisions.add(run.controlRevision)
     if (run.state === 'queued' && !registered.has(run.runId)) {
       registered.add(run.runId)
-      ctx.browserTasks.registerVerifier(run.runId, {
-        acceptsTarget: url => url === expected.url,
-        verify: async ({ signal }) => {
-          const response = await fetch(expected.verificationUrl ?? new URL('/state', expected.url), { signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]) })
-          const value = await response.json()
-          return value.enabled === true && value.saved === true
-            ? { fieldValues: { testSetting: 'enabled', persisted: 'true' } } : undefined
+      ctx.browserTasks.registerVerifier(run.runId, createReadbackVerifier({
+        targetUrl: expected.url, contextKey: 'synthetic-setting', versionPath: ['version'], baselineVersion: 0,
+        checks: [{ path: ['enabled'], equals: true }, { path: ['saved'], equals: true }],
+        read: async ({ signal }) => {
+          const response = await fetch(expected.verificationUrl ?? new URL('/state', expected.url), { signal, cache: 'no-store' })
+          if (!response.ok) throw Error('readback-unavailable')
+          const body = await response.text(), value = JSON.parse(body)
+          const artifactRef = `readback_fixture_${value.version}`
+          await writeFile(`${config.result}.${artifactRef}.json`, body, { mode: 0o600 })
+          return { body, contextKey: value.contextKey, observedAt: Date.now(), artifactRef }
         },
-      })
+      }))
     }
     const rows = ctx.browserRuns.dispatches.list(run.sessionId).filter(row => row.runId === run.runId)
     const value = { ptcCalls, nestedBrowserCalls, directBrowserCalls, state: run.state, version: run.version, controlRevision: run.controlRevision, task: run.task,

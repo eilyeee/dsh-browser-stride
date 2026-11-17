@@ -106,6 +106,13 @@ try {
   await browser.panel.locator('.session-list li').filter({ hasText: 'task-workspace' }).locator('button').first().click()
   await browser.panel.waitForFunction(id => document.querySelector('.app')?.getAttribute('data-session-id') === id, session.sessionId)
   const card = browser.panel.locator('.browser-runs li').filter({ hasText: '将测试开关设为开启' })
+  // Existing pages require an explicit choice for this conversation, even
+  // when another conversation already controls the same authorized tab.
+  if (!newPageStart) {
+    const choose = browser.panel.locator('.control-group-pages button').filter({ hasText: '本地设置测试' })
+    await choose.click()
+    await wait(async () => await choose.getAttribute('aria-pressed') === 'true', 'native selected-page binding')
+  }
   const start = card.getByRole('button', { name: newPageStart ? '新建页面并开始' : '绑定并开始', exact: true })
   await start.waitFor()
   if (newPageStart) await card.getByRole('textbox', { name: '新页面网址', exact: true }).fill(site.url)

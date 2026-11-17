@@ -108,6 +108,27 @@ Host 仅凭完全匹配的原连接、会话、控制版本和页面绑定暂停
 
 可信 Host 代码可在任务排队时调用 `ctx.browserTasks.registerVerifier(runId, { acceptsTarget, verify })`。核验器须遵守取消信号，并返回独立取得的 `ActionEvidence`；不能核实目标时返回 `undefined`。网页、模型参数或浏览器 RPC 都不能注册核验器。Host 只根据这些证据记录已验证判据；Agent 空闲或成功文案不构成依据。没有核验器、写入未决或核验出错时，任务阻塞并显示待核实；不提供自动对账或重启恢复。合成表单仅存在于 `scripts/fixtures/` 测试夹具中。
 
+0.1.28 提供 `createReadbackVerifier` 供可信 Host 集成代码复用。配置固定目标 URL、非凭据的账号/租户/记录范围键、操作前的记录版本、版本字段路径及必须相等的结果字段。集成方提供只读 `read`，独立查询权威后台记录，将原始 JSON 保存在私有证据中，并返回其引用、当前范围键和 Host 读回时间。核验器只读一次，最多 15 秒；只有本次新读取、范围相同、记录版本增加且所有字段匹配才返回证据。任务记录只保存引用与内容摘要。超时、取消、缺字段、范围改变、旧版本或只有 HTTP 200 都不能通过。回调必须保证接口只读、身份对应和证据不可变；插件不会从网页或模型声明推断这些保证。此接口未自动接入任意业务站点，也不提供保存失败后的自动重试。
+
+```ts
+import { createReadbackVerifier } from '@eilyeee/dsh-browser-stride'
+
+const verifier = createReadbackVerifier({
+  targetUrl: 'https://example.test/settings',
+  contextKey: 'synthetic-account-record', // 由可信集成在操作前固定
+  versionPath: ['record', 'version'], baselineVersion: 7,
+  checks: [{ path: ['record', 'enabled'], equals: true }],
+  read: async ({ signal }) => {
+    // 集成方独立读取后台，并保存私有证据；这里不使用浏览器提示或模型输出。
+    return readAuthoritativeRecordAndStoreArtifact(signal)
+    // { body, contextKey, observedAt, artifactRef: 'readback_<opaque-id>' }
+  },
+})
+ctx.browserTasks.registerVerifier(runId, verifier) // 仅排队期间注册
+```
+
+已有页面须先在当前对话的「DSH 控制分组」明确选中；另一对话的目标不会自动继承。验收脚本同样真实点击该选页按钮，再点击开始，不跳过这层绑定。
+
 可选的 `STRIDE_REAL_MODEL=1 pnpm run test:smoke-task` 使用临时 Host Home、临时浏览器配置和本地合成表单。`STRIDE_MODEL_PATCH` 可指定私人模型及预设配置，`STRIDE_MODEL_CREDENTIALS` 可指定已保存的凭据文件；凭据以私有权限复制到临时 Home，结束后清理，不复制原有会话或浏览器配置。检查会调用已认证的 DSH Web 命令接口并操作真实扩展控件，不代表桌面端或 CLI 验收，也不以模型输出判断成功。
 
 再加 `STRIDE_TASK_NEW_PAGE=1` 可验收新页启动：初始没有页面授权，拒绝脚本合成的点击，并检查新页的调试控制、蓝色分组、精确会话绑定、任务内工具回执及合成站点独立保存状态。测试核验器使用本机地址，不依赖 Chromium 的测试域名映射。

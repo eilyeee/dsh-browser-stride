@@ -2,6 +2,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { canonicalize, asSessionId } from './contracts/ids.ts'
 import { requiresDispatchReview } from './dispatch-ledger.ts'
+import { recoveryWriteLabel } from './recovery-context.ts'
 import { summarizeReviewedFacts, type BrowserRunStore, type BrowserRunRecord } from './run-store.ts'
 import { recoveryDecisionsSchema, recoveryOfferSchema, type RecoveryOffer, type RecoveryDecisions } from './native-review.ts'
 
@@ -24,7 +25,7 @@ export class NativeRecovery {
     const all = this.store.dispatches.list(sessionId)
     if (all.some(row => row.effect === 'write' && (row.state === 'prepared' || row.state === 'sent_unconfirmed'))) throw new NativeRecoveryError('review-busy')
     const writes = all.filter(requiresDispatchReview)
-    const items: RecoveryOffer['items'] = writes.map(row => ({ key: `w:${row.requestId}`, kind: 'write', label: row.name }))
+    const items: RecoveryOffer['items'] = writes.map(row => ({ key: `w:${row.requestId}`, kind: 'write', label: recoveryWriteLabel(row) }))
     for (const run of runs) {
       for (const actionId of summarizeReviewedFacts(run).pendingReconciliation) items.push({ key: `f:${run.runId}:${actionId}`, kind: 'fact', label: actionId })
       if (run.recoveryRequired) items.push({ key: `r:${run.runId}`, kind: 'recovery', label: run.runId })
@@ -37,7 +38,8 @@ export class NativeRecovery {
     if (items.length > 0 && observation === undefined) throw new NativeRecoveryError('review-read-required')
     const observationRequestId = observation?.requestId ?? 'none'
     const material = { observationRequestId, runs: runs.map(run => ({ id: run.runId, version: run.version })).sort((a, b) => a.id.localeCompare(b.id)),
-      writes: writes.map(row => ({ id: row.requestId, digest: row.requestDigest, state: row.state, receipt: row.receipt ?? null, nativeReview: row.nativeReview ?? null, invalidated: row.nativeReviewInvalidated ?? null })) }
+      writes: writes.map(row => ({ id: row.requestId, digest: row.requestDigest, name: row.name, preparedAt: row.preparedAt,
+        settledAt: row.settledAt ?? null, state: row.state, receipt: row.receipt ?? null, nativeReview: row.nativeReview ?? null, invalidated: row.nativeReviewInvalidated ?? null })) }
     return { signature: createHash('sha256').update(canonicalize(material)).digest('hex'), observationRequestId, offerItems: items, runs, writes }
   }
   prepare(sessionId: string, connectionId: string, owner: object): RecoveryOffer {

@@ -2,12 +2,12 @@ import { createServer } from 'node:http'
 
 /** Synthetic business state belongs to this test server, never model output. */
 export async function startTaskSite({ hostname = '127.0.0.1' } = {}) {
-  let state = { enabled: false, saved: false }
+  let state = { enabled: false, saved: false }, version = 0
   const server = createServer(async (request, response) => {
     response.setHeader('cache-control', 'no-store')
     if (request.url === '/state' && request.method === 'GET') {
       response.setHeader('content-type', 'application/json')
-      response.end(JSON.stringify(state)); return
+      response.end(JSON.stringify({ ...state, version, contextKey: 'synthetic-setting' })); return
     }
     if (request.url === '/save' && request.method === 'POST') {
       try {
@@ -16,7 +16,7 @@ export async function startTaskSite({ hostname = '127.0.0.1' } = {}) {
         for await (const chunk of request) { body += chunk; if (body.length > 1024) throw new Error('size') }
         const input = JSON.parse(body)
         if (typeof input.enabled !== 'boolean') throw new Error('input')
-        state = { enabled: input.enabled, saved: true }
+        state = { enabled: input.enabled, saved: true }; version += 1
         response.end('{}')
       } catch { response.writeHead(400); response.end() }
       return

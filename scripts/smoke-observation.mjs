@@ -21,7 +21,8 @@ const site = createServer((req, res) => {
 try {
   await writeFile(barrier, 'Native test synchronization only'); await new Promise(done => site.listen(0, '127.0.0.1', done)); const origin = `http://127.0.0.1:${site.address().port}`
   const programs = {
-    ownership: String.raw`let view=await tools.browser_snapshot({});const ref=view.text.split('\n').find(line=>line.includes('button "Count action"'))?.match(/ref=(obs_[a-f0-9-]+:\d+)/)?.[1];if(!ref)throw Error('Missing observed action');console.log('OLD_OBSERVATION_CAPTURED');await tools.read({file_path:BARRIER});let stale=false;try{await tools.browser_click({elementRef:ref})}catch{stale=true}if(!stale)throw Error('Native input did not fence old reference');let enterStale=false;try{await tools.browser_press({key:'Enter'})}catch{enterStale=true}if(!enterStale)throw Error('Unanchored Enter bypassed native intervention');view=await tools.browser_snapshot({});if(!view.text.includes('Workspace B'))throw Error('Fresh read missed changed workspace');const next=view.text.split('\n').find(line=>line.includes('button "Count action"'))?.match(/ref=(obs_[a-f0-9-]+:\d+)/)?.[1];await tools.browser_click({elementRef:next});console.log('NATIVE_OBSERVATION_FENCE_OK');`.replace('BARRIER', JSON.stringify(barrier)),
+    ownership: String.raw`let view=await tools.browser_snapshot({});const ref=view.text.split('\n').find(line=>line.includes('button "Count action"'))?.match(/ref=(obs_[a-f0-9-]+:\d+)/)?.[1];if(!ref)throw Error('Missing observed action');console.log('OLD_OBSERVATION_CAPTURED');await tools.read({file_path:BARRIER});let stale=false;try{await tools.browser_click({elementRef:ref})}catch{stale=true}if(!stale)throw Error('Native input did not fence old reference');let enterStale=false;try{await tools.browser_press({key:'Enter'})}catch{enterStale=true}if(!enterStale)throw Error('Unanchored Enter bypassed native intervention');view=await tools.browser_snapshot({});if(!view.text.includes('Workspace B'))throw Error('Fresh read missed changed workspace');const next=view.text.split('\n').find(line=>line.includes('button "Count action"'))?.match(/ref=(obs_[a-f0-9-]+:\d+)/)?.[1];let blocked=false;try{await tools.browser_click({elementRef:next})}catch{blocked=true}if(!blocked)throw Error('Fresh snapshot bypassed native handoff');console.log('NATIVE_OBSERVATION_FENCE_OK');`.replace('BARRIER', JSON.stringify(barrier)),
+    resumed: String.raw`const view=await tools.browser_snapshot({});const ref=view.text.split('\n').find(line=>line.includes('button "Count action"'))?.match(/ref=(obs_[a-f0-9-]+:\d+)/)?.[1];await tools.browser_click({elementRef:ref});console.log('NATIVE_HANDOFF_RESUMED_OK');`,
     projection: String.raw`const first=await tools.browser_snapshot({});const id=first.text.match(/Observation: (obs_[a-f0-9-]+)/)?.[1];if(!id)throw Error('Missing observation id');console.log(first.text.slice(0,80));const next=await tools.browser_snapshot({delta:true,baseObservationId:id});console.log(next);if(!JSON.stringify(next).includes('model-projection-not-attested'))throw Error('Partial PTC projection accepted as a full model baseline');console.log('PROJECTION_FALLBACK_OK');`,
     coverage: `const value=await tools.browser_snapshot({});console.log(value.text.slice(0,1200));console.log(JSON.stringify(value.coverage));console.log('COVERAGE_READ_OK');`,
   }
@@ -37,7 +38,12 @@ try {
   // Native trusted click; synthetic dispatchEvent cannot pass this fixture.
   await h.browser.target.locator('#switch').click(); await h.browser.target.locator('#identity').filter({hasText:'Workspace B'}).waitFor()
   await delay(150); await writeFile(release, 'continue')
-  const events = await turn; assert.ok(JSON.stringify(events).includes('NATIVE_OBSERVATION_FENCE_OK')); assert.equal(await h.browser.target.locator('#count').textContent(), '1')
+  const events = await turn; assert.ok(JSON.stringify(events).includes('NATIVE_OBSERVATION_FENCE_OK')); assert.equal(await h.browser.target.locator('#count').textContent(), '0')
+  phase = 'native-handoff'; await h.browser.panel.bringToFront()
+  await h.browser.panel.getByText('你已接管页面，页面修改已停止，只读仍可继续。请核对账号和工作区，再点击下方目标页继续。', { exact: true }).waitFor()
+  await h.browser.panel.locator('.control-group-pages button[aria-pressed="true"]').click()
+  await h.browser.panel.getByText('你已接管页面，页面修改已停止，只读仍可继续。请核对账号和工作区，再点击下方目标页继续。', { exact: true }).waitFor({ state: 'hidden' })
+  const resumed = await h.turn('resumed', ''); assert.ok(JSON.stringify(resumed).includes('NATIVE_HANDOFF_RESUMED_OK')); assert.equal(await h.browser.target.locator('#count').textContent(), '1')
   phase = 'partial-model-projection'; const projection = await h.turn('projection', '')
   assert.ok(JSON.stringify(projection).includes('PROJECTION_FALLBACK_OK'))
   phase = 'collection-coverage'; await h.browser.prepare(origin + '/large'); await h.browser.bindSession(h.sessionId); await h.browser.panel.bringToFront()
@@ -46,7 +52,7 @@ try {
   assert.ok(payloads.includes('complete\\":false')); assert.match(payloads, /projection/); assert.match(payloads, /mainCharacters/); assert.match(payloads, /controls/)
   assert.match(payloads, /Collection omitted: [1-9]\d* main characters/); assert.equal(writes, 0)
   const result = { passed:true, version, realHost:true, isolatedChrome:true, scriptedModel:true, realModel:false, browserVersion:h.browser.browserVersion,
-    nativeTrustedIntervention:true, oldReferenceRejected:true, unanchoredEnterRejected:true, freshObservationAllowedOneAction:true, partialModelProjectionForcedFull:true,
+    nativeTrustedIntervention:true, oldReferenceRejected:true, unanchoredEnterRejected:true, freshObservationAloneCannotResumeWrites:true, nativeHandoffAllowedOneAction:true, partialModelProjectionForcedFull:true,
     mountedLargeFixture:true, collectionOmissionsReported:true, unknownAccountChangesDetected:false, serverWrites:writes, originalHostUntouched:true,
     hostBundleSha256:createHash('sha256').update(await readFile(join(repo,'packages/browser/bridge-browser/lib/index.js'))).digest('hex'), extensionBundleSha256:createHash('sha256').update(await readFile(join(repo,'extensions/dsh-browser/dist/background.js'))).digest('hex'), evidenceDirectory:artifacts.slice(base.length+1) }
   await writeFile(join(artifacts,'result.json'),JSON.stringify(result,null,2),{mode:0o600}); await writeFile(join(base,'scripted.json'),JSON.stringify(result,null,2),{mode:0o600}); console.log(JSON.stringify(result))

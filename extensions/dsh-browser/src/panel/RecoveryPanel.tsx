@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { RecoveryOffer, RecoveryDecisions } from '@eilyeee/dsh-browser-stride/src/native-review.ts'
+import { parseRecoveryWriteLabel } from '@eilyeee/dsh-browser-stride/src/recovery-context.ts'
 import type { PanelApi } from './api.ts'
 import { PanelRpcError } from './api.ts'
 import type { TabAffinityState } from '../background/tab-affinity.ts'
@@ -51,6 +52,16 @@ export function RecoveryPanel({ api, sessionId, affinity, available, working, lo
     <button type="button" className="secondary" disabled={!ready || busy} onClick={event => { if (event.nativeEvent.isTrusted) void act(false) }}>{busy ? (zh ? '正在确认…' : 'Confirming…') : (zh ? '刷新核对清单' : 'Refresh review list')}</button>
     {offer !== null && offer.items.length > 0 && <>
       <ul>{offer.items.map(item => {
+        const context = item.kind === 'write' ? parseRecoveryWriteLabel(item.label) : undefined
+        const operation = context === undefined ? item.label : ({ browser_click: zh ? '点击元素' : 'Click element',
+          browser_click_at: zh ? '点击画布位置' : 'Click canvas position', browser_type: zh ? '输入内容' : 'Enter text',
+          browser_press_key: zh ? '按键' : 'Press key', browser_navigate: zh ? '打开地址' : 'Open URL' } as Record<string, string>)[context.operation] ?? context.operation
+        const explanation = context === undefined ? undefined : {
+          'no-reply': zh ? '操作已发出，但没有收到结果；实际是否生效仍需核对。' : 'The action was sent without a result. Check whether it took effect.',
+          'reply-error': zh ? '收到错误回执，但不能据此判断操作未生效。' : 'An error reply does not establish that the action had no effect.',
+          'readback-unconfirmed': zh ? '操作已返回，但尚未确认写入后的实际状态。' : 'The action returned without confirming the resulting state.',
+          'review-invalidated': zh ? '人工核对后又收到迟到回执，需要重新核对。' : 'A late reply invalidated the previous review. Inspect the result again.',
+        }[context.outcome]
         const options: Array<{ value: '' | RecoveryDecisions[number]['decision']; text: string }> = [
           { value: '', text: zh ? '仍不确定，保持阻塞' : 'Still uncertain; keep blocked' },
           ...(item.kind === 'recovery' ? [{ value: 'checked' as const, text: zh ? '已人工核对当前状态' : 'I inspected the current state' }]
@@ -58,7 +69,9 @@ export function RecoveryPanel({ api, sessionId, affinity, available, working, lo
               { value: 'not-applied' as const, text: zh ? '已确认未生效，后续重新决定' : 'Confirmed not applied; decide next action separately' }]),
         ]
         return <li key={item.key}><fieldset disabled={busy}>
-          <legend>{item.kind === 'recovery' ? (zh ? '中断任务的当前状态' : 'Interrupted task state') : item.label} <small>{item.key.slice(-12)}</small></legend>
+          <legend>{item.kind === 'recovery' ? (zh ? '中断任务的当前状态' : 'Interrupted task state') : operation} <small>{item.key.slice(-12)}</small></legend>
+          {context?.occurredAt && <time dateTime={context.occurredAt}>{new Date(context.occurredAt).toLocaleString(zh ? 'zh-CN' : 'en-US')}</time>}
+          {explanation && <p>{explanation}</p>}
           {options.map(option => <label key={option.value}>
             <input type="radio" name={`review-${item.key}`} value={option.value} checked={(decisions[item.key] ?? '') === option.value} onChange={event => {
               if (!event.nativeEvent.isTrusted) return

@@ -416,6 +416,8 @@ export function ControlGroupStatus({ state, pages, copy, onSelect, selectionAvai
     <strong>{copy.controlGroup.title}</strong>
     <p>{copy.controlGroup.body}</p>
     <p>{copy.controlGroup.current}: {selectedPage === undefined ? copy.controlGroup.unselected : tabLabel(selectedPage, copy.controlGroup.choose)}</p>
+    {state?.inputControl === 'handoff-required' && <p>{copy.controlGroup.handoffRequired}</p>}
+    {state?.inputControl === 'unavailable' && <p role="alert">{copy.controlGroup.fenceUnavailable}</p>}
     {(!selectionAvailable || state === null) && <p>{copy.controlGroup.notReady}</p>}
     {pages.length === 0 ? <p>{copy.controlGroup.empty}</p> : <div className="control-group-pages" role="group" aria-label={copy.controlGroup.page}>
       {pages.map(page => <button key={page.tabId} type="button" data-tab-id={page.tabId}

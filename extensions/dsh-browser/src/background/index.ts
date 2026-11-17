@@ -70,6 +70,7 @@ import { localBridgeUrl } from './bridge-address.ts'
 import { requestBrowserPairing, revokeBrowserPairing, type BrowserPairingStatus } from './pairing-client.ts'
 import { createRpc, BridgeRpcError } from './rpc.ts'
 import { TargetLeaseRegistry, type ToolTargetLease, type ToolTargetIdentity } from './target-leases.ts'
+import { NativeTakeoverFence } from './native-takeover.ts'
 import {
   dispatchOpenTab,
   dispatchToolCall,
@@ -96,6 +97,7 @@ import { TransientEventCache } from './transient-events.ts'
 import {
   TabAffinityController,
   type AffinityTab,
+  type TabAffinityState,
 } from './tab-affinity.ts'
 import { bindOpenedTabAffinity } from './open-tab-binding.ts'
 import { pageUrlKey, reuseAuthorizedTab } from './open-tab-reuse.ts'
@@ -220,6 +222,7 @@ const interactionResponses = new InteractionResponseRouter()
 const transientEvents = new TransientEventCache()
 const tabAffinity = new TabAffinityController()
 const targetLeases = new TargetLeaseRegistry()
+const nativeTakeover = new NativeTakeoverFence(chrome.storage.session)
 const runTargets = new RunTargetRegistry()
 const focusedWindow = new FocusedWindowTracker()
 const selections = new SelectionTracker()
@@ -254,6 +257,7 @@ interface ActiveToolCall {
   executionFence?: ToolExecutionFence
   managed: boolean
   observationBound: boolean
+  write: boolean
   nativeIntervention?: boolean
   targetLease?: ToolTargetLease
   controller: AbortController
@@ -504,10 +508,16 @@ async function broadcastPageAccess(): Promise<boolean> {
   })
 }
 
+function panelTabAffinity(port: chrome.runtime.Port): TabAffinityState {
+  const sessionId = panelActiveSessions.get(port), state = tabAffinity.snapshotForSession(sessionId)
+  const inputControl = nativeTakeover.status(sessionId, state.controlled?.tabId)
+  return inputControl === undefined ? state : { ...state, inputControl }
+}
+
 function broadcastTabAffinity(): void {
   broadcastPageAccess()
   for (const port of panelPorts) {
-    try { port.postMessage({ type: 'tab-affinity', state: tabAffinity.snapshotForSession(panelActiveSessions.get(port)) }) } catch { /* port already closed */ }
+    try { port.postMessage({ type: 'tab-affinity', state: panelTabAffinity(port) }) } catch { /* port already closed */ }
   }
 }
 
@@ -1272,6 +1282,9 @@ async function rebindTabAffinityToActive(signal: AbortSignal, sessionId?: string
   if (tab === undefined || !pageAccess.allows(tab)) throw new TabAffinityRebindError('page-access-required', getUiLocale() === 'zh'
     ? '请先在目标页面点击工具栏上的 DSH Stride 图标授权此页' : 'Click the DSH Stride toolbar icon on the intended page first')
   commitTabAffinityRebind(summary, sessionId, 'background')
+  const recorded = await nativeTakeover.acknowledge(summary.tabId, sessionId)
+  broadcastTabAffinity()
+  if (!recorded) throw new TabAffinityRebindError('stale-binding', getUiLocale() === 'zh' ? '接管状态未确认，页面修改保持停止。请核对页面后重新选择；若仍失败，请重载扩展并重新授权。' : 'Page handoff was not confirmed. Keep writes stopped and select the intended page again; if it still fails, reload the extension and authorize the page.')
 }
 
 /** Commit one explicit tab handoff and clear stale element references. */
@@ -1350,6 +1363,7 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
   const activeCall: ActiveToolCall = {
     ...(call.sessionId === undefined ? {} : { sessionId: call.sessionId }),
     managed: call.execution.kind === 'run',
+    write: needsWriteTurn(call.name),
     observationBound: ['browser_snapshot', 'browser_screenshot', 'browser_click_at', 'browser_set_design_zoom', 'browser_click', 'browser_type', 'browser_select', 'browser_press', 'browser_scroll'].includes(call.name)
       || ['browser_get_text', 'browser_measure_layout'].includes(call.name) && call.args.elementRef !== undefined,
     controller,
@@ -1364,10 +1378,11 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
   unsettledToolCalls.add(activeCall)
   const target = isTabManagementTool(call.name) || call.name === 'browser_open_tab' ? undefined : captureToolTarget(call.sessionId)
   if (target !== undefined && !('ok' in target)) activeCall.targetLease = target
+  const writeAllowed = needsWriteTurn(call.name) ? nativeTakeover.capture(call.sessionId, selectedTargetIdentity(call.sessionId)?.tabId) : () => true
   const admittedPages = pageAccess.snapshot()
   const pageLease = target !== undefined && !('ok' in target) ? pageAccess.lease(target.target.tabId) : () => true
   const isCurrentCall = (): boolean => activeToolCalls.get(call.id) === activeCall
-  const targetAllowed = (): boolean => (!automaticOpen || automaticAllowed()) && (reusedPageAccess?.() ?? true) && (!['browser_list_tabs', 'browser_open_tab'].includes(call.name) || admittedPages.current()) && pageLease() && !tabAffinity.isDetached(call.sessionId) && isCurrentCall() && executionFence?.current() === true && (runTarget === undefined || runTarget.current()) && (activeCall.targetLease === undefined
+  const targetAllowed = (): boolean => writeAllowed() && (!automaticOpen || automaticAllowed()) && (reusedPageAccess?.() ?? true) && (!['browser_list_tabs', 'browser_open_tab'].includes(call.name) || admittedPages.current()) && pageLease() && !tabAffinity.isDetached(call.sessionId) && isCurrentCall() && executionFence?.current() === true && (runTarget === undefined || runTarget.current()) && (activeCall.targetLease === undefined
     || (activeCall.committed ? activeCall.targetLease.sameBinding() : activeCall.targetLease.current())
       && (!activeCall.observationBound || activeCall.targetLease.observationCurrent()))
   const commitAction = (): void => {
@@ -1508,6 +1523,8 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
         ))
   )
   const dispatchAndCheckpoint = async (): Promise<ToolAnswer> => {
+    await nativeTakeover.ready
+    if (!writeAllowed()) return { ok: false, error: { code: 'permission-required', message: 'A person took control of this page. Keep actions stopped; inspect the account, workspace and current result, then explicitly select the intended page in the extension. A fresh snapshot or model tab switch cannot resume writes.' } }
     if (tabAffinity.isDetached(call.sessionId)) return affinityFailure('detached')
     if ((call.name === 'browser_screenshot' || call.name === 'browser_click_at') && caps?.visualViewport !== true) {
       return { ok: false, error: { code: 'content-unavailable', message: 'Visual tools require an updated Chrome extension and Host Bridge.' } }
@@ -1858,13 +1875,16 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
   }
   if (!pageAccess.allows(sender.tab) || !pageAccess.allowsFrame(sender.tab.id, sender.url ?? sender.tab.url)) return
   if (type === 'DSH_NATIVE_INPUT') {
+    const affected = Object.entries(tabAffinity.sessionMap()).filter(([, tab]) => tab.tabId === sender.tab!.id).map(([sid]) => sid)
+    nativeTakeover.block(sender.tab.id, [...affected, undefined])
     targetLeases.invalidateObservation(sender.tab.id)
     resetTabSnapshot(sender.tab.id)
-    for (const call of unsettledToolCalls) if (call.observationBound && call.targetLease?.target.tabId === sender.tab.id) {
+    for (const call of unsettledToolCalls) if ((call.observationBound || call.write) && call.targetLease?.target.tabId === sender.tab.id) {
       call.nativeIntervention = true; call.revocationRequested = true; call.executionFence?.revoke()
       if (!call.committed || call.staged) call.controller.abort()
     }
     notifyLostTaskTargets()
+    broadcastTabAffinity()
     return
   }
   if (type === 'DSH_CONTENT_READY') {
@@ -1914,7 +1934,7 @@ chrome.runtime.onConnect.addListener((port) => {
     connectionDisconnected, hasCredential: settings.token !== '' }) } catch { /* port closed */ }
   void affinityReady.then(async () => {
     await syncActiveTab()
-    try { port.postMessage({ type: 'tab-affinity', state: tabAffinity.snapshotForSession(panelActiveSessions.get(port)) }) } catch { /* port closed */ }
+    try { port.postMessage({ type: 'tab-affinity', state: panelTabAffinity(port) }) } catch { /* port closed */ }
   })
   port.onMessage.addListener((message: unknown) => {
     if (typeof message !== 'object' || message === null) return
@@ -2084,6 +2104,7 @@ chrome.runtime.onConnect.addListener((port) => {
                   if (!answer.ok || boundTarget === undefined || !nativeCurrent()) throw new Error('Task page could not be bound')
                   const live = await prepareToolTarget(boundTarget, sid, controller.signal)
                   if ('ok' in live || !nativeCurrent() || access?.current() !== true || !boundTarget.current()) throw new Error('Task page changed')
+                  if (!await nativeTakeover.acknowledge(boundTarget.target.tabId, sid) || !nativeCurrent() || !boundTarget.current()) throw new Error('page handoff changed')
                   const prepared = runTargets.prepare({ kind: 'run', runId, controlRevision: revision }, sid, boundTarget)
                   if (prepared === undefined) throw new Error('Task page pin unavailable')
                   preparedId = prepared.id
@@ -2119,6 +2140,7 @@ chrome.runtime.onConnect.addListener((port) => {
           if ('ok' in target) throw new Error('target unavailable')
           const live = await prepareToolTarget(target, sid, controller.signal)
           if ('ok' in live || !current() || !target.current() || controller.signal.aborted) throw new Error('target changed')
+          if (!await nativeTakeover.acknowledge(target.target.tabId, sid) || !current() || !target.current() || controller.signal.aborted) throw new Error('page handoff changed')
           const prepared = runTargets.prepare({ kind: 'run', runId, controlRevision: revision + (start ? 0 : 2) }, sid, target)
           if (prepared === undefined) throw new Error('target unavailable')
           await commitRunTarget((method, payload, options) => boundRpc.request(method, payload, options), start ? BRIDGE_TASK_START_METHOD : BRIDGE_RUN_RETARGET_METHOD, { runId, sessionId: sid,
@@ -2461,7 +2483,7 @@ chrome.runtime.onConnect.addListener((port) => {
         try {
           port.postMessage({ type: 'status', state: bridge?.state ?? ('stopped' as BridgeState), caps,
             connectionDisconnected, hasCredential: settings.token !== '', ...(activeBridgeUrl === undefined ? {} : { hostIdentity: activeBridgeUrl }) })
-          port.postMessage({ type: 'tab-affinity', state: tabAffinity.snapshotForSession(panelActiveSessions.get(port)) })
+          port.postMessage({ type: 'tab-affinity', state: panelTabAffinity(port) })
           const statusWindowId = panelWindows.get(port)
           if (statusWindowId !== undefined) {
             port.postMessage({ type: 'selection', selection: selections.current(statusWindowId) })

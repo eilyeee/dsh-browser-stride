@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createRunStorage } from './helpers/run-storage.ts'
 import { NativeRecovery } from '../src/native-recovery.ts'
+import { parseRecoveryWriteLabel } from '../src/recovery-context.ts'
 import { requiresDispatchReview, transportReceipt } from '../src/dispatch-ledger.ts'
 import { summarizeReviewedFacts } from '../src/run-store.ts'
 import { asActionId, asSessionId, type RequestDigest } from '../src/contracts/ids.ts'
@@ -35,7 +36,8 @@ describe('native reviewed continuation', () => {
     expect(() => h.store.executionFor(h.sessionId)).toThrow('reconciliation-required') // Even without managed runs.
     expect(() => h.prepare()).toThrow('review-read-required')
     await h.read(); const offer = h.prepare()
-    expect(offer.items).toEqual([{ key: 'w:write', kind: 'write', label: 'browser_click' }])
+    expect(offer.items).toEqual([{ key: 'w:write', kind: 'write', label: expect.any(String) }])
+    expect(parseRecoveryWriteLabel(offer.items[0]!.label)).toEqual({ operation: 'browser_click', occurredAt: new Date(row.preparedAt).toISOString(), outcome: 'no-reply' })
     await h.recovery.confirm(h.sessionId, offer.reviewId, [{ key: 'w:write', decision: 'applied' }], h.connectionId, h.owner, new AbortController().signal)
     const reviewed = h.store.dispatches.get('write')!
     expect(reviewed).toMatchObject({ state: 'unresolved', actionId: row.actionId, requestDigest: row.requestDigest,
@@ -62,6 +64,15 @@ describe('native reviewed continuation', () => {
     await h.read('current'); expect(h.prepare().items).toHaveLength(1)
     expect(() => h.recovery.prepare(h.sessionId, 'replacement', {})).toThrow('review-read-required')
     h.advance(300001); expect(() => h.prepare()).toThrow('review-read-required')
+  })
+  it.each(['name', 'preparedAt', 'settledAt'] as const)('invalidates the review offer when its displayed %s changes', async field => {
+    const h = await setup(); await h.uncertain(); await h.read(); const offer = h.prepare()
+    const list = h.store.dispatches.list.bind(h.store.dispatches)
+    vi.spyOn(h.store.dispatches, 'list').mockImplementation(session => list(session).map(row => row.requestId !== 'write' ? row
+      : { ...row, [field]: field === 'name' ? 'browser_type' : row[field]! - 1 }))
+    await expect(h.recovery.confirm(h.sessionId, offer.reviewId, [{ key: 'w:write', decision: 'not-applied' }], h.connectionId, h.owner, new AbortController().signal)).rejects.toThrow('review-stale')
+    expect(h.store.dispatches.get('write')?.nativeReview).toBeUndefined()
+    expect(() => h.store.executionFor(h.sessionId)).toThrow('reconciliation-required')
   })
   it('refuses running conversations and pending writes, rather than treating a pause request as drained', async () => {
     const h = await setup(); h.idle(false)

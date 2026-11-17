@@ -35,6 +35,8 @@ export interface PanelCopy {
   browserFeedback: { states: Record<BrowserToolFeedback['state'], string>; nextSteps: Record<NonNullable<BrowserToolFeedback['nextStep']>, string> }
   pageAccess: { required: string; selectExisting: string; granted: string; revoke: string; failed: string }
   controlGroup: {
+    handoffRequired: string
+    fenceUnavailable: string
     current: string
     unselected: string
     notReady: string
@@ -291,6 +293,8 @@ const EN: PanelCopy = {
   },
   pageAccess: { required: 'Click the DSH Stride toolbar icon on an unpinned page to authorize it and add it to the DSH control group.', selectExisting: 'Select an already authorized page below for this conversation. You do not need to authorize it again.', granted: 'The target page is authorized. Moving other tabs into the DSH 控制 group does not authorize them.', revoke: 'Stop controlling this page', failed: 'Stopping page control was not confirmed. Reload the extension and check page access.' },
   controlGroup: {
+    handoffRequired: 'A person took control. Reads remain available; inspect the account and workspace, then select the intended page below before more actions.',
+    fenceUnavailable: 'Write-control state is unavailable. Keep actions stopped; reload the extension and authorize the page again.',
     current: 'Current conversation target',
     unselected: 'No authorized page selected',
     notReady: 'Wait for the conversation and page state to finish loading before selecting a page.',
@@ -558,6 +562,8 @@ const ZH: PanelCopy = {
   },
   pageAccess: { required: '请在未固定的目标页面点击工具栏上的 DSH Stride 图标，将它授权并加入「DSH 控制」分组。', selectExisting: '请在下方为当前对话选择一个已授权的分组页面，无需重复授权。', granted: '目标页面已授权。手动拖入「DSH 控制」分组不会自动授权其他页面。', revoke: '停止控制此页', failed: '停止控制的结果尚未确认，请重新加载扩展后核对页面授权。' },
   controlGroup: {
+    handoffRequired: '你已接管页面，页面修改已停止，只读仍可继续。请核对账号和工作区，再点击下方目标页继续。',
+    fenceUnavailable: '无法读取写入控制状态，页面修改保持停止。请重载扩展并重新授权。',
     current: '当前对话目标',
     unselected: '尚未选择已授权页面',
     notReady: '请等待对话和页面状态加载完成后再选页。',

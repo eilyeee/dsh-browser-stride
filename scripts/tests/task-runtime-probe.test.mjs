@@ -38,10 +38,14 @@ test('the task fixture verifies persisted state over loopback while pinning the 
   assert.equal(verifier.acceptsTarget(site.url), true)
   assert.equal(verifier.acceptsTarget(verificationUrl.href), false)
   const signal = new AbortController().signal
-  assert.equal(await verifier.verify({ signal }), undefined, 'no model or page success claim can substitute for saved state')
+  assert.equal(await verifier.verify({ run: { runId: 'run_synthetic', controlRevision: 0 }, url: site.url, signal }), undefined, 'no model or page success claim can substitute for saved state')
   const response = await fetch(new URL('/save', verificationUrl), { method: 'POST', headers: { origin: site.origin, 'content-type': 'application/json' }, body: JSON.stringify({ enabled: true }) })
   assert.equal(response.status, 200)
-  assert.deepEqual(await verifier.verify({ signal }), { fieldValues: { testSetting: 'enabled', persisted: 'true' } })
+  const evidence = await verifier.verify({ run: { runId: 'run_synthetic', controlRevision: 0 }, url: site.url, signal })
+  assert.equal(evidence.url, site.url)
+  assert.equal(evidence.artifactRefs[0], 'readback_fixture_1')
+  assert.match(evidence.artifactRefs[1], /^readback-sha256:[a-f0-9]{64}$/)
+  assert.deepEqual(JSON.parse(await readFile(`${result}.readback_fixture_1.json`, 'utf8')), { enabled: true, saved: true, version: 1, contextKey: 'synthetic-setting' })
 })
 
 for (const mode of ['disconnectOnce', 'targetLossOnce']) test(`the ${mode} fixture holds just one completed snapshot until its original tool signal aborts`, async t => {

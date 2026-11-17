@@ -1,5 +1,9 @@
 # Browser extension
 
+In 0.1.28, trusted pointer/key input fences writes in affected ordinary conversations as well as managed tasks. Reads remain available, but a fresh snapshot, model target switch or new page cannot acknowledge takeover. Inspect the account, workspace and current result, then explicitly select the intended group page; managed tasks still require their continuation control. The deny fence survives worker restart in extension session storage without restoring prior acknowledgements. This does not identify every silent account/tenant change; authoritative site integration is still required.
+
+The 0.1.28 uncertain-operation list adds operation time, bounded type and review reason without retaining input values or page text. An error reply does not prove the action had no effect. Late replies require renewed review. Decisions remain unset until the user inspects the actual result.
+
 In 0.1.21, a drained ordinary conversation with a one-use Host-owner admission can open or reuse its exact reference URL for observation while old site-write uncertainty remains. Original records and the page-write fence are preserved. Page edits, submissions, current-page navigation, tab closing and managed tab mutations remain fenced. Active writes or an unresolved open/follow refuse another target change. The admission lasts two minutes, belongs to one session and connection, disallows forced copies and cannot be issued by browser tools. Direct follow remains fenced. Existing native permission/approval checks, durable records and write ordering still apply; this neither acknowledges old operations nor resumes a task.
 
 

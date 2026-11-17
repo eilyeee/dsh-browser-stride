@@ -6,6 +6,22 @@ import { ControlGroupStatus, pageAccessNotice } from '../src/panel/App.tsx'
 import { PANEL_COPY } from '../src/panel/strings.ts'
 
 describe('control group UI', () => {
+  it.each(['zh', 'en'] as const)('shows the native handoff or storage failure without changing authorization (%s)', async locale => {
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+    const container = document.createElement('div'), root = createRoot(container), copy = PANEL_COPY[locale]
+    const page = { tabId: 1, windowId: 1, title: 'Synthetic page', url: 'https://example.test/' }, onSelect = vi.fn(async () => {})
+    try {
+      for (const inputControl of ['handoff-required', 'unavailable'] as const) {
+        await act(async () => root.render(createElement(ControlGroupStatus, {
+          state: { revision: 1, status: 'background', controlled: page, active: page, inputControl }, pages: [page], copy, onSelect,
+        })))
+        expect(container.textContent).toContain(inputControl === 'handoff-required' ? copy.controlGroup.handoffRequired : copy.controlGroup.fenceUnavailable)
+        expect(container.querySelector('button')?.getAttribute('aria-pressed')).toBe('true')
+        expect(container.textContent).not.toContain(copy.controlGroup.unselected)
+        expect(onSelect).not.toHaveBeenCalled()
+      }
+    } finally { await act(async () => root.unmount()) }
+  })
   it.each(['zh', 'en'] as const)('distinguishes page selection from missing authorization in %s', locale => {
     const copy = PANEL_COPY[locale]
     const empty = { activeGranted: false, controlledGranted: false, controlledTabId: null, revocableTabId: null }
