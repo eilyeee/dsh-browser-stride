@@ -35,6 +35,7 @@
  */
 
 import { PageAuthorizationAttempts, PageAuthorizationError } from '../page-authorization.ts'
+import { SelectionAttempts } from './selection-attempts.ts'
 import { pageDiagnostics } from './diagnostics.ts'
 import { NATIVE_RECOVERY_PREPARE, NATIVE_RECOVERY_CONFIRM, recoveryOfferSchema, recoveryCommitSchema, recoveryDecisionsSchema } from '@eilyeee/dsh-browser-stride/src/native-review.ts'
 import {
@@ -283,6 +284,7 @@ interface ActiveTargetRefresh {
 
 const activeTargetRefreshes = new Map<string, ActiveTargetRefresh>()
 const unbindingSessions = new Set<string>()
+const selectionAttempts = new SelectionAttempts()
 const TAB_AFFINITY_REBIND_TIMEOUT_MS = 10_000
 
 class TabAffinityRebindError extends Error {
@@ -1417,6 +1419,7 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
           sessionScoped: call.sessionId !== undefined,
           panelSessionRegistered: call.sessionId !== undefined
             && [...panelPorts].some(port => panelActiveSessions.get(port) === call.sessionId),
+          lastSelection: selectionAttempts.snapshot(call.sessionId),
         },
         followTab: async (tab) => {
           await selectModelTarget(tab, call.sessionId, () => targetAllowed() && allowsTab(tab))
@@ -2341,12 +2344,17 @@ chrome.runtime.onConnect.addListener((port) => {
         if (typeof request.id !== 'string') break
         const requestId = request.id
         const rebindSessionId = validSessionId(request.sessionId) ?? panelActiveSessions.get(port)
+        if (tabAffinityRebinds.has(requestId)) break
+        // Evidence belongs only to the native panel's own conversation.
+        // Never attribute a forged foreign-session request to that session.
+        const finishSelection = rebindSessionId !== undefined && panelActiveSessions.get(port) === rebindSessionId
+          ? selectionAttempts.begin(rebindSessionId) : undefined
         if (unbindingSessions.has(rebindSessionId ?? '')) {
+          finishSelection?.('binding-busy')
           try { port.postMessage({ type: 'tab-affinity.rebind.result', id: requestId, ok: false,
             error: { code: 'binding-busy', message: getUiLocale() === 'zh' ? '正在解绑页面，请稍后重试' : 'Page unbinding is in progress. Try again afterwards.' } }) } catch { /* panel closed */ }
           break
         }
-        if (tabAffinityRebinds.has(requestId)) break
         const controller = new AbortController()
         const timer = setTimeout(() => {
           controller.abort(new TabAffinityRebindError('timeout', getUiLocale() === 'zh'
@@ -2367,9 +2375,11 @@ chrome.runtime.onConnect.addListener((port) => {
         }
         void rebindTabAffinityToActive(controller.signal, rebindSessionId, selection).then(
           () => {
+            finishSelection?.()
             try { port.postMessage({ type: 'tab-affinity.rebind.result', id: requestId, ok: true }) } catch { /* port closed */ }
           },
           (error: unknown) => {
+            finishSelection?.(error instanceof TabAffinityRebindError ? error.code : 'no-active-tab')
             try {
               port.postMessage({
                 type: 'tab-affinity.rebind.result',

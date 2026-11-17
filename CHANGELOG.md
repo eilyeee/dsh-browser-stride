@@ -9,6 +9,10 @@ package versions currently identify development builds, not supported releases.
 
 ### Added
 
+- Development build 0.1.27 reports a bounded, worker-local last native
+  selection outcome for the calling conversation. It returns only a state
+  and fixed failure code, expires after five minutes, and grants no authority.
+
 - Development build 0.1.26 adds bounded own-conversation routing flags to
   authorized tab lists: whether a panel registered that conversation, and
   whether its target is selected and authorized. No conversation IDs or
@@ -24,6 +28,12 @@ package versions currently identify development builds, not supported releases.
   Benchmark suite 32 separates the richer snapshot text.
 
 ### Fixed
+
+- Page selection stops waiting after twelve seconds when its acknowledgement
+  is missing, reports an unconfirmed result and refreshes status without
+  replaying the request. The panel shows the background's specific error.
+  Late outcomes cannot replace a newer selection's diagnostic record.
+  Benchmark suite 36 records this feedback change.
 
 - Development build 0.1.25 restores a panel’s latest window/conversation
   registration after its runtime Port reconnects. View restoration does not

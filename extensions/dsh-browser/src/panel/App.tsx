@@ -423,7 +423,8 @@ export function ControlGroupStatus({ state, pages, copy, onSelect, selectionAvai
         onClick={event => {
           if (!event.nativeEvent.isTrusted) return
           setSelecting(true); setSelectionError('')
-          void onSelect(page.tabId).catch(() => setSelectionError(copy.controlGroup.failed)).finally(() => setSelecting(false))
+          void onSelect(page.tabId).catch(cause => setSelectionError(cause instanceof Error && cause.message !== ''
+            ? cause.message : copy.controlGroup.failed)).finally(() => setSelecting(false))
         }}>{tabLabel(page, copy.controlGroup.choose)}</button>)}
     </div>}
     {selecting && <p>{copy.controlGroup.selecting}</p>}

@@ -41,7 +41,7 @@ try {
     const lists = calls.filter(e => e.data.name === 'browser_list_tabs'); assert.equal(lists.length, 1)
     const text = lists[0].data.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
     const body = text.match(/<UNTRUSTED_PAGE_CONTENT[^>]*>([\s\S]*?)<\/UNTRUSTED_PAGE_CONTENT[^>]*>/)?.[1]
-    assert.ok(body); const data = JSON.parse(body); assert.deepEqual(data.binding, expected)
+    assert.ok(body); const data = JSON.parse(body); assert.deepEqual(Object.fromEntries(Object.keys(expected).map(key => [key, data.binding?.[key]])), expected)
     assert.equal(data.tabs.filter(t => t.controlled).length, expected.targetAuthorized ? 1 : 0)
     if (realModel) {
       const last = events.filter(e => e.type === 'assistant/message').flatMap(e => e.data.message?.content?.filter(b => b.type === 'text').map(b => b.text) ?? []).at(-1)

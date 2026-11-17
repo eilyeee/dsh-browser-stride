@@ -6,9 +6,9 @@ import { mkdir, mkdtemp, readFile, writeFile, cp } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { startIsolatedModelRun } from './fixtures/isolated-model-run.mjs'
 import { parseMarkedModelReport } from '../benchmark/lib/model-report.mjs'
-const repo = resolve(process.env.STRIDE_ACCEPTANCE_REPO ?? resolve(import.meta.dirname, '..')), reconnect = process.argv.includes('--reconnect'), realModel = process.env.STRIDE_REAL_MODEL === '1'
+const repo = resolve(process.env.STRIDE_ACCEPTANCE_REPO ?? resolve(import.meta.dirname, '..')), reconnect = process.argv.includes('--reconnect'), dropReply = process.argv.includes('--drop-selection-reply'), realModel = process.env.STRIDE_REAL_MODEL === '1'
 const version = JSON.parse(await readFile(join(repo, 'package.json'), 'utf8')).version
-const base = join(repo, reconnect ? '.stride-private/validation/panel-reconnect' : '.stride-private/validation/session-selection', version)
+const base = join(repo, dropReply ? '.stride-private/validation/selection-feedback' : reconnect ? '.stride-private/validation/panel-reconnect' : '.stride-private/validation/session-selection', version)
 await mkdir(base, { recursive: true })
 const label = realModel ? 'real-model' : 'scripted', artifacts = await mkdtemp(join(base, label + '-'))
 const token = randomUUID(), otherToken = randomUUID(), min = randomInt(2, 17), max = randomInt(30, 61)
@@ -24,19 +24,20 @@ try {
   // Fault injection is confined to a copied extension in this temporary
   // browser. Production bundles never contain this port observer.
   let extensionDir
-  if (reconnect) {
+  if (reconnect || dropReply) {
     extensionDir = join(artifacts, 'extension-with-port-observer')
     await cp(join(repo, 'extensions/dsh-browser/dist'), extensionDir, { recursive: true })
     const background = join(extensionDir, 'background.js')
     const observer = `globalThis.__strideReconnectPorts=[];chrome.runtime.onConnect.addListener(port=>{if(port.name!=='dsh-panel')return;const entry={port,sessionId:null,windowId:null,closed:false,restored:false,hasHistory:false};globalThis.__strideReconnectPorts.push(entry);port.onMessage.addListener(m=>{if(m.type==='rpc'&&m.method==='session.history')entry.hasHistory=true;if(m.type==='panel.window')entry.windowId=m.windowId;if(m.type==='session.active'){entry.sessionId=m.sessionId;entry.restored=m.restore===true}});port.onDisconnect.addListener(()=>{entry.closed=true})});\n`
+    const lossObserver = dropReply ? `globalThis.__strideSelectionRequests=[];globalThis.__strideDroppedSelectionReplies=[];chrome.runtime.onConnect.addListener(port=>{if(port.name!=='dsh-panel')return;let sid;const original=port.postMessage.bind(port);port.postMessage=m=>{if(m.type==='tab-affinity.rebind.result'&&typeof globalThis.__strideDropSelectionReplySession==='string'&&sid===globalThis.__strideDropSelectionReplySession){globalThis.__strideDroppedSelectionReplies.push(m.id);return}original(m)};port.onMessage.addListener(m=>{if(m.type==='session.active')sid=m.sessionId;if(m.type==='tab-affinity.rebind'&&typeof globalThis.__strideDropSelectionReplySession==='string'&&sid===globalThis.__strideDropSelectionReplySession)globalThis.__strideSelectionRequests.push(m.id)})});\n` : ''
     const production = await readFile(background, 'utf8')
-    await writeFile(background, observer + production)
-    assert.equal((await readFile(background, 'utf8')).slice(observer.length), production)
+    await writeFile(background, observer + lossObserver + production)
+    assert.equal((await readFile(background, 'utf8')).slice(observer.length + lossObserver.length), production)
   }
   h = await startIsolatedModelRun({ repo, origin, startUrl: origin + '/initial', artifacts, extensionDir,
     goal: 'Read only the page explicitly selected for this conversation', promptViaRpc: true, startupTimeoutMs: 120000,
-    programs: { inspect: 'console.log(await tools.browser_snapshot({}));' },
-    guardSource: "ctx.effect(()=>ctx.tools.guard(exec=>['run_code','browser_snapshot'].includes(exec.name)?undefined:'Only the current selected-page snapshot is permitted'));" })
+    programs: { inspect: (dropReply ? 'console.log(await tools.browser_list_tabs({}));' : '') + 'console.log(await tools.browser_snapshot({}));' },
+    guardSource: "ctx.effect(()=>ctx.tools.guard(exec=>" + JSON.stringify(dropReply ? ['run_code', 'browser_list_tabs', 'browser_snapshot'] : ['run_code', 'browser_snapshot']) + ".includes(exec.name)?undefined:'Only selected read-only observations are permitted'));" })
   await h.browser.prepare(origin + '/initial'); await h.browser.bindSession(h.sessionId)
   const target = await h.browser.context.newPage(); await target.goto(origin + '/selected'); await h.browser.authorizePage(target)
   const otherPage = await h.browser.context.newPage(); await otherPage.goto(origin + '/other'); await h.browser.authorizePage(otherPage)
@@ -84,6 +85,7 @@ try {
   // Do not send session.active again. Another panel most recently focused its
   // own conversation, and this native choice must still belong to the first.
   await first.bringToFront()
+  if (dropReply) await h.browser.worker.evaluate(sid => { globalThis.__strideDropSelectionReplySession = sid }, h.sessionId)
   await first.locator('.control-group-pages button[data-tab-id="' + ids.selected + '"]').click()
   await first.locator('.control-group-pages button[data-tab-id="' + ids.selected + '"][aria-pressed="true"]').waitFor()
   await second.locator('.control-group-pages button[data-tab-id="' + ids.other + '"][aria-pressed="true"]').waitFor()
@@ -92,6 +94,17 @@ try {
     return { first: state?.sessionTabs?.[first]?.tabId, second: state?.sessionTabs?.[second]?.tabId }
   }, { first: h.sessionId, second: secondId })
   assert.deepEqual(bindings, { first: ids.selected, second: ids.other })
+  if (dropReply) {
+    phase = 'selection-reply-loss'
+    const loss = await h.browser.worker.evaluate(() => ({ requests: globalThis.__strideSelectionRequests.length, dropped: globalThis.__strideDroppedSelectionReplies.length }))
+    assert.deepEqual(loss, { requests: 1, dropped: 1 })
+    await writeFile(join(artifacts, 'reply-loss-observed.json'), JSON.stringify({ ...loss,
+      targetApplied: bindings.first === ids.selected,
+      buttonWaitingBeforeDeadline: !await first.locator('.control-group-pages button[data-tab-id="' + ids.selected + '"]').isEnabled(),
+    }), { mode: 0o600 })
+    await first.locator('.control-group [role="alert"]').filter({ hasText: '选页结果未确认' }).waitFor({ timeout: 15000 })
+    assert.equal(await first.locator('.control-group-pages button[data-tab-id="' + ids.selected + '"]').isEnabled(), true)
+  }
   if (reconnect) {
     // A second reconnect must preserve an existing target as well as restore
     // an unbound view. No explicit session.active or selection is resent.
@@ -100,15 +113,23 @@ try {
     await second.locator('.control-group-pages button[data-tab-id="' + ids.other + '"][aria-pressed="true"]').waitFor()
   }
   phase = 'model-read'
-  const events = await h.turn('inspect', '只用browser_snapshot读取当前对话已绑定页面，禁止跟随、切换、列表、导航、输入、写入、文件、shell或网络。最终只返回JSON：marker=SESSION_SELECTION_MODEL_DONE；pageToken为当前页面标题下显示的随机标记；min和max为Count字段本次快照中的数值声明；businessSaved=false。不要从历史猜测，缺失写unknown，读取后停止。', realModel ? 240000 : 60000)
+  const events = await h.turn('inspect', (dropReply ? '先调用一次browser_list_tabs读取binding.lastSelection；它只反映本会话原生选页尝试，不能当业务结果。最终JSON增加lastSelectionState为本次工具里的lastSelection.state。随后' : '') + '只用browser_snapshot读取当前对话已绑定页面，禁止跟随、切换、列表、导航、输入、写入、文件、shell或网络。最终只返回JSON：marker=SESSION_SELECTION_MODEL_DONE；pageToken为当前页面标题下显示的随机标记；min和max为Count字段本次快照中的数值声明；businessSaved=false。不要从历史猜测，缺失写unknown，读取后停止。', realModel ? 240000 : 60000)
   const calls = events.filter(e => e.type === 'tool/ptc-dispatch')
   assert.ok(calls.some(e => e.data.name === 'browser_snapshot' && !e.data.isError))
-  assert.ok(calls.every(e => ['run_code', 'browser_snapshot'].includes(e.data.name) && !e.data.isError))
+  assert.ok(calls.every(e => (dropReply ? ['run_code', 'browser_list_tabs', 'browser_snapshot'] : ['run_code', 'browser_snapshot']).includes(e.data.name) && !e.data.isError))
   const text = calls.filter(e => e.data.name === 'browser_snapshot').flatMap(e => e.data.content.filter(b => b.type === 'text').map(b => b.text)).join('\n')
   assert.ok(text.includes(token)); assert.ok(!text.includes(otherToken))
+  if (dropReply) {
+    const list = calls.find(e => e.data.name === 'browser_list_tabs'); assert.ok(list)
+    const text = list.data.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
+    const data = JSON.parse(text.match(/<UNTRUSTED_PAGE_CONTENT[^>]*>([\s\S]*?)<\/UNTRUSTED_PAGE_CONTENT[^>]*>/)[1])
+    assert.equal(data.binding.targetSelected, true); assert.equal(data.binding.targetAuthorized, true)
+    assert.deepEqual(data.binding.lastSelection, { state: 'selected' })
+  }
   if (realModel) {
     const last = events.filter(e => e.type === 'assistant/message').flatMap(e => e.data.message?.content?.filter(b => b.type === 'text').map(b => b.text) ?? []).at(-1)
     const report = parseMarkedModelReport(last, 'SESSION_SELECTION_MODEL_DONE')
+    if (dropReply) assert.equal(report.lastSelectionState, 'selected')
     assert.equal(report.pageToken, token); assert.equal(report.min, min); assert.equal(report.max, max); assert.equal(report.businessSaved, false)
   }
   assert.equal(await target.evaluate(() => window.inputEvents), 0); assert.equal(writes, 0)
@@ -116,7 +137,8 @@ try {
   const result = { passed: true, version, realModel, scriptedModel: !realModel, isolatedHost: true, isolatedChrome: true,
     startupTimeoutMs: 120000, separatePanelTargets: true, originalUnboundShownCorrectly: true,
     panelPortLossInjected: reconnect, viewContextRestored: reconnect, boundTargetSurvivedSecondReconnect: reconnect,
-    extensionObserverCopy: reconnect, nativeSelectionWhileOtherPanelFocused: true,
+    selectionReplyLossInjected: dropReply, selectionRequestNotReplayed: dropReply, lastSelectionRead: dropReply,
+    extensionObserverCopy: reconnect || dropReply, nativeSelectionWhileOtherPanelFocused: true,
     modelReadCorrectTarget: true, businessWrites: writes, inputEvents: 0, originalHostUntouched: true,
     hostBundleSha256: createHash('sha256').update(await readFile(join(repo, 'packages/browser/bridge-browser/lib/index.js'))).digest('hex'),
     contentBundleSha256: createHash('sha256').update(await readFile(join(repo, 'extensions/dsh-browser/dist/content.js'))).digest('hex'),

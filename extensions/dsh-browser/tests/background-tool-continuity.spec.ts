@@ -196,11 +196,23 @@ describe('tool-driven session checkpoints', () => {
       const text = result.result.text
       return JSON.parse(text.slice(text.indexOf('>') + 1, text.indexOf('</UNTRUSTED_PAGE_CONTENT'))).binding
     }
-    expect(await readBinding('session-live', 'binding-visible')).toEqual({ sessionScoped: true, panelSessionRegistered: true, targetSelected: true, targetAuthorized: true })
+    expect(await readBinding('session-live', 'binding-visible')).toEqual({ sessionScoped: true, panelSessionRegistered: true, targetSelected: true, targetAuthorized: true, lastSelection: { state: 'not-observed' } })
     panel.onMessage.emit({ type: 'session.active', sessionId: 'other-view' })
-    expect(await readBinding('session-live', 'binding-other-view')).toEqual({ sessionScoped: true, panelSessionRegistered: false, targetSelected: true, targetAuthorized: true })
-    expect(await readBinding('unbound-session', 'binding-missing')).toEqual({ sessionScoped: true, panelSessionRegistered: false, targetSelected: false, targetAuthorized: false })
+    expect(await readBinding('session-live', 'binding-other-view')).toEqual({ sessionScoped: true, panelSessionRegistered: false, targetSelected: true, targetAuthorized: true, lastSelection: { state: 'not-observed' } })
+    expect(await readBinding('unbound-session', 'binding-missing')).toEqual({ sessionScoped: true, panelSessionRegistered: false, targetSelected: false, targetAuthorized: false, lastSelection: { state: 'not-observed' } })
     panel.onMessage.emit({ type: 'session.active', sessionId: 'session-live', restore: true })
+    const state = () => vi.mocked(panel.port.postMessage).mock.calls.map(([m]) => m).filter(m => m.type === 'tab-affinity').at(-1).state
+    panel.onMessage.emit({ type: 'tab-affinity.rebind', id: 'native-selection', sessionId: 'session-live', tabId: 1,
+      expectedUrl: currentTab.url, revision: state().revision })
+    await vi.waitFor(() => expect(panel.port.postMessage).toHaveBeenCalledWith({ type: 'tab-affinity.rebind.result', id: 'native-selection', ok: true }))
+    expect((await readBinding('session-live', 'selection-observed')).lastSelection).toEqual({ state: 'selected' })
+    panel.onMessage.emit({ type: 'tab-affinity.rebind', id: 'foreign-selection', sessionId: 'unbound-session', tabId: 1, revision: state().revision })
+    await vi.waitFor(() => expect(panel.port.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity.rebind.result', id: 'foreign-selection', ok: false })))
+    expect((await readBinding('unbound-session', 'foreign-evidence')).lastSelection).toEqual({ state: 'not-observed' })
+    panel.onMessage.emit({ type: 'tab-affinity.rebind', id: 'stale-native-selection', sessionId: 'session-live', tabId: 1,
+      expectedUrl: 'https://example.com/wrong', revision: state().revision })
+    await vi.waitFor(() => expect(panel.port.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity.rebind.result', id: 'stale-native-selection', ok: false })))
+    expect((await readBinding('session-live', 'failure-evidence')).lastSelection).toEqual({ state: 'failed', code: 'stale-binding' })
     vi.mocked(panel.port.postMessage).mockReset()
     panel.onDisconnect.emit()
 

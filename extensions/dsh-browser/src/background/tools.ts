@@ -27,6 +27,7 @@ import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval
 import { getUiLocale } from '../i18n.ts'
 import { debuggerPages, sendPageMessage, PageDispatchRevoked, type PageDispatch } from './debugger-pages.ts'
 import type { CreatedPageAccess } from './page-access.ts'
+import { selectionAttemptSummary, type SelectionAttemptStatus } from './selection-attempts.ts'
 
 import { capturePageScreenshot, consumeVisualObservation, hasVisualObservation, type VisualAuthority } from './visual.ts'
 import { pageDiagnostics } from './diagnostics.ts'
@@ -158,7 +159,7 @@ export interface TabManagementContext {
   /** Controlled tab for the calling session, when one still exists. */
   controlledTabId?: number
   /** Own-session routing metadata only; never a grant or a page selection. */
-  conversationBinding?: { sessionScoped: boolean; panelSessionRegistered: boolean }
+  conversationBinding?: { sessionScoped: boolean; panelSessionRegistered: boolean; lastSelection?: SelectionAttemptStatus }
   /** Rebind subsequent tools to one existing tab without activating it. */
   allowsTab?: (tab: chrome.tabs.Tab) => boolean
   followTab?: (tab: chrome.tabs.Tab) => void | Promise<void>
@@ -789,6 +790,9 @@ async function dispatchTabManagementTool(
           panelSessionRegistered: context.conversationBinding.panelSessionRegistered === true,
           targetSelected: context.controlledTabId !== undefined,
           targetAuthorized: records.some(tab => tab.controlled),
+          ...(context.conversationBinding.lastSelection === undefined ? {} : {
+            lastSelection: selectionAttemptSummary(context.conversationBinding.lastSelection),
+          }),
         } }),
       }, null, 2), budget.maxChars) },
     }

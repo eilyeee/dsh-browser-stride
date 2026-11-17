@@ -281,7 +281,7 @@ describe('panel protocol', () => {
     expect(listener).toHaveBeenCalledWith(state)
   })
 
-  it('waits for a correlated acknowledgement before completing a tab rebind', async () => {
+  it('bounds a missing selection acknowledgement and ignores its late reply without replay', async () => {
     vi.useFakeTimers()
     let receive: ((message: unknown) => void) | undefined
     const postMessage = vi.fn()
@@ -301,15 +301,39 @@ describe('panel protocol', () => {
       type: 'tab-affinity.rebind',
       id: '12345678-1234-4234-8234-123456789abe',
     })
-    await vi.advanceTimersByTimeAsync(20_000)
-    expect(settled).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(12_000)
+    expect(settled).toHaveBeenCalledWith('rejected')
+    await expect(pending).rejects.toMatchObject({ code: 'timeout', message: expect.stringContaining('not confirmed') })
+    expect(postMessage.mock.calls.filter(([message]) => message.type === 'tab-affinity.rebind')).toHaveLength(1)
+    expect(postMessage).toHaveBeenCalledWith({ type: 'request-status' })
 
     receive?.({
       type: 'tab-affinity.rebind.result',
       id: '12345678-1234-4234-8234-123456789abe',
       ok: true,
     })
-    await expect(pending).resolves.toBeUndefined()
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(settled).toHaveBeenCalledTimes(1)
+    expect(postMessage.mock.calls.filter(([message]) => message.type === 'tab-affinity.rebind')).toHaveLength(1)
+  })
+
+  it.each(['success', 'failure', 'disconnect'])('clears the selection deadline after %s without an extra retry or refresh', async outcome => {
+    vi.useFakeTimers()
+    let receive!: (message: unknown) => void, disconnect!: () => void
+    const postMessage = vi.fn()
+    const port = { postMessage, onMessage: { addListener: (fn: typeof receive) => { receive = fn } },
+      onDisconnect: { addListener: (fn: typeof disconnect) => { disconnect = fn } } }
+    vi.stubGlobal('chrome', { runtime: { connect: vi.fn(() => port) } })
+    const api = connectPanel(), pending = api.rebindTabAffinity({ tabId: 1, revision: 1, sessionId: 'own' })
+    const result = pending.then(() => 'selected', (error: Error) => error)
+    const id = postMessage.mock.calls.find(([m]) => m.type === 'tab-affinity.rebind')![0].id
+    if (outcome === 'disconnect') disconnect()
+    else receive({ type: 'tab-affinity.rebind.result', id, ok: outcome === 'success', error: { code: 'stale-binding', message: 'Selection changed' } })
+    if (outcome === 'success') expect(await result).toBe('selected')
+    else expect(await result).toBeInstanceOf(Error)
+    await vi.advanceTimersByTimeAsync(20_000)
+    expect(postMessage.mock.calls.filter(([m]) => m.type === 'tab-affinity.rebind')).toHaveLength(1)
+    expect(postMessage.mock.calls.filter(([m]) => m.type === 'request-status')).toHaveLength(0)
   })
 
   it('keeps a failed tab rebind visible to the caller', async () => {

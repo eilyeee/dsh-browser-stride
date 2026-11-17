@@ -555,7 +555,17 @@ export function connectPanel(): PanelApi {
     rebindTabAffinity(selection) {
       const id = crypto.randomUUID()
       return new Promise<void>((resolve, reject) => {
-        const entry = { resolve, reject }
+        const timer = setTimeout(() => {
+          if (pendingRebinds.get(id) !== entry) return
+          pendingRebinds.delete(id)
+          reject(new PanelRpcError('timeout', getUiLocale() === 'zh'
+            ? '选页结果未确认，请核对当前对话目标；请求没有自动重试。'
+            : 'Page selection was not confirmed. Check the current conversation target; the request was not retried.'))
+          // Observe the actual target even when only the acknowledgement was
+          // lost. Never replay the selection or infer that it did not happen.
+          void send({ type: 'request-status' }).catch(() => {})
+        }, 12000)
+        const entry = { resolve: () => { clearTimeout(timer); resolve() }, reject: (error: Error) => { clearTimeout(timer); reject(error) } }
         pendingRebinds.set(id, entry)
         void send(
           { type: 'tab-affinity.rebind', id, ...selection },
@@ -563,7 +573,7 @@ export function connectPanel(): PanelApi {
         ).catch((cause: unknown) => {
           if (pendingRebinds.get(id) !== entry) return
           pendingRebinds.delete(id)
-          reject(connectionError(cause))
+          entry.reject(connectionError(cause))
         })
       })
     },
