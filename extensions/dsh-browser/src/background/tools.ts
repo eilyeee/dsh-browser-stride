@@ -157,6 +157,8 @@ export interface TabManagementContext {
   emptyAuthorizedScope?: boolean
   /** Controlled tab for the calling session, when one still exists. */
   controlledTabId?: number
+  /** Own-session routing metadata only; never a grant or a page selection. */
+  conversationBinding?: { sessionScoped: boolean; panelSessionRegistered: boolean }
   /** Rebind subsequent tools to one existing tab without activating it. */
   allowsTab?: (tab: chrome.tabs.Tab) => boolean
   followTab?: (tab: chrome.tabs.Tab) => void | Promise<void>
@@ -780,7 +782,15 @@ async function dispatchTabManagementTool(
       }))
     return {
       ok: true,
-      result: { text: wrapUntrustedContent(JSON.stringify({ tabs: records, ...(context.allowsTab === undefined ? {} : { scope: 'authorized-tabs' }) }, null, 2), budget.maxChars) },
+      result: { text: wrapUntrustedContent(JSON.stringify({ tabs: records,
+        ...(context.allowsTab === undefined ? {} : { scope: 'authorized-tabs' }),
+        ...(context.conversationBinding === undefined ? {} : { binding: {
+          sessionScoped: context.conversationBinding.sessionScoped === true,
+          panelSessionRegistered: context.conversationBinding.panelSessionRegistered === true,
+          targetSelected: context.controlledTabId !== undefined,
+          targetAuthorized: records.some(tab => tab.controlled),
+        } }),
+      }, null, 2), budget.maxChars) },
     }
   }
 

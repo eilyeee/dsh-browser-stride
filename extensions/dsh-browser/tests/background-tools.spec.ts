@@ -186,10 +186,12 @@ describe('dispatchToolCall', () => {
     const authorize = vi.fn(async () => 'denied' as const)
     const answer = await dispatchToolCall({ id: 'empty-tab-scope', name: 'browser_list_tabs', args: {} }, 'off',
       undefined, authorize, undefined, undefined, undefined,
-      { unrestrictedAccess: false, emptyAuthorizedScope: true, allowsTab: () => false })
+      { unrestrictedAccess: false, emptyAuthorizedScope: true, allowsTab: () => false,
+        conversationBinding: { sessionScoped: true, panelSessionRegistered: true } })
     expect(answer.ok).toBe(true)
     expect((answer.result as { text: string }).text).toContain('"tabs":[]')
     expect((answer.result as { text: string }).text).not.toContain('private.example')
+    expect((answer.result as { text: string }).text).not.toContain('binding')
     expect(authorize).not.toHaveBeenCalled()
     expect(h.query).not.toHaveBeenCalled()
   })
@@ -407,6 +409,24 @@ describe('dispatchToolCall', () => {
     await expect(pending).resolves.toMatchObject({
       ok: false, error: { message: expect.stringContaining('changed while the snapshot') },
     })
+  })
+
+  it.each([undefined, 11, 12])('reports own routing state without revealing unauthorized targets or selecting one (target=%s)', async controlledTabId => {
+    const h = mockChrome({ tabs: [managedTab(11, { title: 'Hidden synthetic title', url: 'https://hidden.example/' }), managedTab(12)] })
+    const followTab = vi.fn(), commitAction = vi.fn()
+    const answer = await dispatchToolCall({ id: 'routing-status', name: 'browser_list_tabs', args: {} }, 'auto',
+      undefined, undefined, undefined, undefined, undefined, {
+        unrestrictedAccess: true, controlledTabId, allowsTab: tab => tab.id === 12, followTab, commitAction,
+        conversationBinding: { sessionScoped: true, panelSessionRegistered: false, secret: 'DO_NOT_EXPOSE' } as { sessionScoped: boolean; panelSessionRegistered: boolean },
+      })
+    const text = (answer.result as { text: string }).text
+    const data = JSON.parse(text.slice(text.indexOf('>') + 1, text.indexOf('</UNTRUSTED_PAGE_CONTENT')))
+    expect(data.binding).toEqual({ sessionScoped: true, panelSessionRegistered: false,
+      targetSelected: controlledTabId !== undefined, targetAuthorized: controlledTabId === 12 })
+    expect(data.tabs).toHaveLength(1); expect(data.tabs[0].tabId).toBe(12)
+    expect(text).not.toContain('hidden.example'); expect(text).not.toContain('Hidden synthetic title'); expect(text).not.toContain('DO_NOT_EXPOSE')
+    expect(followTab).not.toHaveBeenCalled(); expect(commitAction).not.toHaveBeenCalled()
+    expect(h.update).not.toHaveBeenCalled(); expect(h.sendMessage).not.toHaveBeenCalled()
   })
 
   it('lists, follows, and closes selected tabs without activating them', async () => {

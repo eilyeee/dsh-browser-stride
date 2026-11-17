@@ -1413,6 +1413,11 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
         allowsTab,
         emptyAuthorizedScope: admittedPages.empty,
         ...(controlledTabId === undefined ? {} : { controlledTabId }),
+        conversationBinding: {
+          sessionScoped: call.sessionId !== undefined,
+          panelSessionRegistered: call.sessionId !== undefined
+            && [...panelPorts].some(port => panelActiveSessions.get(port) === call.sessionId),
+        },
         followTab: async (tab) => {
           await selectModelTarget(tab, call.sessionId, () => targetAllowed() && allowsTab(tab))
           if (activate && tab.id !== undefined) {

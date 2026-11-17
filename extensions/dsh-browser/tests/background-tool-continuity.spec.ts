@@ -184,6 +184,24 @@ describe('tool-driven session checkpoints', () => {
     })
     panel.onMessage.emit({ type: 'session.active', sessionId: 'session-live', isNew: true })
     await vi.waitFor(() => { expect(storedUrlKey(sessionData)).toBe('https://example.com/start') })
+    vi.mocked(panel.port.postMessage).mockImplementation((message) => {
+      if (message.type === 'approval.request') queueMicrotask(() => panel.onMessage.emit({ type: 'approval.response',
+        id: message.request.id, decision: 'allow-once' }))
+    })
+    const readBinding = async (sessionId: string, id: string) => {
+      socket.receive({ t: 'tool.call', id, name: 'browser_list_tabs', args: {}, expiresAt: Date.now() + 10_000, sessionId })
+      await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id, ok: true })))
+      const result = socket.sent.find(frame => (frame as { t?: string; id?: string }).t === 'tool.result'
+        && (frame as { id?: string }).id === id) as { result: { text: string } }
+      const text = result.result.text
+      return JSON.parse(text.slice(text.indexOf('>') + 1, text.indexOf('</UNTRUSTED_PAGE_CONTENT'))).binding
+    }
+    expect(await readBinding('session-live', 'binding-visible')).toEqual({ sessionScoped: true, panelSessionRegistered: true, targetSelected: true, targetAuthorized: true })
+    panel.onMessage.emit({ type: 'session.active', sessionId: 'other-view' })
+    expect(await readBinding('session-live', 'binding-other-view')).toEqual({ sessionScoped: true, panelSessionRegistered: false, targetSelected: true, targetAuthorized: true })
+    expect(await readBinding('unbound-session', 'binding-missing')).toEqual({ sessionScoped: true, panelSessionRegistered: false, targetSelected: false, targetAuthorized: false })
+    panel.onMessage.emit({ type: 'session.active', sessionId: 'session-live', restore: true })
+    vi.mocked(panel.port.postMessage).mockReset()
     panel.onDisconnect.emit()
 
     const call = async (id: string, name: string): Promise<void> => {

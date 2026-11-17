@@ -9,6 +9,12 @@ package versions currently identify development builds, not supported releases.
 
 ### Added
 
+- Development build 0.1.26 adds bounded own-conversation routing flags to
+  authorized tab lists: whether a panel registered that conversation, and
+  whether its target is selected and authorized. No conversation IDs or
+  metadata about unauthorized pages are returned. These flags grant no
+  authority and do not restore a target. Benchmark suite 35 records the output.
+
 - Development build 0.1.23 snapshots explicitly report native form-field
   disabled, direct-edit readonly and native-required flags. Bounded numeric
   HTML/ARIA declarations distinguish absent, unusable and sensitive metadata;
