@@ -3,7 +3,6 @@
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
-import type { BridgeState } from '../src/background/bridge.ts'
 import type { PanelApi, PageAccessStatus } from '../src/panel/api.ts'
 import { BRIDGE_SESSION_PURGE_METHOD, type ServerFrame } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 
@@ -20,7 +19,7 @@ import { PANEL_COPY } from '../src/panel/strings.ts'
 describe('panel session transitions', () => {
   let root: Root
   let onPageAccess: ((status: PageAccessStatus) => void) | undefined
-  let onStatus: ((state: BridgeState, caps: null) => void) | undefined
+  let onStatus: Parameters<PanelApi['onStatus']>[0] | undefined
   let onResumeHint: ((sessionId: string | null) => void) | undefined
   let onEvent: ((frame: ServerFrame) => void) | undefined
   let rpc: Mock<(method: string, payload?: unknown) => Promise<unknown>>
@@ -503,7 +502,40 @@ describe('panel session transitions', () => {
     expect(rpc).not.toHaveBeenCalledWith('session.list', {})
   })
 
-  it('waits for a fresh contextual hint after a bridge restart', async () => {
+  it.each([false, true])('keeps the displayed conversation through worker bootstrap (history failure=%s)', async historyFailure => {
+    panelApi.setActiveSession = vi.fn(async () => {})
+    await renderConnected(null)
+    expect(rpc.mock.calls.filter(([method]) => method === 'session.create')).toHaveLength(1)
+    const original = rpc.getMockImplementation()!
+    rpc.mockImplementation(async (method, payload) => {
+      if (historyFailure && method === 'session.history') throw Error('Synthetic restore history outage')
+      return original(method, payload)
+    })
+    await act(async () => {
+      onStatus?.('stopped', null, { connectionDisconnected: false, hasCredential: false })
+      // The person's current tab has no contextual hint. It must not replace
+      // the already displayed conversation during a transient worker restart.
+      onResumeHint?.(null)
+      onStatus?.('connected', null, { connectionDisconnected: false, hasCredential: true })
+    })
+    expect(rpc.mock.calls.filter(([method]) => method === 'session.create')).toHaveLength(1)
+    expect(document.querySelector('.app')?.getAttribute('data-session-id')).toBe('session-current')
+    expect(panelApi.setActiveSession).toHaveBeenCalledWith('session-current', undefined, true)
+    expect(rpc.mock.calls.some(([method]) => method === 'session.prompt')).toBe(false)
+  })
+
+  it('retires the displayed view when a known Host address changes', async () => {
+    panelApi.setActiveSession = vi.fn(async () => {})
+    await renderConnected(null)
+    await act(async () => onStatus?.('connected', null, { hostIdentity: 'ws://127.0.0.1:3001/ext/bridge' }))
+    expect(document.querySelector('.app')?.getAttribute('data-session-id')).toBe('session-current')
+    await act(async () => onStatus?.('connected', null, { hostIdentity: 'ws://127.0.0.1:3002/ext/bridge' }))
+    expect(panelApi.setActiveSession).toHaveBeenCalledWith(null, undefined, true)
+    expect(document.querySelector('.app')?.getAttribute('data-session-id')).not.toBe('session-current')
+    expect(rpc.mock.calls.filter(([method]) => method === 'session.create')).toHaveLength(1)
+  })
+
+  it('waits for a fresh contextual hint after explicit connection removal', async () => {
     const storageGet = chrome.storage.local.get as unknown as Mock
     storageGet.mockResolvedValue({ dshSettings: { autoResumeSession: true } })
     rpc.mockImplementation(async (method: string) => {
@@ -519,10 +551,11 @@ describe('panel session transitions', () => {
     await renderConnected('session-page')
     await vi.waitFor(() => { expect(panelApi.setActiveSession).toHaveBeenCalledWith('session-page') })
 
-    await act(async () => { onStatus?.('stopped', null) })
-    await act(async () => { onStatus?.('connected', null) })
+    await act(async () => { onStatus?.('stopped', null, { connectionDisconnected: true, hasCredential: false }) })
+    await act(async () => { onStatus?.('connected', null, { connectionDisconnected: false, hasCredential: true }) })
     await new Promise((resolve) => { setTimeout(resolve, 0) })
-    expect(panelApi.setActiveSession).toHaveBeenCalledTimes(1)
+    expect(panelApi.setActiveSession).toHaveBeenCalledWith(null, undefined, true)
+    expect(panelApi.setActiveSession).toHaveBeenCalledTimes(2)
 
     await act(async () => { onResumeHint?.(null) })
     await vi.waitFor(() => {

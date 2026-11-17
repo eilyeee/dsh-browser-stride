@@ -42,6 +42,19 @@ package versions currently identify development builds, not supported releases.
 
 ### Fixed
 
+- Development build 0.1.29 retains the displayed conversation during worker
+  bootstrap and transport reconnect. It restores only view registration and
+  read-only history, without creating a conversation or replaying prompts,
+  page selection, approvals or tasks. Explicit disconnection or a changed known
+  Host address clears the old view and its reconnect cache.
+
+- Development build 0.1.29 orders diagnostic-panel replies within their page,
+  conversation and connection scope. Older polls cannot overwrite native
+  start/stop results; polls wait for pending actions, and retired requests cannot
+  clear a successor's busy state. Native activation remains required. The
+  regression delays one read-only reply in a disposable extension copy and
+  checks actual enable/read/stop, with an immutable build fingerprint.
+
 - Page selection stops waiting after twelve seconds when its acknowledgement
   is missing, reports an unconfirmed result and refreshes status without
   replaying the request. The panel shows the background's specific error.

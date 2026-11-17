@@ -11,6 +11,21 @@ afterEach(() => {
 })
 
 describe('panel protocol', () => {
+  it('restores a view without new binding and forgets it after an explicit clear', async () => {
+    vi.useFakeTimers()
+    let disconnect!: () => void
+    const firstPost = vi.fn(), secondPost = vi.fn()
+    const first = { postMessage: firstPost, onMessage: { addListener: vi.fn() }, onDisconnect: { addListener: (fn: () => void) => { disconnect = fn } } }
+    const second = { postMessage: secondPost, onMessage: { addListener: vi.fn() }, onDisconnect: { addListener: vi.fn() } }
+    vi.stubGlobal('chrome', { runtime: { connect: vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second) } })
+    const api = connectPanel()
+    await api.registerWindow(3); await api.setActiveSession('retained', undefined, true)
+    expect(firstPost).toHaveBeenLastCalledWith({ type: 'session.active', sessionId: 'retained', restore: true })
+    await api.setActiveSession(null, undefined, true)
+    disconnect(); await vi.advanceTimersByTimeAsync(150)
+    expect(secondPost.mock.calls.map(([message]) => message)).toEqual([{ type: 'panel.window', windowId: 3 }, { type: 'request-status' }])
+    expect(secondPost).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'session.active' }))
+  })
   it.each([false, true])('restores only the latest view context after disconnect (new=%s)', async isNew => {
     vi.useFakeTimers()
     let disconnect!: () => void

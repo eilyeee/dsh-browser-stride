@@ -797,18 +797,25 @@ export function App(): React.JSX.Element {
     })
   }, [])
 
-  // 每次连接重启（连接配置变更/断线重连）都新建会话。状态消息逐条监听：
-  // React 会把 stopped/connecting 等瞬时状态合并进同一帧渲染，依赖渲染
-  // 状态无法可靠观察到"连接已重置"，因此在这里按消息粒度判定。
+  // Worker startup/transport loss does not replace the displayed conversation.
+  // Explicit disconnection or a changed Host address retires its scope.
   const [sessionEpoch, setSessionEpoch] = useState(0)
   const lastStateRef = useRef<BridgeState | null>(null)
   const disconnectedRef = useRef(false)
+  const hostIdentityRef = useRef<string | undefined>(undefined)
+  const viewRestoreRef = useRef(0)
   useEffect(() => {
     const offStatus = api.onStatus((next, nextCaps, connection) => {
       setState(next)
       setCaps(nextCaps)
-      if (typeof connection?.hostIdentity === 'string') setTaskBriefHost(connection.hostIdentity)
+      const previousHost = hostIdentityRef.current
+      const hostChanged = typeof connection?.hostIdentity === 'string' && previousHost !== undefined && previousHost !== connection.hostIdentity
+      if (typeof connection?.hostIdentity === 'string') {
+        hostIdentityRef.current = connection.hostIdentity
+        setTaskBriefHost(connection.hostIdentity)
+      }
       if (typeof connection?.hasCredential === 'boolean') setHasConnectionCredential(connection.hasCredential)
+      const explicitlyDisconnected = connection?.connectionDisconnected === true && !disconnectedRef.current
       if (typeof connection?.connectionDisconnected === 'boolean') {
         if (connection.connectionDisconnected && !disconnectedRef.current) {
           clearBriefDrafts(api)
@@ -818,7 +825,9 @@ export function App(): React.JSX.Element {
       }
       const previous = lastStateRef.current
       lastStateRef.current = next
-      if (previous !== null && next !== previous && next === 'stopped') {
+      if (next !== 'connected' || hostChanged || explicitlyDisconnected) viewRestoreRef.current++
+      if (hostChanged || explicitlyDisconnected) {
+        void api.setActiveSession(null, undefined, true).catch(() => {})
         sessionTransitionRef.current += 1
         sessionInitializationRef.current = false
         sessionChangingRef.current = false
@@ -846,6 +855,25 @@ export function App(): React.JSX.Element {
         stoppingRef.current = false
         clearQuestions()
         setSessionEpoch((epoch) => epoch + 1)
+      } else if (previous !== null && previous !== 'connected' && next === 'connected' && sessionRef.current !== null) {
+        const id = sessionRef.current, transition = sessionTransitionRef.current, restore = ++viewRestoreRef.current
+        const current = () => viewRestoreRef.current === restore && sessionRef.current === id
+          && sessionTransitionRef.current === transition && lastStateRef.current === 'connected'
+        void (async () => {
+          // Registration restores this view only: no isNew binding, page move,
+          // approval, prompt, queued task start or browser action is replayed.
+          await api.setActiveSession(id, undefined, true)
+          const { items, archived } = await loadSessionCatalog()
+          if (!current()) return
+          const entry = items.find(item => item.sessionId === id && item.origin !== 'subagent' && !archived.has(id))
+          if (entry === undefined) throw Error('session-unavailable')
+          const history = await readHistory(id)
+          if (!current()) return
+          applyHistory(id, history)
+          await refreshSessionModels(id)
+        })().catch(() => {
+          if (current()) setError(copy.app.restoreSessionFailed)
+        })
       }
     })
     const offEvent = api.onEvent((frame) => { void onFrame(frame) })
@@ -869,6 +897,7 @@ export function App(): React.JSX.Element {
       setError(cause instanceof Error ? cause.message : String(cause))
     })
     return () => {
+      viewRestoreRef.current++
       offStatus(); offEvent(); offApproval(); offApprovalResolved()
       offTabAffinity(); offSelection(); offResumeHint()
     }

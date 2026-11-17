@@ -2,8 +2,8 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdtemp, mkdir, readFile, writeFile, copyFile, chmod, rm } from 'node:fs/promises'
-import { dirname, join, resolve } from 'node:path'
+import { mkdtemp, mkdir, readFile, writeFile, copyFile, chmod, rm, cp, readdir } from 'node:fs/promises'
+import { dirname, join, resolve, relative } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
 import { createServer } from 'node:http'
@@ -19,12 +19,26 @@ const bridgeRequire = createRequire(join(repo, 'packages/browser/bridge-browser/
 const cli = join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'lib/bin.js')
 const root = await mkdtemp(join(tmpdir(), 'stride-diagnostics-')), home = join(root, 'home')
 const realModel = process.env.STRIDE_REAL_MODEL === '1'
+const statusRace = process.env.STRIDE_DIAGNOSTIC_STATUS_RACE === '1' || process.argv.includes('--status-race')
+const traceNative = process.argv.includes('--trace-native')
 const version = JSON.parse(await readFile(join(repo, 'package.json'), 'utf8')).version
 const base = join(repo, '.stride-private/validation/diagnostics', version), label = realModel ? 'real-model' : 'scripted'
 await mkdir(base, { recursive: true }); const artifacts = await mkdtemp(join(base, label + '-'))
 const env = { ...process.env, DSH_HOME: home, DSH_TELEMETRY_DISABLED: '1' }
 for (const key of ['DSH_EXT_TOKEN', 'DSH_BRIDGE_ADMIN_TOKEN', 'DSH_BROWSER_SESSION_WORKSPACE']) delete env[key]
 let host, browser, sessionId, cancelTimer, phase = 'setup', events = [], gets = 0, writes = 0
+async function extensionDigest(directory) {
+  const files = []
+  for (const entry of await readdir(directory, { recursive: true, withFileTypes: true })) {
+    assert.ok(!entry.isSymbolicLink(), 'Extension inputs must not contain symlinks')
+    if (entry.isFile()) files.push(relative(directory, join(entry.parentPath, entry.name)).replaceAll('\\', '/'))
+  }
+  const hash = createHash('sha256')
+  for (const file of files.sort()) hash.update(file + '\0' + createHash('sha256').update(await readFile(join(directory, file))).digest('hex') + '\n')
+  return hash.digest('hex')
+}
+const sourceExtensionDigest = await extensionDigest(join(repo, 'extensions/dsh-browser/dist'))
+const sourceHostDigest = createHash('sha256').update(await readFile(join(repo, 'packages/browser/bridge-browser/lib/index.js'))).digest('hex')
 const site = createServer((req, res) => {
   if (!['GET', 'HEAD'].includes(req.method)) { writes++; res.writeHead(405).end(); return }
   if (req.url.startsWith('/api/customer/')) { gets++; res.writeHead(500, { 'Content-Type': 'application/json', 'Set-Cookie': 'synthetic-cookie=PRIVATE-COOKIE' }).end('{"private":"PRIVATE-BODY"}'); return }
@@ -65,17 +79,44 @@ let requests=0;ctx.on('agent/request',(_p,next)=>{if(++requests>12)throw Error('
   const reservation = createServer(); await new Promise(done => reservation.listen(0, '127.0.0.1', done)); const port = reservation.address().port; await new Promise(done => reservation.close(done))
   const patch = realModel ? await readFile(process.env.STRIDE_MODEL_PATCH, 'utf8') : ''
   host = await startDshBackend({ backend: 'extension', port, repoRoot: repo, benchmarkRoot: join(repo, 'benchmark'), runtimeRoot: join(root, 'runtime'), startUrl: origin + '/health', deferSessionCreate: true, extraPatch: patch + '\n- insert:\n    - id: diagnostic-fixture\n      name: ' + JSON.stringify(pathToFileURL(fixture).href) + '\n' })
-  browser = await startExtensionBrowser({ repoRoot: repo, benchmarkRoot: join(repo, 'benchmark'), bridgeUrl: `ws://127.0.0.1:${port}/ext/bridge`, issuePairingCode: () => host.issuePairingCode(), trustedOrigin: origin })
+  let extensionDir
+  if (statusRace || traceNative) {
+    extensionDir = join(root, 'status-race-extension')
+    await cp(join(repo, 'extensions/dsh-browser/dist'), extensionDir, { recursive: true })
+    if (statusRace) {
+      await copyFile(join(repo, 'scripts/fixtures/diagnostic-status-race.js'), join(extensionDir, 'status-race-fixture.js'))
+      const panelPath = join(extensionDir, 'panel/index.html'), panel = await readFile(panelPath, 'utf8')
+      assert.ok(panel.includes('<head>'))
+      await writeFile(panelPath, panel.replace('<head>', '<head><script src="../status-race-fixture.js"></script>'))
+    }
+    if (traceNative) {
+      const background = join(extensionDir, 'background.js')
+      await writeFile(background, (await readFile(join(repo, 'scripts/fixtures/diagnostic-native-trace.js'), 'utf8')) + '\n' + await readFile(background, 'utf8'))
+    }
+  }
+  browser = await startExtensionBrowser({ repoRoot: repo, benchmarkRoot: join(repo, 'benchmark'), bridgeUrl: `ws://127.0.0.1:${port}/ext/bridge`, issuePairingCode: () => host.issuePairingCode(), trustedOrigin: origin, extensionDir })
   for (let i = 0; i < 100 && !sessionId; i++) { sessionId = await browser.worker.evaluate(async () => (await chrome.storage.session.get('dshTabAffinity')).dshTabAffinity?.focusedSessionId); if (!sessionId) await delay(100) }
   assert.equal(typeof sessionId, 'string')
   await rpc('bridge.taskBrief.save', { sessionId, version: 0, input: { goal: 'Synthetic page diagnostics', projectPath: '', materials: [], criteria: [] } })
   await browser.prepare(origin + '/diagnostics'); await browser.bindSession(sessionId); await browser.panel.bringToFront()
   if (!realModel) await rpc('session.selectModel', { sessionId, provider: 'stride-diagnostics', model: 'diagnostics' })
+  if (statusRace) {
+    phase = 'hold-status'
+    await browser.panel.evaluate(() => window.__strideDiagnosticRace.arm())
+    await browser.panel.waitForFunction(() => window.__strideDiagnosticRace.status().held, null, { timeout: 10000 })
+  }
   phase = 'native-enable'
   await browser.panel.locator('.page-diagnostics summary').click()
   const enable = browser.panel.locator('.page-diagnostics button'); await enable.waitFor(); await enable.click()
   await browser.panel.locator('.page-diagnostics [role="status"]').waitFor({ timeout: 15000 })
   assert.match(await browser.panel.locator('.page-diagnostics [role="status"]').innerText(), /已记录|entries/, 'Native capture must be confirmed before reproducing the fixture')
+  if (statusRace) {
+    phase = 'late-status'
+    assert.equal(await browser.panel.evaluate(() => window.__strideDiagnosticRace.status().delayedDeliveries), 1)
+    await browser.panel.evaluate(() => window.__strideDiagnosticRace.release())
+    await browser.panel.waitForTimeout(100)
+    assert.match(await enable.innerText(), /停止并清空|Stop and clear/, 'An earlier disabled status reply must not overwrite the native start result')
+  }
   phase = 'capture'
   await browser.target.locator('#reproduce').click(); await browser.target.locator('#state').filter({ hasText: 'DONE' }).waitFor()
   assert.equal(gets, 1); assert.equal(writes, 0)
@@ -89,7 +130,12 @@ let requests=0;ctx.on('agent/request',(_p,next)=>{if(++requests>12)throw Error('
   await browser.target.goto(origin + '/another'); assert.equal(writes, 0)
   await browser.panel.setViewportSize({ width: 360, height: 800 }); assert.ok(await browser.panel.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1))
   await browser.panel.screenshot({ path: join(artifacts, 'panel.png') })
+  assert.equal(await extensionDigest(join(repo, 'extensions/dsh-browser/dist')), sourceExtensionDigest, 'The candidate changed during acceptance')
+  assert.equal(createHash('sha256').update(await readFile(join(repo, 'packages/browser/bridge-browser/lib/index.js'))).digest('hex'), sourceHostDigest, 'The Host candidate changed during acceptance')
   const result = { passed: true, version, realHost: true, isolatedChrome: true, realModel, scriptedModel: !realModel, browserVersion: browser.browserVersion, nativeEnable: true, nativeStop: true, diagnosticReadCalls: dispatches.filter(v => v.name === 'browser_get_diagnostics').length, observedConsole: 'TypeError', observedHttp: 500, sensitiveSyntheticValuesAbsent: true, serverWrites: writes, originalHostUntouched: true,
+    ...(statusRace ? { statusRaceInjected: true, staleStatusDidNotOverwriteStart: true, extensionObserverCopy: true } : {}),
+    ...(traceNative ? { nativeCommandObserver: true, nativeCommandTrace: await browser.worker.evaluate(() => globalThis.__strideDiagnosticNativeTrace) } : {}),
+    sourceExtensionDigest, candidateUnchangedDuringRun: true,
     hostBundleSha256: createHash('sha256').update(await readFile(join(repo, 'packages/browser/bridge-browser/lib/index.js'))).digest('hex'), extensionBundleSha256: createHash('sha256').update(await readFile(join(repo, 'extensions/dsh-browser/dist/background.js'))).digest('hex'), evidenceDirectory: artifacts.slice(base.length + 1) }
   await writeFile(join(artifacts, 'result.json'), JSON.stringify(result, null, 2), { mode: 0o600 }); await writeFile(join(base, label + '.json'), JSON.stringify(result, null, 2), { mode: 0o600 }); console.log(JSON.stringify(result))
 } catch (error) {
@@ -99,7 +145,9 @@ let requests=0;ctx.on('agent/request',(_p,next)=>{if(++requests>12)throw Error('
     diagnostics: document.querySelector('.page-diagnostics')?.textContent?.slice(0, 1500),
     target: document.querySelector('.control-group')?.textContent?.slice(0, 1000),
   }), sessionId).catch(() => undefined)
-  await writeFile(join(artifacts, 'failure.json'), JSON.stringify({ passed: false, phase, errorName: error.name, panelState, events }, null, 2), { mode: 0o600 }); throw error
+  const statusRaceState = !statusRace || !browser ? undefined : await browser.panel.evaluate(() => window.__strideDiagnosticRace.status()).catch(() => undefined)
+  const nativeTrace = !traceNative || !browser ? undefined : await browser.worker.evaluate(() => globalThis.__strideDiagnosticNativeTrace).catch(() => undefined)
+  await writeFile(join(artifacts, 'failure.json'), JSON.stringify({ passed: false, phase, errorName: error.name, panelState, statusRaceState, nativeTrace, events }, null, 2), { mode: 0o600 }); throw error
 } finally {
   clearTimeout(cancelTimer); if (sessionId) await host?.client.rpc('session.cancel', { sessionId }).catch(() => {})
   await browser?.close().catch(() => {}); await host?.close().catch(() => {}); await new Promise(done => site.close(done)); await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })

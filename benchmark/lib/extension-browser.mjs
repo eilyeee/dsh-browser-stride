@@ -119,11 +119,11 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
       browserVersion: context.browser().version(),
       authorizePage,
       /** Restart only the worker, retaining native tab grants and session storage. */
-      async restartWorker() {
+      async restartWorker({ preservePanel = false } = {}) {
         await panel.bringToFront()
         const previous = worker
         await previous.evaluate(() => { globalThis.__strideWorkerRestartProof = crypto.randomUUID() })
-        await panel.evaluate(() => { window.__stridePanelRestartProof = crypto.randomUUID() })
+        const panelProof = await panel.evaluate(() => { const value = crypto.randomUUID(); window.__stridePanelRestartProof = value; return value })
         const cdp = await context.newCDPSession(panel)
         const versions = new Map()
         const stopped = new Set()
@@ -148,9 +148,11 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
           // Chromium can miss lifecycle events here even after the panel has
           // rendered and connected. Wait for a committed navigation, then prove
           // that the old document is gone and the actual new UI is available.
-          await panel.reload({ waitUntil: 'commit', timeout: 10000 })
-          await panel.waitForFunction(() => window.__stridePanelRestartProof === undefined, undefined, { timeout: 15000 })
-          await panel.waitForSelector('header.topbar', { timeout: 15000 })
+          if (!preservePanel) {
+            await panel.reload({ waitUntil: 'commit', timeout: 10000 })
+            await panel.waitForFunction(() => window.__stridePanelRestartProof === undefined, undefined, { timeout: 15000 })
+            await panel.waitForSelector('header.topbar', { timeout: 15000 })
+          }
           let next
           const replacementDeadline = Date.now() + 10000
           while (Date.now() < replacementDeadline && next === undefined) {
@@ -162,8 +164,9 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
           }
           if (next === undefined) throw new Error('Replacement extension worker did not start')
           worker = next
+          if (preservePanel && !await panel.evaluate(expected => window.__stridePanelRestartProof === expected, panelProof)) throw new Error('The panel document changed during worker restart')
           await panel.evaluate(() => { window.__dshBenchmarkPort = chrome.runtime.connect({ name: 'dsh-panel' }) })
-          return { worker, panel }
+          return { worker, panel, panelPreserved: preservePanel }
         } finally { await cdp.detach() }
       },
       /** Keep installation data while replacing the whole browser/worker lifetime. */

@@ -148,6 +148,7 @@ export interface PanelCopy {
     value: (percent: string) => string
   }
   app: {
+    restoreSessionFailed: string
     openSettings: string
     settings: string
     openSessions: string
@@ -417,6 +418,7 @@ const EN: PanelCopy = {
     value: (percent) => `Text size ${percent}`,
   },
   app: {
+    restoreSessionFailed: 'The conversation is retained, but its current state could not be restored. Check the connection and reopen this conversation from history.',
     openSettings: 'Open settings',
     settings: 'Settings',
     openSessions: 'Session history',
@@ -686,6 +688,7 @@ const ZH: PanelCopy = {
     value: (percent) => `字号 ${percent}`,
   },
   app: {
+    restoreSessionFailed: '原对话已保留，但当前状态恢复未确认。请检查连接后，从历史会话重新打开这条对话。',
     openSettings: '打开设置',
     settings: '设置',
     openSessions: '历史会话',

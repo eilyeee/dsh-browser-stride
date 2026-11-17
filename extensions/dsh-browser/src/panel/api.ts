@@ -150,7 +150,7 @@ export interface PanelApi {
   clearSelection(selection?: PageSelection): Promise<void>
   /** Scope this panel's selections to its own browser window. */
   registerWindow(windowId: number): Promise<void>
-  setActiveSession(sessionId: string, isNew?: boolean): Promise<void>
+  setActiveSession(sessionId: string | null, isNew?: boolean, restore?: true): Promise<void>
   updateSettings(settings: Partial<PanelSettings>, options?: { connect: boolean }): Promise<void>
   requestStatus(): Promise<void>
 }
@@ -599,9 +599,10 @@ export function connectPanel(): PanelApi {
       if (Number.isSafeInteger(windowId) && windowId >= 0) viewWindowId = windowId
       return send({ type: 'panel.window', windowId })
     },
-    setActiveSession(sessionId, isNew) {
+    setActiveSession(sessionId, isNew, restore) {
       if (typeof sessionId === 'string' && sessionId.trim() !== '') viewSessionId = sessionId
-      return send({ type: 'session.active', sessionId, isNew })
+      else if (sessionId === null) viewSessionId = undefined
+      return send(restore === true ? { type: 'session.active', sessionId, restore: true } : { type: 'session.active', sessionId, isNew })
     },
     updateSettings(next, options) {
       const id = crypto.randomUUID()
