@@ -126,6 +126,25 @@ afterEach(() => {
 })
 
 describe('background tab-affinity rebind protocol', () => {
+  it('restores a panel view without moving the focused target or binding a new session', async () => {
+    const h = await connectPanelForTest()
+    h.onMessage.emit({ type: 'session.active', sessionId: 'view-a', isNew: true })
+    const state = (panel: { postMessage: typeof h.postMessage } = h) => panel.postMessage.mock.calls.map(([m]) => m).filter(m => m.type === 'tab-affinity').at(-1)?.state
+    await vi.waitFor(() => expect(state().controlled?.tabId).toBe(1))
+    const other = panelPort(); h.onConnect.emit(other.port)
+    other.onMessage.emit({ type: 'session.active', sessionId: 'view-b', isNew: true })
+    await vi.waitFor(() => expect(state(other).controlled?.tabId).toBe(1))
+    other.onMessage.emit({ type: 'tab-affinity.rebind', id: 'choose-b', sessionId: 'view-b', tabId: 2, revision: state(other).revision })
+    await vi.waitFor(() => expect(other.postMessage).toHaveBeenCalledWith({ type: 'tab-affinity.rebind.result', id: 'choose-b', ok: true }))
+    const revision = state(other).revision
+    h.onMessage.emit({ type: 'session.active', sessionId: 'view-a', restore: true })
+    expect(state().controlled?.tabId).toBe(1); expect(state(other).controlled?.tabId).toBe(2)
+    expect(state().revision).toBe(revision)
+    h.onMessage.emit({ type: 'session.active', sessionId: 'unbound-view', restore: true, isNew: true })
+    await vi.waitFor(() => expect(state().controlled).toBeNull())
+    expect(state().revision).toBe(revision)
+  }, 10000)
+
   it('keeps each panel selection and grant status scoped to its own conversation', async () => {
     const h = await connectPanelForTest()
     h.onMessage.emit({ type: 'session.active', sessionId: 'original-session' })

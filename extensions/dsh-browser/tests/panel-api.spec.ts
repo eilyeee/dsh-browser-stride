@@ -11,6 +11,64 @@ afterEach(() => {
 })
 
 describe('panel protocol', () => {
+  it.each([false, true])('restores only the latest view context after disconnect (new=%s)', async isNew => {
+    vi.useFakeTimers()
+    let disconnect!: () => void
+    const firstPost = vi.fn(), secondPost = vi.fn()
+    const first = { postMessage: firstPost, onMessage: { addListener: vi.fn() }, onDisconnect: { addListener: (fn: () => void) => { disconnect = fn } } }
+    const second = { postMessage: secondPost, onMessage: { addListener: vi.fn() }, onDisconnect: { addListener: vi.fn() } }
+    vi.stubGlobal('chrome', { runtime: { connect: vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second) } })
+    const api = connectPanel()
+    await api.registerWindow(1); await api.registerWindow(2)
+    await api.setActiveSession('old-view'); await api.setActiveSession('current-view', isNew)
+    const prompt = api.rpc('session.prompt', { sessionId: 'current-view' }).catch(error => error)
+    disconnect()
+    expect(await prompt).toBeInstanceOf(Error)
+    await vi.advanceTimersByTimeAsync(150)
+    expect(secondPost.mock.calls.map(([value]) => value)).toEqual([
+      { type: 'panel.window', windowId: 2 },
+      { type: 'session.active', sessionId: 'current-view', restore: true },
+      { type: 'request-status' },
+    ])
+    expect(secondPost).not.toHaveBeenCalledWith(expect.objectContaining({ isNew: true }))
+    expect(secondPost).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'rpc' }))
+  })
+
+  it('registers view context before retrying a synchronously refused selection', async () => {
+    vi.useFakeTimers()
+    let receive!: (value: unknown) => void
+    const firstPost = vi.fn(), secondPost = vi.fn()
+    const first = { postMessage: firstPost, onMessage: { addListener: vi.fn() }, onDisconnect: { addListener: vi.fn() } }
+    const second = { postMessage: secondPost, onMessage: { addListener: (fn: (value: unknown) => void) => { receive = fn } }, onDisconnect: { addListener: vi.fn() } }
+    vi.stubGlobal('chrome', { runtime: { connect: vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second) } })
+    const api = connectPanel(); await api.registerWindow(3); await api.setActiveSession('selected', true)
+    firstPost.mockImplementationOnce(() => { throw Error('stale port') })
+    const pending = api.rebindTabAffinity({ tabId: 42, revision: 7, sessionId: 'selected' })
+    await vi.advanceTimersByTimeAsync(150)
+    const messages = secondPost.mock.calls.map(([value]) => value)
+    expect(messages.slice(0, 3)).toEqual([{ type: 'panel.window', windowId: 3 }, { type: 'session.active', sessionId: 'selected', restore: true }, { type: 'request-status' }])
+    expect(messages).toHaveLength(4)
+    expect(messages[3]).toMatchObject({ type: 'tab-affinity.rebind', tabId: 42, revision: 7, sessionId: 'selected' })
+    receive({ type: 'tab-affinity.rebind.result', id: messages[3].id, ok: true })
+    await pending
+  })
+
+  it('ignores late view/status events from the replaced port', async () => {
+    vi.useFakeTimers()
+    let disconnect!: () => void, oldReceive!: (value: unknown) => void, nextReceive!: (value: unknown) => void
+    const first = { postMessage: vi.fn(), onMessage: { addListener: (fn: (value: unknown) => void) => { oldReceive = fn } }, onDisconnect: { addListener: (fn: () => void) => { disconnect = fn } } }
+    const second = { postMessage: vi.fn(), onMessage: { addListener: (fn: (value: unknown) => void) => { nextReceive = fn } }, onDisconnect: { addListener: vi.fn() } }
+    vi.stubGlobal('chrome', { runtime: { connect: vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second) } })
+    const api = connectPanel(), status = vi.fn(), affinity = vi.fn()
+    api.onStatus(status); api.onTabAffinity(affinity)
+    disconnect(); await vi.advanceTimersByTimeAsync(150)
+    oldReceive({ type: 'status', state: 'stopped', caps: null })
+    oldReceive({ type: 'tab-affinity', state: { revision: 1, status: 'lost', controlled: null, active: null } })
+    expect(status).not.toHaveBeenCalled(); expect(affinity).not.toHaveBeenCalled()
+    nextReceive({ type: 'status', state: 'connected', caps: null })
+    expect(status).toHaveBeenCalledWith('connected', null)
+  })
+
   it('correlates read-only page-list refresh without authorizing or selecting a page', async () => {
     let receive: ((message: unknown) => void) | undefined
     const postMessage = vi.fn()

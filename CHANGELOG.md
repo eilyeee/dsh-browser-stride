@@ -19,6 +19,12 @@ package versions currently identify development builds, not supported releases.
 
 ### Fixed
 
+- Development build 0.1.25 restores a panel’s latest window/conversation
+  registration after its runtime Port reconnects. View restoration does not
+  repeat new-session binding, move global focus or replay accepted actions.
+  Late messages from replaced ports are ignored. Benchmark suite 34 records
+  the reconnect scenario.
+
 - Development build 0.1.24 scopes each panel’s selected-page and access status
   to its own conversation. An explicit group-page choice no longer depends on
   another panel being focused; stale revisions, foreign-session choices and

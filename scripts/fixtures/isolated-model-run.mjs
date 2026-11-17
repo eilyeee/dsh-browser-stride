@@ -97,5 +97,10 @@ let requests=0;ctx.on('agent/request',(_p,next)=>{if(++requests>80)throw Error('
       return events
     }
     return { root, home, host, browser, sessionId, rpc, turn, close, realModel }
-  } catch (error) { await close(); throw error }
+  } catch (error) {
+    // The backend log is already credential-redacted. Preserve startup
+    // diagnostics in private artifacts before deleting the temporary home.
+    await copyFile(join(root, 'runtime/logs/dsh-extension.log'), join(artifacts, 'host-startup-failure.log')).catch(() => {})
+    await close(); throw error
+  }
 }

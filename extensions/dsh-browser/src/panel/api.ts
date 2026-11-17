@@ -183,6 +183,8 @@ export function connectPanel(): PanelApi {
 
   let port: chrome.runtime.Port | null = null
   let reconnectPromise: Promise<chrome.runtime.Port> | null = null
+  let viewWindowId: number | undefined
+  let viewSessionId: string | undefined
 
   function onMessage(message: unknown): void {
     if (typeof message !== 'object' || message === null) return
@@ -316,7 +318,7 @@ export function connectPanel(): PanelApi {
 
   function attach(next: chrome.runtime.Port): chrome.runtime.Port {
     port = next
-    next.onMessage.addListener(onMessage)
+    next.onMessage.addListener(message => { if (port === next) onMessage(message) })
     next.onDisconnect.addListener(() => {
       if (port !== next) return
       port = null
@@ -326,6 +328,19 @@ export function connectPanel(): PanelApi {
       // same attempt instead of opening competing ports.
       void ensurePort(150).catch(() => {})
     })
+    // Restore only idempotent view registration. Never repeat isNew, a
+    // submitted RPC, approval, selection or other possibly accepted action.
+    if (viewWindowId !== undefined || viewSessionId !== undefined) {
+      try {
+        if (viewWindowId !== undefined) next.postMessage({ type: 'panel.window', windowId: viewWindowId })
+        if (viewSessionId !== undefined) next.postMessage({ type: 'session.active', sessionId: viewSessionId, restore: true })
+        next.postMessage({ type: 'request-status' })
+      } catch (cause) {
+        if (port === next) port = null
+        try { next.disconnect() } catch { /* failed channel */ }
+        throw connectionError(cause)
+      }
+    }
     return next
   }
 
@@ -571,9 +586,11 @@ export function connectPanel(): PanelApi {
       return send({ type: 'selection.clear', ...(selection === undefined ? {} : { selection }) })
     },
     registerWindow(windowId) {
+      if (Number.isSafeInteger(windowId) && windowId >= 0) viewWindowId = windowId
       return send({ type: 'panel.window', windowId })
     },
     setActiveSession(sessionId, isNew) {
+      if (typeof sessionId === 'string' && sessionId.trim() !== '') viewSessionId = sessionId
       return send({ type: 'session.active', sessionId, isNew })
     },
     updateSettings(next, options) {
