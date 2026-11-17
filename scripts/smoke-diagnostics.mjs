@@ -74,7 +74,8 @@ let requests=0;ctx.on('agent/request',(_p,next)=>{if(++requests>12)throw Error('
   phase = 'native-enable'
   await browser.panel.locator('.page-diagnostics summary').click()
   const enable = browser.panel.locator('.page-diagnostics button'); await enable.waitFor(); await enable.click()
-  await browser.panel.locator('.page-diagnostics [role="status"]').filter({ hasText: /已记录|entries/ }).waitFor({ timeout: 15000 })
+  await browser.panel.locator('.page-diagnostics [role="status"]').waitFor({ timeout: 15000 })
+  assert.match(await browser.panel.locator('.page-diagnostics [role="status"]').innerText(), /已记录|entries/, 'Native capture must be confirmed before reproducing the fixture')
   phase = 'capture'
   await browser.target.locator('#reproduce').click(); await browser.target.locator('#state').filter({ hasText: 'DONE' }).waitFor()
   assert.equal(gets, 1); assert.equal(writes, 0)
@@ -92,7 +93,13 @@ let requests=0;ctx.on('agent/request',(_p,next)=>{if(++requests>12)throw Error('
     hostBundleSha256: createHash('sha256').update(await readFile(join(repo, 'packages/browser/bridge-browser/lib/index.js'))).digest('hex'), extensionBundleSha256: createHash('sha256').update(await readFile(join(repo, 'extensions/dsh-browser/dist/background.js'))).digest('hex'), evidenceDirectory: artifacts.slice(base.length + 1) }
   await writeFile(join(artifacts, 'result.json'), JSON.stringify(result, null, 2), { mode: 0o600 }); await writeFile(join(base, label + '.json'), JSON.stringify(result, null, 2), { mode: 0o600 }); console.log(JSON.stringify(result))
 } catch (error) {
-  await writeFile(join(artifacts, 'failure.json'), JSON.stringify({ passed: false, phase, errorName: error.name, events }, null, 2), { mode: 0o600 }); throw error
+  const panelState = browser === undefined ? undefined : await browser.panel.evaluate(expectedSession => ({
+    conversationMatches: document.querySelector('.app')?.getAttribute('data-session-id') === expectedSession,
+    connected: document.querySelector('.connection .dot.connected') !== null,
+    diagnostics: document.querySelector('.page-diagnostics')?.textContent?.slice(0, 1500),
+    target: document.querySelector('.control-group')?.textContent?.slice(0, 1000),
+  }), sessionId).catch(() => undefined)
+  await writeFile(join(artifacts, 'failure.json'), JSON.stringify({ passed: false, phase, errorName: error.name, panelState, events }, null, 2), { mode: 0o600 }); throw error
 } finally {
   clearTimeout(cancelTimer); if (sessionId) await host?.client.rpc('session.cancel', { sessionId }).catch(() => {})
   await browser?.close().catch(() => {}); await host?.close().catch(() => {}); await new Promise(done => site.close(done)); await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
