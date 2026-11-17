@@ -402,20 +402,24 @@ export function pageAccessNotice(access: PageAccessStatus, copy: PanelCopy): str
   return access.activeGranted ? copy.pageAccess.granted : copy.pageAccess.required
 }
 
-export function ControlGroupStatus({ state, pages, copy, onSelect }: {
+export function ControlGroupStatus({ state, pages, copy, onSelect, selectionAvailable = true }: {
   state: TabAffinityState | null
   pages: AffinityTab[]
   copy: PanelCopy
   onSelect: (tabId: number) => Promise<void>
+  selectionAvailable?: boolean
 }): React.JSX.Element {
   const [selecting, setSelecting] = useState(false)
   const [selectionError, setSelectionError] = useState('')
+  const selectedPage = pages.find(page => page.tabId === state?.controlled?.tabId)
   return <section className="tab-affinity control-group" role="status">
     <strong>{copy.controlGroup.title}</strong>
     <p>{copy.controlGroup.body}</p>
+    <p>{copy.controlGroup.current}: {selectedPage === undefined ? copy.controlGroup.unselected : tabLabel(selectedPage, copy.controlGroup.choose)}</p>
+    {(!selectionAvailable || state === null) && <p>{copy.controlGroup.notReady}</p>}
     {pages.length === 0 ? <p>{copy.controlGroup.empty}</p> : <div className="control-group-pages" role="group" aria-label={copy.controlGroup.page}>
       {pages.map(page => <button key={page.tabId} type="button" data-tab-id={page.tabId}
-        title={page.url} aria-pressed={page.tabId === state?.controlled?.tabId} disabled={selecting}
+        title={page.url} aria-pressed={page.tabId === state?.controlled?.tabId} disabled={selecting || !selectionAvailable || state === null}
         onClick={event => {
           if (!event.nativeEvent.isTrusted) return
           setSelecting(true); setSelectionError('')
@@ -1887,8 +1891,12 @@ export function App(): React.JSX.Element {
   }
 
   async function selectGroupPage(tabId: number): Promise<void> {
-    if (tabAffinity === null) return
-    await api.rebindTabAffinity({ tabId, revision: tabAffinity.revision, sessionId: sessionRef.current })
+    if (tabAffinity === null || sessionRef.current === null || sessionChangingRef.current || state !== 'connected') {
+      throw new Error(copy.controlGroup.notReady)
+    }
+    const page = pageAccess.pages?.find(page => page.tabId === tabId)
+    if (page === undefined) throw new Error(copy.controlGroup.failed)
+    await api.rebindTabAffinity({ tabId, expectedUrl: page.url, revision: tabAffinity.revision, sessionId: sessionRef.current })
   }
 
   async function selectMaterialPage(page: AffinityTab): Promise<void> {
@@ -2252,7 +2260,8 @@ export function App(): React.JSX.Element {
       </section>
       <VersionStatus caps={caps} locale={locale} />
       <PageAccessDiagnostics api={api} access={pageAccess} locale={locale} />
-      <ControlGroupStatus state={tabAffinity} pages={pageAccess.pages ?? []} copy={copy} onSelect={selectGroupPage} />
+      <ControlGroupStatus state={tabAffinity} pages={pageAccess.pages ?? []} copy={copy} onSelect={selectGroupPage}
+        selectionAvailable={state === 'connected' && sessionRef.current !== null && !sessionChanging} />
       <DiagnosticsPanel api={api} sessionId={sessionRef.current} affinity={tabAffinity} available={state === 'connected' && caps?.pageDiagnostics === true && pageAccess.controlledGranted} locale={locale} />
       <RecoveryPanel api={api} sessionId={sessionRef.current} affinity={tabAffinity} available={state === 'connected' && caps?.manualRecovery === true && pageAccess.controlledGranted} working={working || sessionSwitchBlocked} locale={locale} />
       <TaskBriefPanel api={api} sessionId={sessionRef.current} supported={caps?.taskNotes === true} connected={state === 'connected'} locale={locale}

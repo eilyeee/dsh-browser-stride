@@ -15,6 +15,22 @@ describe('control group UI', () => {
     expect(pageAccessNotice({ ...empty, activeGranted: true, pages: [page] }, copy)).toBe(copy.pageAccess.selectExisting)
     expect(pageAccessNotice({ ...empty, controlledGranted: true, controlledTabId: 1, pages: [page] }, copy)).toBe(copy.pageAccess.granted)
   })
+  it('shows an unselected conversation explicitly and disables choices before it is ready', async () => {
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+    const container = document.createElement('div'); const root = createRoot(container)
+    const page = { tabId: 1, windowId: 1, title: 'Other page', url: 'https://example.test/' }
+    const onSelect = vi.fn(async () => {})
+    try {
+      await act(async () => root.render(createElement(ControlGroupStatus, {
+        state: { revision: 3, status: 'lost', controlled: null, active: page }, pages: [page], copy: PANEL_COPY.zh, onSelect,
+        selectionAvailable: false,
+      })))
+      expect(container.textContent).toContain(PANEL_COPY.zh.controlGroup.unselected)
+      expect(container.textContent).toContain(PANEL_COPY.zh.controlGroup.notReady)
+      expect(container.querySelector('button')?.disabled).toBe(true)
+      expect(container.querySelector('button')?.getAttribute('aria-pressed')).toBe('false')
+    } finally { await act(async () => root.unmount()) }
+  })
   it('offers only authorized group pages and has no human follow controls', async () => {
     Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
     const container = document.createElement('div'); document.body.append(container)

@@ -19,6 +19,12 @@ package versions currently identify development builds, not supported releases.
 
 ### Fixed
 
+- Development build 0.1.24 scopes each panel’s selected-page and access status
+  to its own conversation. An explicit group-page choice no longer depends on
+  another panel being focused; stale revisions, foreign-session choices and
+  page authorization remain checked. Unready conversations cannot silently
+  accept a group-page choice. Benchmark suite 33 records this target change.
+
 - Development build 0.1.22 task-progress tools document their evidence and text
   limits. Invalid reports
   return fixed correction guidance without echoing submitted data or changing

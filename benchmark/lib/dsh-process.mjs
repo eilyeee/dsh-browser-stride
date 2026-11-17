@@ -57,6 +57,7 @@ export async function startDshBackend({
   toolProbe,
   extraPatch,
   deferSessionCreate = false,
+  startupTimeoutMs,
 }) {
   const backendRoot = join(runtimeRoot, backend)
   const sessionRoot = join(backendRoot, 'sessions')
@@ -128,7 +129,7 @@ export async function startDshBackend({
   stderr.on('line', (line) => log.write(`${redactHostLogLine(line, [adminToken, launchToken])}\n`))
   let client
   try {
-    client = await waitForDsh(baseUrl, { process: child, getLaunchUrl: () => launchUrl })
+    client = await waitForDsh(baseUrl, { process: child, getLaunchUrl: () => launchUrl, timeoutMs: startupTimeoutMs })
     if (backend === 'playwright') {
       await waitForPlaywrightStatus(baseUrl, child)
     }

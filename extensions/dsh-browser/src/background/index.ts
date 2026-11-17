@@ -477,12 +477,12 @@ let controlPages: AffinityTab[] = []
 const pageAuthorizationAttempts = new PageAuthorizationAttempts()
 async function broadcastPageAccess(): Promise<boolean> {
   const revision = ++pageAccessBroadcastRevision
-  const state = tabAffinity.snapshot()
-  const message = { type: 'page-access', activeGranted: pageAccess.has(state.active?.tabId),
-    controlledGranted: pageAccess.has(state.controlled?.tabId), controlledTabId: state.controlled?.tabId ?? null,
-    revocableTabId: pageAccess.has(state.controlled?.tabId) ? state.controlled!.tabId : pageAccess.has(state.active?.tabId) ? state.active!.tabId : null }
   const post = (pages: AffinityTab[]) => {
     for (const port of panelPorts) {
+      const state = tabAffinity.snapshotForSession(panelActiveSessions.get(port))
+      const message = { type: 'page-access', activeGranted: pageAccess.has(state.active?.tabId),
+        controlledGranted: pageAccess.has(state.controlled?.tabId), controlledTabId: state.controlled?.tabId ?? null,
+        revocableTabId: pageAccess.has(state.controlled?.tabId) ? state.controlled!.tabId : pageAccess.has(state.active?.tabId) ? state.active!.tabId : null }
       const windowId = panelWindows.get(port)
       try { port.postMessage({ ...message, pages, ...(windowId === undefined ? {} : { authorizedPageCount: pages.filter(page => page.windowId === windowId).length, authorization: pageAuthorizationAttempts.get(windowId) }) }) } catch { /* closed */ }
     }
@@ -504,9 +504,8 @@ async function broadcastPageAccess(): Promise<boolean> {
 
 function broadcastTabAffinity(): void {
   broadcastPageAccess()
-  const payload = { type: 'tab-affinity', state: tabAffinity.snapshot() }
   for (const port of panelPorts) {
-    try { port.postMessage(payload) } catch { /* port already closed */ }
+    try { port.postMessage({ type: 'tab-affinity', state: tabAffinity.snapshotForSession(panelActiveSessions.get(port)) }) } catch { /* port already closed */ }
   }
 }
 
@@ -1907,7 +1906,7 @@ chrome.runtime.onConnect.addListener((port) => {
     connectionDisconnected, hasCredential: settings.token !== '' }) } catch { /* port closed */ }
   void affinityReady.then(async () => {
     await syncActiveTab()
-    try { port.postMessage({ type: 'tab-affinity', state: tabAffinity.snapshot() }) } catch { /* port closed */ }
+    try { port.postMessage({ type: 'tab-affinity', state: tabAffinity.snapshotForSession(panelActiveSessions.get(port)) }) } catch { /* port closed */ }
   })
   port.onMessage.addListener((message: unknown) => {
     if (typeof message !== 'object' || message === null) return
@@ -2278,6 +2277,7 @@ chrome.runtime.onConnect.addListener((port) => {
         const sid = validSessionId(session.sessionId)
         if (sid === undefined) {
           panelActiveSessions.delete(port)
+          broadcastTabAffinity()
         } else {
           panelActiveSessions.set(port, sid)
           if (session.isNew === true) {
@@ -2308,9 +2308,11 @@ chrome.runtime.onConnect.addListener((port) => {
             void bind.finally(() => {
               if (sessionSnapshotRefreshes.get(sid) === bind) sessionSnapshotRefreshes.delete(sid)
             })
-          } else if (tabAffinity.focusSession(sid)) {
-            invalidateSessionTarget()
-            persistTabAffinity()
+          } else {
+            if (tabAffinity.focusSession(sid)) {
+              invalidateSessionTarget()
+              persistTabAffinity()
+            }
             broadcastTabAffinity()
           }
         }
@@ -2345,7 +2347,7 @@ chrome.runtime.onConnect.addListener((port) => {
           tabId: request.tabId as number,
           ...(typeof request.expectedUrl === 'string' ? { expectedUrl: request.expectedUrl } : {}),
           current: () => panelPorts.has(port) && panelActiveSessions.get(port) === rebindSessionId
-            && tabAffinity.focusedSession() === (rebindSessionId ?? null) && tabAffinity.snapshot().revision === request.revision,
+            && tabAffinity.snapshot().revision === request.revision,
         }
         if ((selection !== undefined && (!Number.isSafeInteger(selection.tabId) || selection.tabId < 0))
           || (request.expectedUrl !== undefined && (selection === undefined || typeof request.expectedUrl !== 'string'
@@ -2438,7 +2440,7 @@ chrome.runtime.onConnect.addListener((port) => {
         try {
           port.postMessage({ type: 'status', state: bridge?.state ?? ('stopped' as BridgeState), caps,
             connectionDisconnected, hasCredential: settings.token !== '', ...(activeBridgeUrl === undefined ? {} : { hostIdentity: activeBridgeUrl }) })
-          port.postMessage({ type: 'tab-affinity', state: tabAffinity.snapshot() })
+          port.postMessage({ type: 'tab-affinity', state: tabAffinity.snapshotForSession(panelActiveSessions.get(port)) })
           const statusWindowId = panelWindows.get(port)
           if (statusWindowId !== undefined) {
             port.postMessage({ type: 'selection', selection: selections.current(statusWindowId) })

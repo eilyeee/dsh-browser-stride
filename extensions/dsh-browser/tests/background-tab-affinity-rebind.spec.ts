@@ -126,6 +126,30 @@ afterEach(() => {
 })
 
 describe('background tab-affinity rebind protocol', () => {
+  it('keeps each panel selection and grant status scoped to its own conversation', async () => {
+    const h = await connectPanelForTest()
+    h.onMessage.emit({ type: 'session.active', sessionId: 'original-session' })
+    const other = panelPort(); h.onConnect.emit(other.port)
+    other.onMessage.emit({ type: 'session.active', sessionId: 'other-session', isNew: true })
+    const state = (panel: { postMessage: typeof h.postMessage } = h) => panel.postMessage.mock.calls.map(([m]) => m).filter(m => m.type === 'tab-affinity').at(-1)?.state
+    await vi.waitFor(() => expect(state(other).controlled?.tabId).toBe(1))
+    expect(state().controlled).toBeNull()
+    const access = () => h.postMessage.mock.calls.map(([m]) => m).filter(m => m.type === 'page-access').at(-1)
+    await vi.waitFor(() => expect(access().controlledGranted).toBe(false))
+    // An explicit choice belongs to this port's session even while another
+    // panel was the last one to select its conversation.
+    h.onMessage.emit({ type: 'tab-affinity.rebind', id: 'choose-own', sessionId: 'original-session', revision: state().revision, tabId: 2 })
+    await vi.waitFor(() => expect(h.postMessage).toHaveBeenCalledWith({ type: 'tab-affinity.rebind.result', id: 'choose-own', ok: true }))
+    expect(state().controlled?.tabId).toBe(2)
+    expect(state(other).controlled?.tabId).toBe(1)
+    await vi.waitFor(() => expect(access().controlledTabId).toBe(2))
+    // A panel cannot choose a page for another panel's session.
+    h.onMessage.emit({ type: 'tab-affinity.rebind', id: 'foreign-choice', sessionId: 'other-session', revision: state().revision, tabId: 3 })
+    await vi.waitFor(() => expect(h.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity.rebind.result', id: 'foreign-choice', ok: false })))
+    other.onMessage.emit({ type: 'request-status' })
+    expect(state(other).controlled?.tabId).toBe(1)
+  }, 10000)
+
   it('does not confirm a list refresh superseded by another native read', async () => {
     const h = await connectPanelForTest()
     h.onMessage.emit({ type: 'panel.window', windowId: 1 })

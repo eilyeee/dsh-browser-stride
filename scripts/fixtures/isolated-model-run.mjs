@@ -13,7 +13,7 @@ import { startDshBackend } from '../../benchmark/lib/dsh-process.mjs'
 import { startExtensionBrowser } from '../../benchmark/lib/extension-browser.mjs'
 import { within } from '../../benchmark/lib/extension-connection.mjs'
 
-export async function startIsolatedModelRun({ repo, origin, startUrl, artifacts, goal, programs, guardSource, imports = '', patch = '', workspacePath, materials = [], criteria = [], extensionDir, promptViaRpc = false }) {
+export async function startIsolatedModelRun({ repo, origin, startUrl, artifacts, goal, programs, guardSource, imports = '', patch = '', workspacePath, materials = [], criteria = [], extensionDir, promptViaRpc = false, startupTimeoutMs }) {
   const require = createRequire(join(repo, 'package.json')), bridgeRequire = createRequire(join(repo, 'packages/browser/bridge-browser/package.json'))
   const cli = join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'lib/bin.js')
   const root = await mkdtemp(join(tmpdir(), 'stride-model-fixture-')), home = join(root, 'home')
@@ -62,7 +62,7 @@ let requests=0;ctx.on('agent/request',(_p,next)=>{if(++requests>80)throw Error('
     maxInteractiveItems: 60
 `
     host = await startDshBackend({ backend: 'extension', port, repoRoot: repo, benchmarkRoot: join(repo, 'benchmark'), runtimeRoot: join(root, 'runtime'),
-      startUrl, deferSessionCreate: true, extraPatch: modelPatch + '\n' + workspacePatch + '\n' + patch + '\n- insert:\n    - id: synthetic-acceptance\n      name: ' + JSON.stringify(pathToFileURL(fixture).href) + '\n' })
+      startUrl, deferSessionCreate: true, startupTimeoutMs, extraPatch: modelPatch + '\n' + workspacePatch + '\n' + patch + '\n- insert:\n    - id: synthetic-acceptance\n      name: ' + JSON.stringify(pathToFileURL(fixture).href) + '\n' })
     console.log(JSON.stringify({ phase: 'isolated-browser', realModel }))
     browser = await startExtensionBrowser({ repoRoot: repo, benchmarkRoot: join(repo, 'benchmark'), bridgeUrl: `ws://127.0.0.1:${port}/ext/bridge`, issuePairingCode: () => host.issuePairingCode(), trustedOrigin: origin, extensionDir })
     async function rpc(method, payload) {

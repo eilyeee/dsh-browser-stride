@@ -58,6 +58,19 @@ export class TabAffinityController {
     }
   }
 
+  /** A panel must display its conversation target, never another panel's. */
+  snapshotForSession(sessionId?: string): TabAffinityState {
+    if (sessionId === undefined) return this.snapshot()
+    const tab = this.sessionTabs.get(sessionId)
+    return {
+      revision: this.revision,
+      status: tab === undefined ? 'lost' : this.active?.tabId === tab.tabId ? 'following' : 'background',
+      controlled: tab === undefined ? null : { ...tab },
+      active: this.active === null ? null : { ...this.active },
+      ...(this.isDetached(sessionId) ? { detached: true as const } : {}),
+    }
+  }
+
   /** Associate a session with its controlled tab. */
   bindSession(sessionId: string, tab: AffinityTab): void {
     if (this.detachedSessions.has(sessionId)) return
