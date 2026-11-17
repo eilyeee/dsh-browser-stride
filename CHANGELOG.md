@@ -42,6 +42,13 @@ package versions currently identify development builds, not supported releases.
 
 ### Fixed
 
+- Development build 0.1.30 expires diagnostic activation after ten seconds,
+  before the panel RPC deadline. Late native replies cannot enable capture or
+  replay expired queued activation. The native queue remains owned until its
+  pending work and cleanup settle; another activation requires a new click.
+  This bounds an independently reproduced failure mode, without establishing
+  the cause of every historical native-enable timeout.
+
 - Development build 0.1.29 retains the displayed conversation during worker
   bootstrap and transport reconnect. It restores only view registration and
   read-only history, without creating a conversation or replaying prompts,

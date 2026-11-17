@@ -12,6 +12,9 @@ interface Capture {
 const number = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 const record = (value: unknown): Record<string, unknown> => typeof value === 'object' && value !== null ? value as Record<string, unknown> : {}
 const errorTypes = new Set(['Error', 'TypeError', 'ReferenceError', 'SyntaxError', 'RangeError', 'URIError', 'EvalError', 'AggregateError'])
+// Settle before the panel's 15-second RPC deadline. Native commands cannot be
+// cancelled: expired work keeps its queue slot until its owned cleanup settles.
+const START_TIMEOUT_MS = 10_000
 
 export class PageDiagnostics {
   private captures = new Map<number, Capture>()
@@ -49,7 +52,7 @@ export class PageDiagnostics {
     const capture: Capture = { active: true, ready: false, id: `diag_${crypto.randomUUID()}`, startedAt: Date.now(), current,
       contexts: new Map(), pending: new Map(), entries: [], sequence: 0, dropped: 0, ownerScope }
     this.captures.set(tabId, capture)
-    return this.serial(tabId, async () => {
+    const starting = this.serial(tabId, async () => {
       if (previous !== undefined) await this.close(previous)
       try {
         if (!capture.active || !current() || !authorization()) throw Error('diagnostics-revoked')
@@ -58,6 +61,7 @@ export class PageDiagnostics {
         capture.lease = await this.pages.acquireReadLease(tabId, authorization, authorization)
         if (!this.valid(tabId, capture)) throw Error('diagnostics-revoked')
         const tree = await capture.lease.command<{ frameTree?: { frame?: { id?: string; loaderId?: string; url?: string } } }>('Page.getFrameTree')
+        if (!this.valid(tabId, capture)) throw Error('diagnostics-revoked')
         const frame = tree.frameTree?.frame
         if (!frame?.id || !frame.loaderId || !frame.url || !/^https?:/.test(frame.url)) throw Error('diagnostics-document-unavailable')
         capture.frame = frame.id; capture.document = `${frame.id}:${frame.loaderId}`; capture.origin = new URL(frame.url).origin
@@ -66,9 +70,11 @@ export class PageDiagnostics {
           else void this.stop(tabId, capture.id).catch(() => {})
         })
         for (const context of capture.lease.contexts()) if (context.frameId === capture.frame) capture.contexts.set(context.id, context.uniqueId)
-        await capture.lease.command('Page.enable')
-        await capture.lease.command('Runtime.enable')
-        await capture.lease.command('Network.enable', { maxTotalBufferSize: 65_536, maxResourceBufferSize: 4_096, maxPostDataSize: 0 })
+        for (const method of ['Page.enable', 'Runtime.enable', 'Network.enable'] as const) {
+          if (!this.valid(tabId, capture)) throw Error('diagnostics-revoked')
+          await capture.lease.command(method, method === 'Network.enable'
+            ? { maxTotalBufferSize: 65_536, maxResourceBufferSize: 4_096, maxPostDataSize: 0 } : undefined)
+        }
         if (!this.valid(tabId, capture)) throw Error('diagnostics-revoked')
         capture.ready = true
         capture.timer = setTimeout(() => { void this.stop(tabId, capture.id).catch(() => {}) }, 10 * 60_000)
@@ -79,6 +85,19 @@ export class PageDiagnostics {
         throw error
       }
     })
+    let timeout: ReturnType<typeof setTimeout>
+    const expired = new Promise<never>((_resolve, reject) => {
+      timeout = setTimeout(() => {
+        // Invalidate immediately, but never detach a successor or release the
+        // serial slot while an older native attach/command still owns it.
+        this.clear(capture)
+        if (this.captures.get(tabId) === capture) this.captures.delete(tabId)
+        reject(Error('diagnostics-start-timeout'))
+      }, START_TIMEOUT_MS)
+    })
+    // The losing native promise remains observed and performs its own cleanup;
+    // a late reply cannot enable capture, replay an expired start or lose errors.
+    return Promise.race([starting, expired]).finally(() => { clearTimeout(timeout) })
   }
   stop(tabId: number, expectedId?: string): Promise<void> {
     const capture = this.captures.get(tabId)

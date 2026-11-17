@@ -20,7 +20,9 @@ const cli = join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'lib
 const root = await mkdtemp(join(tmpdir(), 'stride-diagnostics-')), home = join(root, 'home')
 const realModel = process.env.STRIDE_REAL_MODEL === '1'
 const statusRace = process.env.STRIDE_DIAGNOSTIC_STATUS_RACE === '1' || process.argv.includes('--status-race')
-const traceNative = process.argv.includes('--trace-native')
+const startExpiry = process.argv.includes('--start-expiry')
+if (statusRace && startExpiry) throw Error('Run status ordering and native start expiry separately')
+const traceNative = process.argv.includes('--trace-native') || startExpiry
 const version = JSON.parse(await readFile(join(repo, 'package.json'), 'utf8')).version
 const base = join(repo, '.stride-private/validation/diagnostics', version), label = realModel ? 'real-model' : 'scripted'
 await mkdir(base, { recursive: true }); const artifacts = await mkdtemp(join(base, label + '-'))
@@ -51,6 +53,14 @@ async function rpc(method, payload) {
     function receive(message) { if (message.type !== 'rpc.result' || message.id !== id) return; clearTimeout(timer); port.onMessage.removeListener(receive); if (!message.ok || !message.result?.result?.ok) fail(Error('Fixture RPC rejected')); else done(message.result.result.value) }
     port.onMessage.addListener(receive); port.postMessage({ type: 'rpc', id, method, payload })
   }), { method, payload })
+}
+async function waitWorker(predicate, label) {
+  const deadline = Date.now() + 5000
+  while (Date.now() < deadline) {
+    if (await browser.worker.evaluate(predicate)) return
+    await delay(50)
+  }
+  throw Error(label)
 }
 async function toolTurn(prompt) {
   events = []; await host.client.followSession(sessionId)
@@ -91,7 +101,8 @@ let requests=0;ctx.on('agent/request',(_p,next)=>{if(++requests>12)throw Error('
     }
     if (traceNative) {
       const background = join(extensionDir, 'background.js')
-      await writeFile(background, (await readFile(join(repo, 'scripts/fixtures/diagnostic-native-trace.js'), 'utf8')) + '\n' + await readFile(background, 'utf8'))
+      const delayStart = startExpiry ? await readFile(join(repo, 'scripts/fixtures/diagnostic-start-delay.js'), 'utf8') : ''
+      await writeFile(background, (await readFile(join(repo, 'scripts/fixtures/diagnostic-native-trace.js'), 'utf8')) + ';\n' + delayStart + ';\n' + await readFile(background, 'utf8'))
     }
   }
   browser = await startExtensionBrowser({ repoRoot: repo, benchmarkRoot: join(repo, 'benchmark'), bridgeUrl: `ws://127.0.0.1:${port}/ext/bridge`, issuePairingCode: () => host.issuePairingCode(), trustedOrigin: origin, extensionDir })
@@ -108,8 +119,25 @@ let requests=0;ctx.on('agent/request',(_p,next)=>{if(++requests>12)throw Error('
   phase = 'native-enable'
   await browser.panel.locator('.page-diagnostics summary').click()
   const enable = browser.panel.locator('.page-diagnostics button'); await enable.waitFor(); await enable.click()
+  if (startExpiry) {
+    phase = 'native-start-expiry'
+    await waitWorker(() => globalThis.__strideDiagnosticStartDelay.status().held, 'The native enable reply was not held')
+    // This must settle before the panel's own 15-second RPC timeout.
+    await browser.panel.locator('.page-diagnostics [role="status"]').waitFor({ timeout: 12500 })
+    assert.match(await browser.panel.locator('.page-diagnostics [role="status"]').innerText(), /请求未能确认|Request was not confirmed/)
+    assert.match(await enable.innerText(), /开启|Enable/)
+    phase = 'late-native-start-cleanup'
+    await browser.worker.evaluate(() => globalThis.__strideDiagnosticStartDelay.release())
+    await waitWorker(() => globalThis.__strideDiagnosticNativeTrace.some(item => item.command === 'detach' && item.state === 'resolved'), 'Late native cleanup did not settle')
+    assert.match(await enable.innerText(), /开启|Enable/, 'The expired native start must not enable capture after its late reply')
+    const trace = await browser.worker.evaluate(() => globalThis.__strideDiagnosticNativeTrace)
+    assert.equal(trace.filter(item => item.command === 'Network.enable' && item.state === 'started').length, 1, 'Expired native work must not replay itself')
+    // Only a new native click may start a later capture after confirmed cleanup.
+    phase = 'explicit-native-restart'
+    await enable.click()
+  }
   await browser.panel.locator('.page-diagnostics [role="status"]').waitFor({ timeout: 15000 })
-  assert.match(await browser.panel.locator('.page-diagnostics [role="status"]').innerText(), /已记录|entries/, 'Native capture must be confirmed before reproducing the fixture')
+  await browser.panel.locator('.page-diagnostics [role="status"]').filter({ hasText: /已记录|entries/ }).waitFor({ timeout: 15000 })
   if (statusRace) {
     phase = 'late-status'
     assert.equal(await browser.panel.evaluate(() => window.__strideDiagnosticRace.status().delayedDeliveries), 1)
@@ -134,6 +162,7 @@ let requests=0;ctx.on('agent/request',(_p,next)=>{if(++requests>12)throw Error('
   assert.equal(createHash('sha256').update(await readFile(join(repo, 'packages/browser/bridge-browser/lib/index.js'))).digest('hex'), sourceHostDigest, 'The Host candidate changed during acceptance')
   const result = { passed: true, version, realHost: true, isolatedChrome: true, realModel, scriptedModel: !realModel, browserVersion: browser.browserVersion, nativeEnable: true, nativeStop: true, diagnosticReadCalls: dispatches.filter(v => v.name === 'browser_get_diagnostics').length, observedConsole: 'TypeError', observedHttp: 500, sensitiveSyntheticValuesAbsent: true, serverWrites: writes, originalHostUntouched: true,
     ...(statusRace ? { statusRaceInjected: true, staleStatusDidNotOverwriteStart: true, extensionObserverCopy: true } : {}),
+    ...(startExpiry ? { startReplyDelayed: true, expiredStartRejected: true, lateStartNeverReenabled: true, nativeSlotCleanupConfirmed: true, newNativeEnableRequired: true, extensionObserverCopy: true } : {}),
     ...(traceNative ? { nativeCommandObserver: true, nativeCommandTrace: await browser.worker.evaluate(() => globalThis.__strideDiagnosticNativeTrace) } : {}),
     sourceExtensionDigest, candidateUnchangedDuringRun: true,
     hostBundleSha256: createHash('sha256').update(await readFile(join(repo, 'packages/browser/bridge-browser/lib/index.js'))).digest('hex'), extensionBundleSha256: createHash('sha256').update(await readFile(join(repo, 'extensions/dsh-browser/dist/background.js'))).digest('hex'), evidenceDirectory: artifacts.slice(base.length + 1) }
@@ -147,7 +176,8 @@ let requests=0;ctx.on('agent/request',(_p,next)=>{if(++requests>12)throw Error('
   }), sessionId).catch(() => undefined)
   const statusRaceState = !statusRace || !browser ? undefined : await browser.panel.evaluate(() => window.__strideDiagnosticRace.status()).catch(() => undefined)
   const nativeTrace = !traceNative || !browser ? undefined : await browser.worker.evaluate(() => globalThis.__strideDiagnosticNativeTrace).catch(() => undefined)
-  await writeFile(join(artifacts, 'failure.json'), JSON.stringify({ passed: false, phase, errorName: error.name, panelState, statusRaceState, nativeTrace, events }, null, 2), { mode: 0o600 }); throw error
+  const startDelayState = !startExpiry || !browser ? undefined : await browser.worker.evaluate(() => globalThis.__strideDiagnosticStartDelay.status()).catch(() => undefined)
+  await writeFile(join(artifacts, 'failure.json'), JSON.stringify({ passed: false, phase, errorName: error.name, panelState, statusRaceState, startDelayState, nativeTrace, events }, null, 2), { mode: 0o600 }); throw error
 } finally {
   clearTimeout(cancelTimer); if (sessionId) await host?.client.rpc('session.cancel', { sessionId }).catch(() => {})
   await browser?.close().catch(() => {}); await host?.close().catch(() => {}); await new Promise(done => site.close(done)); await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })

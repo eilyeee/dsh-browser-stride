@@ -1,5 +1,7 @@
 # Browser extension
 
+In 0.1.30, diagnostic activation expires after ten seconds. A late native reply cannot activate capture or replay an expired queued request. Pending native work retains its cleanup slot; after cleanup, enabling again requires another actual click. `pnpm run test:smoke-diagnostics-expiry` delays one completed native enable reply in a disposable extension copy and checks expiry, confirmed cleanup and explicit reactivation on a local synthetic page. It does not identify every historical enable-timeout cause or replace regular-browser acceptance.
+
 In 0.1.29, worker bootstrap and transport reconnect retain the displayed conversation and refresh its registration and history read-only. Failure keeps the conversation and shows a notice rather than creating another one. Explicit disconnect or a changed known Host address clears the previous view. Restoration neither grants page authority nor replays selections, approvals, tasks or prompts.
 
 In 0.1.29, diagnostic-panel replies are ordered within their page, conversation and connection scope. An older poll cannot overwrite a newer native start/stop result or clear another scope's pending state. Polling waits during an action; scope changes retire prior requests. Actual clicks are still required and actions are never automatically retried. `pnpm run test:smoke-diagnostics-status` delays one read-only reply in a disposable extension copy while testing native enable/read/stop. It does not replace regular-browser acceptance.
