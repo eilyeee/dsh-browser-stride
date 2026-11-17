@@ -16,6 +16,7 @@ import { isSensitiveField, maskValue } from './privacy.ts'
 import { customOptionSelected, isControlDisabled, isElementUiOption, isFieldReadOnly } from './custom-options.ts'
 import { scrollContext } from './scroll-context.ts'
 import { closestComposed, composedParent } from './dom-tree.ts'
+import { readFormControlState, renderFormControlState, type FormControlState } from './form-control-state.ts'
 import { makeElementRef, makeObservationId, type ObservationId } from '@eilyeee/dsh-browser-stride/src/contracts/ids.ts'
 
 /** Role label per element kind (model-facing vocabulary). */
@@ -64,6 +65,7 @@ interface FormFieldView {
   required?: boolean
   readOnly?: boolean
   nativeConstraints: string
+  controlState?: FormControlState
   ariaInvalid?: AriaInvalidState
   options?: readonly { index: number; label: string; disabled: boolean }[]
   optionsTruncated?: boolean
@@ -331,6 +333,7 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
       value: masked ? maskValue(value) : value.slice(0, 120),
       masked,
       nativeConstraints: nativeConstraintState(el),
+      controlState: readFormControlState(el),
       ...(ariaInvalid === undefined ? {} : { ariaInvalid }),
       ...checkable ? { checked: el.checked } : {},
       ...(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) && el.required ? { required: true } : {},
@@ -411,6 +414,7 @@ function sameForm(a: FormFieldView, b: FormFieldView): boolean {
     && a.checked === b.checked && a.required === b.required && a.readOnly === b.readOnly && a.optionsTruncated === b.optionsTruncated
     && a.nativeConstraints === b.nativeConstraints && a.ariaInvalid === b.ariaInvalid
     && JSON.stringify(a.options) === JSON.stringify(b.options)
+    && JSON.stringify(a.controlState) === JSON.stringify(b.controlState)
 }
 
 /**
@@ -453,7 +457,7 @@ function renderForm(form: FormFieldView, includeIdentity: boolean, observationId
   const options = form.options === undefined ? '' : `; options (0-based): ${form.options.map(option =>
     `${option.index}=${JSON.stringify(option.label)}${option.disabled ? ' (disabled)' : ''}`).join(', ')}${form.optionsTruncated ? ' (additional options omitted)' : ''}`
   const validation = ` native-constraints=${form.nativeConstraints}${form.ariaInvalid === undefined ? '' : ` aria-invalid=${form.ariaInvalid}`}`
-  return `  [${form.index}] ${identity}${state}${form.required === true ? ' required' : ''}${form.readOnly === true ? ' readonly' : ''}${validation}${options} ref=${makeElementRef(observationId, form.index)}`
+  return `  [${form.index}] ${identity}${state}${form.required === true ? ' required' : ''}${form.readOnly === true ? ' readonly' : ''}${validation} ${renderFormControlState(form.controlState)}${options} ref=${makeElementRef(observationId, form.index)}`
 }
 
 function appendTruncationNotes(lines: string[], view: SnapshotView): void {
@@ -517,6 +521,7 @@ export function renderSnapshotDetails(view: SnapshotView, delta: boolean, maxCha
     if (changedForms.length > 0) {
       lines.push('')
       lines.push('Changed form fields:')
+      lines.push('DOM state and numeric attributes are observations, not action permission or framework/server validation.')
       const renderedItems = new Set(changedItems.map((item) => item.index))
       for (const form of changedForms) addTarget(renderForm(form, !renderedItems.has(form.index), view.observationId), form.index, form.options !== undefined)
     }
@@ -544,6 +549,7 @@ export function renderSnapshotDetails(view: SnapshotView, delta: boolean, maxCha
     if (view.forms.length > 0) {
       lines.push('')
       lines.push('Form fields:')
+      lines.push('DOM state and numeric attributes are observations, not action permission or framework/server validation.')
       const renderedItems = new Set(view.items.map((item) => item.index))
       for (const form of view.forms) {
         addTarget(renderForm(form, !renderedItems.has(form.index), view.observationId), form.index, form.options !== undefined)

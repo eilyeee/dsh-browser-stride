@@ -23,3 +23,5 @@
 `pnpm run test:smoke-release -- --dir <开发包目录>` 在临时 home 检查独立安装；`pnpm run test:smoke-upgrade -- --from <旧包目录> --to <新包目录>` 使用同一临时 home/profile 和固定扩展目录，检查历史、配对、任务资料、排队任务及授权状态。测试不会替换常用 Host。未知写入的核对与诊断另见 [Bridge 文档](../packages/browser/bridge-browser/README.zh.md#实时观察边界)及[扩展文档](../extensions/dsh-browser/README.zh.md)。
 
 卸载 Host 插件不会自动清除对话和配对数据。回退前停止任务并备份原数据；新数据的降级兼容性没有保证，不能把回退当作自动恢复或业务撤销。
+
+0.1.23 的显式表单状态属于有界快照文本增强，没有增加 wire v4 命令或参数。字段只描述 DOM 标志与数值属性声明，不能代替应用校验。旧扩展未输出这些信息时应保留未知；混用版本的局部测试不构成完整兼容承诺。

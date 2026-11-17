@@ -7,6 +7,16 @@ package versions currently identify development builds, not supported releases.
 
 ## [Unreleased]
 
+### Added
+
+- Development build 0.1.23 snapshots explicitly report native form-field
+  disabled, direct-edit readonly and native-required flags. Bounded numeric
+  HTML/ARIA declarations distinguish absent, unusable and sensitive metadata;
+  they do not prove framework/server validation or grant action permission.
+- Declaration-only changes participate in snapshot deltas. Existing render
+  budgets, clipped-reference admission and unknown-write fences remain in place.
+  Benchmark suite 32 separates the richer snapshot text.
+
 ### Fixed
 
 - Development build 0.1.22 task-progress tools document their evidence and text
