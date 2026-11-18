@@ -359,6 +359,12 @@ async function verifyTargetFences() {
     commands.set(id, call)
     return call
   }
+  async function observeTarget(id, execution) {
+    const call = await actionFor(id, 'browser_snapshot', {}, execution)
+    activeSocket.send(JSON.stringify(call))
+    await wait(() => replies.has(call.id), 'fresh target observation')
+    assert.equal(replies.get(call.id).ok, true, JSON.stringify(replies.get(call.id).error))
+  }
   const receiptPhase = async actionId => await browser.worker.evaluate(id => new Promise((resolveAdmission, reject) => {
     const request = indexedDB.open('dsh-browser-execution', 1)
     request.onerror = () => reject(new Error('receipt read failed'))
@@ -422,6 +428,7 @@ async function verifyTargetFences() {
         return answer
       }
     })
+    await observeTarget('synthetic-target-first-observation')
     const first = await actionFor('synthetic-target-first')
     activeSocket.send(JSON.stringify(first))
     await wait(() => browser.worker.evaluate(() => globalThis.__strideTargetFence.started), 'first write committed')
@@ -434,6 +441,7 @@ async function verifyTargetFences() {
     await browser.bindSession(sessionId, other)
     await wait(() => replies.has(queued.id), 'old queued request withdrawn')
     assert.equal(replies.get(queued.id).ok, false)
+    await observeTarget('synthetic-target-fresh-observation')
     const fresh = await actionFor('synthetic-target-fresh')
     activeSocket.send(JSON.stringify(fresh))
     await wait(async () => (await receiptPhase(fresh.action.actionId)) !== undefined, 'fresh write admitted')
@@ -478,10 +486,11 @@ async function verifyTargetFences() {
     await wait(() => replies.has(late.id), 'managed request cancelled before confirmation')
     heldConfirmation.socket.send(JSON.stringify({ t: 'rpc.result', id: heldConfirmation.frame.id, ok: true,
       result: { ...heldConfirmation.frame.payload, confirmed: true } }))
+    await observeTarget('synthetic-authority-current-observation', managed)
     const current = await actionFor('synthetic-authority-current', 'browser_press', { key: 'Enter' }, managed)
     activeSocket.send(JSON.stringify(current))
     await wait(() => replies.has(current.id), 'fresh managed request completed')
-    assert.equal(replies.get(current.id).ok, true)
+    assert.equal(replies.get(current.id).ok, true, JSON.stringify(replies.get(current.id).error))
     await wait(() => counts.b === 2, 'exactly one new managed effect')
     assert.deepEqual(counts, { a: 1, b: 2 }, 'refused, forged and late confirmations must have no page effects')
     assert.equal(await browser.worker.evaluate(() => globalThis.__strideTargetFence.sends.length), 3)
@@ -493,10 +502,12 @@ async function verifyTargetFences() {
     activeSocket.send(JSON.stringify(rebound))
     await wait(() => replies.has(rebound.id), 'same-revision run target refused after rebind')
     assert.equal(replies.get(rebound.id).error?.code, 'execution-denied')
-    const newRevision = await actionFor('synthetic-run-new-revision', 'browser_press', { key: 'Enter' }, { ...managed, controlRevision: 4 })
+    const continued = { ...managed, controlRevision: 4 }
+    await observeTarget('synthetic-run-new-revision-observation', continued)
+    const newRevision = await actionFor('synthetic-run-new-revision', 'browser_press', { key: 'Enter' }, continued)
     activeSocket.send(JSON.stringify(newRevision))
     await wait(() => replies.has(newRevision.id), 'fresh revision binds its selected native target')
-    assert.equal(replies.get(newRevision.id).ok, true)
+    assert.equal(replies.get(newRevision.id).ok, true, JSON.stringify(replies.get(newRevision.id).error))
     await wait(() => counts.a === 2, 'new revision executes exactly once on its new target')
     assert.deepEqual(counts, { a: 2, b: 2 }, 'the rebound old run must not follow the fresh target')
     assert.equal(await browser.worker.evaluate(() => globalThis.__strideTargetFence.sends.length), 4)
@@ -660,18 +671,31 @@ try {
   assert.equal(await automaticToggle.isChecked(), false, 'synthetic clicks cannot enable automatic control')
   await automaticToggle.check()
   await browser.panel.getByRole('button', { name: '保存并连接', exact: true }).click()
+  await browser.panel.getByRole('button', { name: '返回对话', exact: true }).waitFor({ state: 'hidden' })
+  await browser.panel.locator('.connection .dot.connected').waitFor({ state: 'visible' })
+  await browser.panel.waitForFunction(id => document.querySelector('.app')?.getAttribute('data-session-id') === id, session.sessionId)
+  const automaticSettings = await browser.worker.evaluate(async () => {
+    const { dshSettings } = await chrome.storage.local.get('dshSettings')
+    return { automatic: dshSettings?.autoControlNewTabs, skipConfirmation: dshSettings?.unrestrictedBrowserAccess }
+  })
+  assert.deepEqual(automaticSettings, { automatic: true, skipConfirmation: false })
   const automaticOrigin = `http://stride-auto.test:${new URL(site.origin).port}`
   const automaticInstance = makeTaskInstance('notification_toggle', 1, 'stride-auto-open-smoke', automaticOrigin)
   const automaticNextUrl = automaticInstance.url.replace('stride-auto.test', 'stride-auto-next.test')
   await writeFile(`${trigger}.auto-open`, JSON.stringify({ url: automaticInstance.url, nextUrl: automaticNextUrl }), { mode: 0o600 })
   await browser.panel.getByRole('button', { name: '仅允许这一次', exact: true }).click({ timeout: 20000 }).catch(async () => {
     const outcome = await readFile(result, 'utf8').then(JSON.parse).catch(() => undefined)
+    const phase = await readFile(`${result}.phase`, 'utf8').then(JSON.parse).catch(() => undefined)
+    const panel = {
+      sameConversation: await browser.panel.locator('.app').getAttribute('data-session-id') === session.sessionId,
+      approvalVisible: await browser.panel.getByRole('dialog').count() > 0,
+    }
     const debug = await browser.worker.evaluate(async () => {
       const saved = await chrome.storage.session.get(['dshPageAccess', 'dshTabAffinity'])
       return { grants: saved.dshPageAccess?.grants?.map(row => ({ mode: row.mode, grouped: row.groupId !== undefined })),
         settings: (await chrome.storage.local.get('dshSettings')).dshSettings?.autoControlNewTabs }
     })
-    throw new Error(`Automatic page action did not request approval: ${JSON.stringify({ outcome, debug })}`)
+    throw new Error(`Automatic page confirmation was not visible: ${JSON.stringify({ outcome, phase, panel, debug })}`)
   })
   await waitForPhase('auto-opened')
   const automaticPage = browser.context.pages().find(page => page.url() === automaticInstance.url)
