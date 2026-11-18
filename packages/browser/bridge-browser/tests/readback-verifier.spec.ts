@@ -17,6 +17,38 @@ function setup() {
   return { config, read, result, data, verifier, controller, verify }
 }
 describe('independent versioned readback', () => {
+  const baselineTime = '2026-11-18T17:00:00.500+08:00'
+
+  it('compares a timestamp version as an instant across explicit offsets', async () => {
+    const h = setup()
+    h.result.body = JSON.stringify({ ...h.data, updateTime: '2026-11-18T09:00:00.501Z' })
+    const verifier = createReadbackVerifier({ ...h.config, versionPath: ['updateTime'], baselineVersion: baselineTime })
+    expect(await verifier.verify({ run, url, signal: h.controller.signal })).toMatchObject({ url })
+    expect(h.read).toHaveBeenCalledOnce()
+  })
+
+  it.each([
+    ['same instant', '2026-11-18T09:00:00.500Z'],
+    ['older instant', '2026-11-18T10:00:00.499+01:00'],
+    ['different sub-millisecond fraction', '2026-11-18T09:00:00.5009Z'],
+    ['missing zone', '2026-11-18T09:00:01'],
+    ['invalid calendar date', '2026-11-31T09:00:00Z'],
+    ['integer revision', 1794992400501],
+  ])('keeps a %s timestamp result unverified', async (_reason, updateTime) => {
+    const h = setup()
+    h.result.body = JSON.stringify({ ...h.data, updateTime })
+    const verifier = createReadbackVerifier({ ...h.config, versionPath: ['updateTime'], baselineVersion: baselineTime })
+    expect(await verifier.verify({ run, url, signal: h.controller.signal })).toBeUndefined()
+    expect(h.read).toHaveBeenCalledOnce()
+  })
+
+  it('rejects a timestamp baseline with an ambiguous or impossible date', () => {
+    const h = setup()
+    expect(() => createReadbackVerifier({ ...h.config, baselineVersion: '2026-11-18T09:00:00' })).toThrow('readback-config-invalid')
+    expect(() => createReadbackVerifier({ ...h.config, baselineVersion: '2026-02-30T09:00:00Z' })).toThrow('readback-config-invalid')
+    expect(h.read).not.toHaveBeenCalled()
+  })
+
   it('reads once in the captured scope and records only artifact identity and a body digest', async () => {
     const h = setup(), evidence = await h.verify()
     expect(h.read).toHaveBeenCalledExactlyOnceWith({ runId: run.runId, controlRevision: 2, targetUrl: url, signal: expect.any(AbortSignal) })

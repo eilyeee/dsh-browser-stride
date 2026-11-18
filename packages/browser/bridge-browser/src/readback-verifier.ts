@@ -6,9 +6,13 @@ import type { BrowserTaskVerifier } from './task-runtime.ts'
 const segment = z.string().min(1).max(80).refine(value => !['__proto__', 'prototype', 'constructor'].includes(value))
 const path = z.array(segment).min(1).max(12)
 const primitive = z.union([z.string().max(512), z.number().finite(), z.boolean(), z.null()])
+const versionValue = z.union([
+  z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  z.iso.datetime({ offset: true }).max(64),
+])
 const configSchema = z.strictObject({
   targetUrl: z.string().max(2048), contextKey: z.string().min(1).max(200),
-  versionPath: path, baselineVersion: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  versionPath: path, baselineVersion: versionValue,
   checks: z.array(z.strictObject({ path, equals: primitive })).min(1).max(32),
   timeoutMs: z.number().int().min(1).max(15_000).default(10_000),
 })
@@ -38,6 +42,10 @@ function at(value: unknown, keys: readonly string[]): unknown {
   return value
 }
 
+function comparableVersion(value: number | string): number {
+  return typeof value === 'number' ? value : Date.parse(value)
+}
+
 /**
  * Install from trusted Host code using runtime.registerVerifier while queued.
  * The reader must independently enforce read-only access and authoritative identity.
@@ -49,7 +57,8 @@ export function createReadbackVerifier(input: ReadbackVerifierConfig): BrowserTa
   const parsed = configSchema.safeParse(values)
   if (!parsed.success || typeof read !== 'function') throw new Error('readback-config-invalid')
   const config = parsed.data, expectedTarget = target(config.targetUrl)
-  if (expectedTarget === undefined) throw new Error('readback-config-invalid')
+  const baseline = comparableVersion(config.baselineVersion)
+  if (expectedTarget === undefined || !Number.isSafeInteger(baseline)) throw new Error('readback-config-invalid')
   const acceptsTarget = (url: string) => target(url) === expectedTarget
   return Object.freeze({ acceptsTarget, verify: async ({ run, url, signal }: Parameters<BrowserTaskVerifier['verify']>[0]) => {
     if (signal.aborted || !acceptsTarget(url)) return undefined
@@ -70,8 +79,8 @@ export function createReadbackVerifier(input: ReadbackVerifierConfig): BrowserTa
       if (bounded.aborted || !result.success || result.data.contextKey !== config.contextKey
         || result.data.observedAt < startedAt || result.data.observedAt > Date.now()) return undefined
       const body: unknown = JSON.parse(result.data.body)
-      const version = at(body, config.versionPath)
-      if (!Number.isSafeInteger(version) || (version as number) <= config.baselineVersion
+      const version = versionValue.safeParse(at(body, config.versionPath))
+      if (!version.success || typeof version.data !== typeof config.baselineVersion || !(comparableVersion(version.data) > baseline)
         || config.checks.some(check => at(body, check.path) !== check.equals)) return undefined
       return { url: expectedTarget, artifactRefs: [result.data.artifactRef, `readback-sha256:${createHash('sha256').update(result.data.body).digest('hex')}`] }
     } catch { return undefined }

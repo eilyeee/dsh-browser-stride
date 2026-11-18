@@ -9,6 +9,10 @@ package versions currently identify development builds, not supported releases.
 
 ### Added
 
+- Trusted readback integrations can supply an explicit-offset ISO 8601
+  timestamp as their pre-action version. The verifier compares instants at
+  millisecond precision and requires a strictly newer value of the same type.
+
 - Development build 0.1.35 shows the version reported by the connected
   extension in DSH's browser pairing settings. Older extensions still
   connect on wire v4 and appear as connected with the version unavailable.
