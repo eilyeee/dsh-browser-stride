@@ -506,9 +506,9 @@ describe('background bridge lifecycle', () => {
       }
       finish()
       await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'late-open', ok: false })))
-      panel.onMessage.emit({ type: 'request-status' })
-      expect(panel.postMessage.mock.calls.filter(([m]) => m.type === 'tab-affinity').at(-1)![0].state).toMatchObject(rebind
-        ? { status: 'following', controlled: { tabId: 1 } } : { detached: true, controlled: null })
+      const lastAffinity = vi.mocked(chrome.storage.session.set).mock.calls
+        .map(([items]) => 'dshTabAffinity' in items ? items.dshTabAffinity : undefined).filter(value => value !== undefined).at(-1)
+      expect(lastAffinity).toMatchObject(rebind ? { controlledTabId: 1 } : { detached: true, lost: true })
     } finally { finish(); panel.onDisconnect.emit(); socket.close() }
   })
 
@@ -549,6 +549,7 @@ describe('background bridge lifecycle', () => {
     vi.stubGlobal('WebSocket', FakeWebSocket)
     await import('../src/background/index.ts')
     const panel = panelPort(); h.onConnect.emit(panel.port)
+    panel.onMessage.emit({ type: 'session.active', sessionId: 'selected', restore: true })
     await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity', state: expect.objectContaining({ detached: true, controlled: null }) })))
     panel.onMessage.emit({ type: 'session.active', sessionId: 'selected', isNew: true })
     await vi.waitFor(() => expect(chrome.storage.session.set).toHaveBeenCalledWith(expect.objectContaining({ dshTabAffinity: expect.objectContaining({ detached: true }) })))
@@ -1361,13 +1362,12 @@ describe('background bridge lifecycle', () => {
     }
     restore({})
     await new Promise(resolve => { setTimeout(resolve, 0) })
-    panel.onMessage.emit({ type: 'request-status' })
-    const binding = expect.objectContaining({ type: 'tab-affinity', state: expect.objectContaining({ controlled: expect.objectContaining({ tabId: 2 }) }) })
+    const binding = { dshTabAffinity: expect.objectContaining({ controlledTabId: 2 }) }
     if (owner === 'retained') {
-      expect(panel.postMessage).toHaveBeenCalledWith(binding)
+      await vi.waitFor(() => { expect(chrome.storage.session.set).toHaveBeenCalledWith(binding) })
       await vi.waitFor(() => { expect(original.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'old-follow', ok: true })) })
     } else {
-      expect(panel.postMessage).not.toHaveBeenCalledWith(binding)
+      expect(chrome.storage.session.set).not.toHaveBeenCalledWith(binding)
       for (const socket of FakeWebSocket.instances) {
         expect(socket.sent).not.toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'old-follow' }))
       }

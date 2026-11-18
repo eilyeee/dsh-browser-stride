@@ -1,5 +1,7 @@
 # Browser extension
 
+In 0.1.31, the sidebar displays the current target from its registered conversation. Before registration, it can list authorized pages without showing another conversation's target. A conversation switch or panel connection loss clears the old display until the background supplies fresh state. After reconnecting, an existing target can reappear for the same conversation.
+
 In 0.1.30, diagnostic activation expires after ten seconds. A late native reply cannot activate capture or replay an expired queued request. Pending native work retains its cleanup slot; after cleanup, enabling again requires another actual click. `pnpm run test:smoke-diagnostics-expiry` delays one completed native enable reply in a disposable extension copy and checks expiry, confirmed cleanup and explicit reactivation on a local synthetic page. It does not identify every historical enable-timeout cause or replace regular-browser acceptance.
 
 In 0.1.29, worker bootstrap and transport reconnect retain the displayed conversation and refresh its registration and history read-only. Failure keeps the conversation and shows a notice rather than creating another one. Explicit disconnect or a changed known Host address clears the previous view. Restoration neither grants page authority nor replays selections, approvals, tasks or prompts.

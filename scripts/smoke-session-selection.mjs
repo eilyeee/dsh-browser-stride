@@ -57,6 +57,39 @@ try {
   const secondId = await second.locator('.app').getAttribute('data-session-id')
   await second.locator('.control-group-pages button[data-tab-id="' + ids.other + '"]').click()
   await second.locator('.control-group-pages button[data-tab-id="' + ids.other + '"][aria-pressed="true"]').waitFor()
+  if (reconnect) {
+    phase = 'unregistered-view'
+    // Observe a new panel Port before it identifies a conversation. The two
+    // grants are available without borrowing the focused panel's target.
+    const unregistered = await first.evaluate(async () => {
+      const { id: windowId } = await chrome.windows.getCurrent()
+      return new Promise((resolve, reject) => {
+        const port = chrome.runtime.connect({ name: 'dsh-panel' })
+        const timeout = setTimeout(() => {
+          port.disconnect()
+          reject(new Error('The unregistered view received no page state'))
+        }, 5000)
+        let affinity, access
+        port.onMessage.addListener(message => {
+          if (message.type === 'tab-affinity') affinity = message
+          if (message.type === 'page-access' && message.authorizedPageCount === 2) access = message
+          if (!affinity || !access) return
+          clearTimeout(timeout)
+          port.disconnect()
+          resolve({
+            controlledTarget: affinity.state.controlled !== null,
+            controlledGranted: access.controlledGranted,
+            bothUnregistered: affinity.sessionId === null && access.sessionId === null,
+          })
+        })
+        port.postMessage({ type: 'panel.window', windowId })
+        port.postMessage({ type: 'request-status' })
+      })
+    })
+    assert.equal(unregistered.controlledTarget, false, 'The unregistered sidebar must not display another conversation target')
+    assert.equal(unregistered.controlledGranted, false)
+    assert.equal(unregistered.bothUnregistered, true)
+  }
   async function disconnectOriginalPanel() {
     phase = 'panel-port-loss'
     const beforeCount = await h.browser.worker.evaluate(sid => {
@@ -137,6 +170,7 @@ try {
   const result = { passed: true, version, realModel, scriptedModel: !realModel, isolatedHost: true, isolatedChrome: true,
     startupTimeoutMs: 120000, separatePanelTargets: true, originalUnboundShownCorrectly: true,
     panelPortLossInjected: reconnect, viewContextRestored: reconnect, boundTargetSurvivedSecondReconnect: reconnect,
+    unregisteredViewHadNoBorrowedTarget: reconnect,
     selectionReplyLossInjected: dropReply, selectionRequestNotReplayed: dropReply, lastSelectionRead: dropReply,
     extensionObserverCopy: reconnect || dropReply, nativeSelectionWhileOtherPanelFocused: true,
     modelReadCorrectTarget: true, businessWrites: writes, inputEvents: 0, originalHostUntouched: true,

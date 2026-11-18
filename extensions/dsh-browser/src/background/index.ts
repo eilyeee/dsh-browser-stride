@@ -485,8 +485,9 @@ async function broadcastPageAccess(): Promise<boolean> {
   const revision = ++pageAccessBroadcastRevision
   const post = (pages: AffinityTab[]) => {
     for (const port of panelPorts) {
-      const state = tabAffinity.snapshotForSession(panelActiveSessions.get(port))
-      const message = { type: 'page-access', activeGranted: pageAccess.has(state.active?.tabId),
+      const sessionId = panelActiveSessions.get(port)
+      const state = tabAffinity.snapshotForSession(sessionId)
+      const message = { type: 'page-access', sessionId: sessionId ?? null, activeGranted: pageAccess.has(state.active?.tabId),
         controlledGranted: pageAccess.has(state.controlled?.tabId), controlledTabId: state.controlled?.tabId ?? null,
         revocableTabId: pageAccess.has(state.controlled?.tabId) ? state.controlled!.tabId : pageAccess.has(state.active?.tabId) ? state.active!.tabId : null }
       const windowId = panelWindows.get(port)
@@ -508,16 +509,16 @@ async function broadcastPageAccess(): Promise<boolean> {
   })
 }
 
-function panelTabAffinity(port: chrome.runtime.Port): TabAffinityState {
+function panelTabAffinity(port: chrome.runtime.Port): { type: 'tab-affinity'; sessionId: string | null; state: TabAffinityState } {
   const sessionId = panelActiveSessions.get(port), state = tabAffinity.snapshotForSession(sessionId)
-  const inputControl = nativeTakeover.status(sessionId, state.controlled?.tabId)
-  return inputControl === undefined ? state : { ...state, inputControl }
+  const inputControl = sessionId === undefined ? undefined : nativeTakeover.status(sessionId, state.controlled?.tabId)
+  return { type: 'tab-affinity', sessionId: sessionId ?? null, state: inputControl === undefined ? state : { ...state, inputControl } }
 }
 
 function broadcastTabAffinity(): void {
   broadcastPageAccess()
   for (const port of panelPorts) {
-    try { port.postMessage({ type: 'tab-affinity', state: panelTabAffinity(port) }) } catch { /* port already closed */ }
+    try { port.postMessage(panelTabAffinity(port)) } catch { /* port already closed */ }
   }
 }
 
@@ -1934,7 +1935,7 @@ chrome.runtime.onConnect.addListener((port) => {
     connectionDisconnected, hasCredential: settings.token !== '' }) } catch { /* port closed */ }
   void affinityReady.then(async () => {
     await syncActiveTab()
-    try { port.postMessage({ type: 'tab-affinity', state: panelTabAffinity(port) }) } catch { /* port closed */ }
+    try { port.postMessage(panelTabAffinity(port)) } catch { /* port closed */ }
   })
   port.onMessage.addListener((message: unknown) => {
     if (typeof message !== 'object' || message === null) return
@@ -2483,7 +2484,7 @@ chrome.runtime.onConnect.addListener((port) => {
         try {
           port.postMessage({ type: 'status', state: bridge?.state ?? ('stopped' as BridgeState), caps,
             connectionDisconnected, hasCredential: settings.token !== '', ...(activeBridgeUrl === undefined ? {} : { hostIdentity: activeBridgeUrl }) })
-          port.postMessage({ type: 'tab-affinity', state: panelTabAffinity(port) })
+          port.postMessage(panelTabAffinity(port))
           const statusWindowId = panelWindows.get(port)
           if (statusWindowId !== undefined) {
             port.postMessage({ type: 'selection', selection: selections.current(statusWindowId) })

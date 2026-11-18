@@ -126,6 +126,30 @@ afterEach(() => {
 })
 
 describe('background tab-affinity rebind protocol', () => {
+  it('shows grants without borrowing a focused conversation target before registration or after clearing', async () => {
+    const focused = await connectPanelForTest()
+    focused.onMessage.emit({ type: 'session.active', sessionId: 'focused-session', isNew: true })
+    const last = (panel: { postMessage: typeof focused.postMessage }, type: string) =>
+      panel.postMessage.mock.calls.map(([message]) => message).filter(message => message.type === type).at(-1)
+    await vi.waitFor(() => expect(last(focused, 'tab-affinity')?.state.controlled?.tabId).toBe(1))
+
+    const panel = panelPort()
+    focused.onConnect.emit(panel.port)
+    panel.onMessage.emit({ type: 'panel.window', windowId: 1 })
+    await vi.waitFor(() => expect(last(panel, 'page-access')?.authorizedPageCount).toBe(3))
+    panel.onMessage.emit({ type: 'request-status' })
+    expect(last(panel, 'tab-affinity')?.state.controlled).toBeNull()
+    expect(last(panel, 'tab-affinity')).toMatchObject({ sessionId: null, state: { controlled: null } })
+    expect(last(panel, 'page-access')).toMatchObject({ sessionId: null, controlledGranted: false, controlledTabId: null })
+
+    panel.onMessage.emit({ type: 'session.active', sessionId: 'focused-session', restore: true })
+    expect(last(panel, 'tab-affinity')).toMatchObject({ sessionId: 'focused-session', state: { controlled: { tabId: 1 } } })
+    panel.onMessage.emit({ type: 'session.active', sessionId: null, restore: true })
+    expect(last(panel, 'tab-affinity')).toMatchObject({ sessionId: null, state: { controlled: null } })
+    expect(last(panel, 'page-access')).toMatchObject({ sessionId: null, controlledGranted: false, controlledTabId: null })
+    expect(last(focused, 'tab-affinity')?.state.controlled?.tabId).toBe(1)
+  }, 10000)
+
   it('restores a panel view without moving the focused target or binding a new session', async () => {
     const h = await connectPanelForTest()
     h.onMessage.emit({ type: 'session.active', sessionId: 'view-a', isNew: true })
@@ -271,6 +295,7 @@ describe('background tab-affinity rebind protocol', () => {
 
   it('acknowledges only after control has moved to the freshly queried active tab', async () => {
     const { onMessage, postMessage, query } = await connectPanelForTest()
+    onMessage.emit({ type: 'session.active', sessionId: 'rebind-session', restore: true })
     query.mockResolvedValue([tab(2)])
 
     onMessage.emit({ type: 'tab-affinity.rebind', id: 'rebind-1' })
@@ -292,6 +317,7 @@ describe('background tab-affinity rebind protocol', () => {
 
   it('reports an active-tab query failure and leaves the existing binding unchanged', async () => {
     const { onMessage, postMessage, query } = await connectPanelForTest()
+    onMessage.emit({ type: 'session.active', sessionId: 'rebind-session', restore: true })
     onMessage.emit({ type: 'tab-affinity.rebind', id: 'initial-bind' })
     await vi.waitFor(() => {
       expect(postMessage).toHaveBeenCalledWith({ type: 'tab-affinity.rebind.result', id: 'initial-bind', ok: true })
@@ -320,6 +346,7 @@ describe('background tab-affinity rebind protocol', () => {
 
   it('owns the deadline in the background and ignores a query that resolves after timeout', async () => {
     const { onMessage, postMessage, query } = await connectPanelForTest()
+    onMessage.emit({ type: 'session.active', sessionId: 'rebind-session', restore: true })
     onMessage.emit({ type: 'tab-affinity.rebind', id: 'initial-bind' })
     await vi.waitFor(() => {
       expect(postMessage).toHaveBeenCalledWith({ type: 'tab-affinity.rebind.result', id: 'initial-bind', ok: true })
@@ -355,7 +382,8 @@ describe('background tab-affinity rebind protocol', () => {
   })
 
   it('cancels an in-flight rebind when its panel disconnects', async () => {
-    const { onDisconnect, onMessage, postMessage, query } = await connectPanelForTest()
+    const { onConnect, onDisconnect, onMessage, postMessage, query } = await connectPanelForTest()
+    onMessage.emit({ type: 'session.active', sessionId: 'rebind-session', restore: true })
     onMessage.emit({ type: 'tab-affinity.rebind', id: 'initial-bind' })
     await vi.waitFor(() => {
       expect(postMessage).toHaveBeenCalledWith({ type: 'tab-affinity.rebind.result', id: 'initial-bind', ok: true })
@@ -374,9 +402,12 @@ describe('background tab-affinity rebind protocol', () => {
     await Promise.resolve()
 
     expect(postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'tab-affinity' }))
-    onMessage.emit({ type: 'request-status' })
-    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+    const reopened = panelPort()
+    onConnect.emit(reopened.port)
+    reopened.onMessage.emit({ type: 'session.active', sessionId: 'rebind-session', restore: true })
+    expect(reopened.postMessage).toHaveBeenCalledWith(expect.objectContaining({
       type: 'tab-affinity',
+      sessionId: 'rebind-session',
       state: expect.objectContaining({ status: 'following', controlled: expect.objectContaining({ tabId: 1 }) }),
     }))
   })

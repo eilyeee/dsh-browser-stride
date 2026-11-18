@@ -75,6 +75,7 @@ interface ApprovalResolvedMessage {
 
 interface TabAffinityMessage {
   type: 'tab-affinity'
+  sessionId: string | null
   state: TabAffinityState
 }
 
@@ -100,7 +101,7 @@ export interface PageDiagnosticsStatus { enabled: boolean; captureId?: string; s
 export interface PageDiagnosticsRequest { action: 'start' | 'stop' | 'status'; sessionId: string; tabId: number; revision: number; expectedUrl: string; captureId?: string }
 export type PageRecoveryRequest = Omit<PageDiagnosticsRequest, 'action' | 'captureId'> & ({ action: 'prepare' } | { action: 'confirm'; reviewId: string; decisions: RecoveryDecisions })
 
-type BackgroundMessage = ({ type: 'page-access' } & PageAccessStatus) | RpcResultMessage | RespondResultMessage | SettingsResultMessage | (Omit<SettingsResultMessage, 'type'> & { type: 'browser-pairing.unpair.result' | 'page-access.revoke.result' | 'page-access.refresh.result' }) | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | (Omit<TabAffinityRebindResultMessage, 'type'> & { type: 'browser-run.retarget.result' | 'tab-affinity.unbind.result' }) | SelectionMessage | SessionResumeHintMessage | { type: 'browser-pairing'; status: BrowserPairingStatus }
+type BackgroundMessage = ({ type: 'page-access'; sessionId: string | null } & PageAccessStatus) | RpcResultMessage | RespondResultMessage | SettingsResultMessage | (Omit<SettingsResultMessage, 'type'> & { type: 'browser-pairing.unpair.result' | 'page-access.revoke.result' | 'page-access.refresh.result' }) | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | (Omit<TabAffinityRebindResultMessage, 'type'> & { type: 'browser-run.retarget.result' | 'tab-affinity.unbind.result' }) | SelectionMessage | SessionResumeHintMessage | { type: 'browser-pairing'; status: BrowserPairingStatus }
 
 /** Structured gateway failure retained for product-level error handling. */
 export class PanelRpcError extends Error {
@@ -139,7 +140,7 @@ export interface PanelApi {
   onEvent(callback: (frame: ServerFrame) => void): () => void
   onApprovalRequest(callback: (request: ApprovalRequest) => void): () => void
   onApprovalResolved(callback: (id: string) => void): () => void
-  onTabAffinity(callback: (state: TabAffinityState) => void): () => void
+  onTabAffinity(callback: (state: TabAffinityState | null) => void): () => void
   onSelection(callback: (selection: PageSelection | null) => void): () => void
   onSessionResumeHint(callback: (sessionId: string | null) => void): () => void
   respondToApproval(id: string, decision: ApprovalDecision): Promise<void>
@@ -177,7 +178,7 @@ export function connectPanel(): PanelApi {
   const eventListeners = new Set<(frame: ServerFrame) => void>()
   const approvalListeners = new Set<(request: ApprovalRequest) => void>()
   const approvalResolvedListeners = new Set<(id: string) => void>()
-  const tabAffinityListeners = new Set<(state: TabAffinityState) => void>()
+  const tabAffinityListeners = new Set<Parameters<PanelApi['onTabAffinity']>[0]>()
   const selectionListeners = new Set<(selection: PageSelection | null) => void>()
   const sessionResumeHintListeners = new Set<(sessionId: string | null) => void>()
 
@@ -185,6 +186,12 @@ export function connectPanel(): PanelApi {
   let reconnectPromise: Promise<chrome.runtime.Port> | null = null
   let viewWindowId: number | undefined
   let viewSessionId: string | undefined
+  let viewChange = 0
+
+  function clearPageProjection(): void {
+    for (const listener of tabAffinityListeners) listener(null)
+    for (const listener of pageAccessListeners) listener({ activeGranted: false, controlledGranted: false, controlledTabId: null, revocableTabId: null })
+  }
 
   function onMessage(message: unknown): void {
     if (typeof message !== 'object' || message === null) return
@@ -242,6 +249,7 @@ export function connectPanel(): PanelApi {
         break
       }
       case 'page-access':
+        if (msg.sessionId !== (viewSessionId ?? null)) break
         for (const listener of pageAccessListeners) listener(msg)
         break
       case 'status':
@@ -261,6 +269,7 @@ export function connectPanel(): PanelApi {
         for (const listener of approvalResolvedListeners) listener(msg.id)
         break
       case 'tab-affinity':
+        if (msg.sessionId !== (viewSessionId ?? null)) break
         for (const listener of tabAffinityListeners) listener(msg.state)
         break
       case 'selection': {
@@ -321,8 +330,7 @@ export function connectPanel(): PanelApi {
     next.onMessage.addListener(message => { if (port === next) onMessage(message) })
     next.onDisconnect.addListener(() => {
       if (port !== next) return
-      port = null
-      failAll(connectionError())
+      invalidate(next, connectionError())
       // Firefox event pages and extension reloads can invalidate a live Port.
       // Reconnect once while the panel is still open; later sends share the
       // same attempt instead of opening competing ports.
@@ -365,6 +373,7 @@ export function connectPanel(): PanelApi {
   ): void {
     if (port !== stale) return
     port = null
+    clearPageProjection()
     failAll(error, preserve)
   }
 
@@ -600,9 +609,20 @@ export function connectPanel(): PanelApi {
       return send({ type: 'panel.window', windowId })
     },
     setActiveSession(sessionId, isNew, restore) {
-      if (typeof sessionId === 'string' && sessionId.trim() !== '') viewSessionId = sessionId
-      else if (sessionId === null) viewSessionId = undefined
+      const change = ++viewChange
+      const previousSessionId = viewSessionId
+      const nextSessionId = sessionId === null || sessionId.trim() === '' ? undefined : sessionId
+      if (nextSessionId !== viewSessionId) {
+        viewSessionId = nextSessionId
+        clearPageProjection()
+      }
       return send(restore === true ? { type: 'session.active', sessionId, restore: true } : { type: 'session.active', sessionId, isNew })
+        .catch((error: unknown) => {
+          // A failed switch leaves the old conversation on screen. Reconnect
+          // its view, with fresh page state, only if the switch is still current.
+          if (viewChange === change && nextSessionId !== undefined) viewSessionId = previousSessionId
+          throw error
+        })
     },
     updateSettings(next, options) {
       const id = crypto.randomUUID()

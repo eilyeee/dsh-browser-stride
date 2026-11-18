@@ -42,6 +42,13 @@ package versions currently identify development builds, not supported releases.
 
 ### Fixed
 
+- Development build 0.1.31 shows a sidebar target only after the background
+  reports the page state for that conversation. A panel without a registered
+  conversation can see existing page grants. Switching conversations or losing
+  the panel connection clears stale target and grant indicators until fresh
+  state arrives. Reconnection restores the existing view and never submits a
+  selection or browser action.
+
 - Development build 0.1.30 expires diagnostic activation after ten seconds,
   before the panel RPC deadline. Late native replies cannot enable capture or
   replay expired queued activation. The native queue remains owned until its

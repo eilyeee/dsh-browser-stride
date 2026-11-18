@@ -11,6 +11,43 @@ afterEach(() => {
 })
 
 describe('panel protocol', () => {
+  it('clears stale target and grant status on view changes and port loss', async () => {
+    vi.useFakeTimers()
+    let receive!: (value: unknown) => void, disconnect!: () => void
+    const port = { postMessage: vi.fn(), onMessage: { addListener: (fn: (value: unknown) => void) => { receive = fn } },
+      onDisconnect: { addListener: (fn: () => void) => { disconnect = fn } } }
+    vi.stubGlobal('chrome', { runtime: { connect: vi.fn(() => port) } })
+    const api = connectPanel(), affinity = vi.fn(), access = vi.fn()
+    api.onTabAffinity(affinity); api.onPageAccess(access)
+    const state = { revision: 4, status: 'following', active: null,
+      controlled: { tabId: 5, windowId: 1, title: 'Fixture', url: 'https://fixture.example/' } }
+    const grant = { type: 'page-access', activeGranted: false, controlledGranted: true, controlledTabId: 5, revocableTabId: 5 }
+    await api.setActiveSession('first')
+    receive({ type: 'tab-affinity', sessionId: 'first', state })
+    receive({ ...grant, sessionId: 'first' })
+    expect(affinity).toHaveBeenLastCalledWith(state)
+    expect(access).toHaveBeenLastCalledWith(expect.objectContaining({ controlledGranted: true }))
+
+    await api.setActiveSession('second')
+    expect(affinity).toHaveBeenLastCalledWith(null)
+    expect(access).toHaveBeenLastCalledWith(expect.objectContaining({ controlledGranted: false, controlledTabId: null }))
+    affinity.mockClear(); access.mockClear()
+    receive({ type: 'tab-affinity', sessionId: 'first', state })
+    receive({ ...grant, sessionId: null })
+    expect(affinity).not.toHaveBeenCalled()
+    expect(access).not.toHaveBeenCalled()
+    receive({ type: 'tab-affinity', sessionId: 'second', state })
+    receive({ ...grant, sessionId: 'second' })
+    expect(affinity).toHaveBeenLastCalledWith(state)
+    expect(access).toHaveBeenLastCalledWith(expect.objectContaining({ controlledGranted: true }))
+
+    disconnect()
+    expect(affinity).toHaveBeenLastCalledWith(null)
+    expect(access).toHaveBeenLastCalledWith(expect.objectContaining({ controlledGranted: false, controlledTabId: null }))
+    receive({ type: 'tab-affinity', sessionId: 'second', state })
+    expect(affinity).toHaveBeenLastCalledWith(null)
+  })
+
   it('restores a view without new binding and forgets it after an explicit clear', async () => {
     vi.useFakeTimers()
     let disconnect!: () => void
@@ -25,6 +62,26 @@ describe('panel protocol', () => {
     disconnect(); await vi.advanceTimersByTimeAsync(150)
     expect(secondPost.mock.calls.map(([message]) => message)).toEqual([{ type: 'panel.window', windowId: 3 }, { type: 'request-status' }])
     expect(secondPost).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'session.active' }))
+  })
+
+  it('restores the still-displayed view after the next registration could not be sent', async () => {
+    vi.useFakeTimers()
+    const failed = vi.fn(() => { throw Error('port closed') })
+    const first = { postMessage: vi.fn(), onMessage: { addListener: vi.fn() }, onDisconnect: { addListener: vi.fn() } }
+    const replacement = { ...first, postMessage: failed }
+    const connected = { ...first, postMessage: vi.fn() }
+    vi.stubGlobal('chrome', { runtime: { connect: vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(replacement).mockReturnValueOnce(connected) } })
+    const api = connectPanel()
+    await api.setActiveSession('displayed')
+    first.postMessage.mockImplementation(failed)
+    const change = api.setActiveSession('unavailable').catch(error => error)
+    await vi.advanceTimersByTimeAsync(150)
+    expect(await change).toBeInstanceOf(Error)
+    const status = api.requestStatus()
+    await vi.advanceTimersByTimeAsync(150)
+    await status
+    expect(connected.postMessage).toHaveBeenCalledWith({ type: 'session.active', sessionId: 'displayed', restore: true })
+    expect(connected.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'unavailable' }))
   })
   it.each([false, true])('restores only the latest view context after disconnect (new=%s)', async isNew => {
     vi.useFakeTimers()
@@ -77,6 +134,8 @@ describe('panel protocol', () => {
     const api = connectPanel(), status = vi.fn(), affinity = vi.fn()
     api.onStatus(status); api.onTabAffinity(affinity)
     disconnect(); await vi.advanceTimersByTimeAsync(150)
+    expect(affinity).toHaveBeenCalledWith(null)
+    affinity.mockClear()
     oldReceive({ type: 'status', state: 'stopped', caps: null })
     oldReceive({ type: 'tab-affinity', state: { revision: 1, status: 'lost', controlled: null, active: null } })
     expect(status).not.toHaveBeenCalled(); expect(affinity).not.toHaveBeenCalled()
@@ -272,7 +331,7 @@ describe('panel protocol', () => {
     })
   })
 
-  it('delivers a stable control-group target while the human views another page', () => {
+  it('delivers a stable control-group target while the human views another page', async () => {
     let receive: ((message: unknown) => void) | undefined
     const postMessage = vi.fn()
     const port = {
@@ -284,6 +343,7 @@ describe('panel protocol', () => {
     const api = connectPanel()
     const listener = vi.fn()
     api.onTabAffinity(listener)
+    await api.setActiveSession('selected')
     const state: TabAffinityState = {
       revision: 4,
       status: 'background',
@@ -291,7 +351,7 @@ describe('panel protocol', () => {
       active: { tabId: 3, windowId: 2, title: 'Current', url: 'https://current.example/' },
     }
 
-    receive?.({ type: 'tab-affinity', state })
+    receive?.({ type: 'tab-affinity', sessionId: 'selected', state })
 
     expect(listener).toHaveBeenCalledWith(state)
   })
