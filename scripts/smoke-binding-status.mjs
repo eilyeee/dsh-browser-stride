@@ -20,8 +20,9 @@ const site = createServer((req, res) => {
 try {
   await new Promise(done => site.listen(0, '127.0.0.1', done))
   const origin = 'http://127.0.0.1:' + site.address().port
+  const inspectProgram = 'console.log((await tools.browser_list_tabs({})).text);'
   h = await startIsolatedModelRun({ repo, origin, startUrl: origin + '/first', artifacts, promptViaRpc: true, startupTimeoutMs: 120000,
-    goal: 'Observe own conversation binding without changing it', programs: { inspect: 'console.log(await tools.browser_list_tabs({}));' },
+    goal: 'Observe own conversation binding without changing it', programs: { inspect: inspectProgram },
     guardSource: "ctx.effect(()=>ctx.tools.guard(exec=>['run_code','browser_list_tabs'].includes(exec.name)?undefined:'Only the read-only authorized tab list is permitted'));" })
   await h.browser.prepare(origin + '/first'); await h.browser.bindSession(h.sessionId)
   const other = await h.browser.context.newPage(); await other.goto(origin + '/other'); await h.browser.authorizePage(other)
@@ -35,18 +36,22 @@ try {
   const cases = []
   async function inspect(name, expected) {
     phase = name
-    const events = await h.turn('inspect', '仅调用一次 browser_list_tabs，禁止选择、follow、导航、页面动作、文件、shell、API或资料写入。只根据本轮工具实际返回的 binding 四个布尔字段报告，不能从历史猜测；字段缺失写 unknown。最终只返回 JSON：marker=OWN_BINDING_MODEL_DONE，binding 为本次 binding 对象，businessSaved=false。', realModel ? 240000 : 60000)
+    const fields = Object.keys(expected)
+    const events = await h.turn('inspect', `用 run_code 执行 ${inspectProgram}。仅调用一次 browser_list_tabs，禁止选择、follow、导航、页面动作、文件、shell、API 或资料写入。按本轮工具实际返回的值报告，缺少的字段写 unknown。最终返回一个 JSON 对象，marker 为 OWN_BINDING_MODEL_DONE，businessSaved 为 false，binding 中报告 ${fields.join('、')}。`, realModel ? 240000 : 60000)
     const calls = events.filter(e => e.type === 'tool/ptc-dispatch')
     assert.ok(calls.every(e => ['run_code', 'browser_list_tabs'].includes(e.data.name) && !e.data.isError))
     const lists = calls.filter(e => e.data.name === 'browser_list_tabs'); assert.equal(lists.length, 1)
     const text = lists[0].data.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
     const body = text.match(/<UNTRUSTED_PAGE_CONTENT[^>]*>([\s\S]*?)<\/UNTRUSTED_PAGE_CONTENT[^>]*>/)?.[1]
-    assert.ok(body); const data = JSON.parse(body); assert.deepEqual(Object.fromEntries(Object.keys(expected).map(key => [key, data.binding?.[key]])), expected)
+    assert.ok(body)
+    const data = JSON.parse(body)
+    assert.deepEqual(Object.fromEntries(fields.map(key => [key, data.binding?.[key]])), expected)
     assert.equal(data.tabs.filter(t => t.controlled).length, expected.targetAuthorized ? 1 : 0)
     if (realModel) {
       const last = events.filter(e => e.type === 'assistant/message').flatMap(e => e.data.message?.content?.filter(b => b.type === 'text').map(b => b.text) ?? []).at(-1)
       const report = parseMarkedModelReport(last, 'OWN_BINDING_MODEL_DONE')
-      assert.deepEqual(report.binding, expected); assert.equal(report.businessSaved, false)
+      assert.deepEqual(Object.fromEntries(fields.map(key => [key, report.binding?.[key]])), expected)
+      assert.equal(report.businessSaved, false)
     }
     await writeFile(join(artifacts, name + '-events.json'), JSON.stringify(events), { mode: 0o600 })
     cases.push({ name, passed: true, binding: expected })
