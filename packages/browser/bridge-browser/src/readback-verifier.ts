@@ -30,21 +30,29 @@ const configSchema = z.strictObject({
   checks: z.array(fieldCheck).min(1).max(32),
   timeoutMs: z.number().int().min(1).max(15_000).default(10_000),
 })
-export interface IndependentReadback {
-  /** JSON obtained from the authoritative record API, never a toast or model response. */
-  body: string
-  /** Trusted adapter's account/tenant/record scope, captured before dispatch. Not a credential. */
+export interface IndependentWriteScope {
+  /** Non-credential key derived from the authoritative account, tenant and record. */
   contextKey: string
-  /** Host time at which this fresh read completed. */
+  /** Host time at which the fresh independent read completed. */
   observedAt: number
+}
+export interface IndependentReadback extends IndependentWriteScope {
+  /** JSON obtained from the authoritative record API. */
+  body: string
   /** Immutable private artifact created by the trusted reader; no raw body is stored in the run. */
   artifactRef: string
 }
+type ReadbackRequest = { runId: string; controlRevision: number; targetUrl: string; signal: AbortSignal }
 export type ReadbackVerifierConfig = z.input<typeof configSchema> & {
-  read(input: { runId: string; controlRevision: number; targetUrl: string; signal: AbortSignal }): Promise<IndependentReadback>
+  /** Optional independent scope reader for each managed write before Host dispatch. */
+  readScope?(input: ReadbackRequest): Promise<IndependentWriteScope>
+  read(input: ReadbackRequest): Promise<IndependentReadback>
 }
-const resultSchema = z.strictObject({ body: z.string().max(262_144), contextKey: z.string().min(1).max(200),
-  observedAt: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER), artifactRef: z.string().regex(/^readback_[a-zA-Z0-9_-]{1,120}$/) })
+const scopeSchema = z.strictObject({ contextKey: z.string().min(1).max(200),
+  observedAt: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER) })
+const resultSchema = scopeSchema.extend({
+  body: z.string().max(262_144), artifactRef: z.string().regex(/^readback_[a-zA-Z0-9_-]{1,120}$/),
+})
 function target(value: string): string | undefined {
   try { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password ? url.href : undefined } catch { return undefined }
 }
@@ -94,15 +102,20 @@ function comparableVersion(value: number | string): number {
  * proves nothing. Timeout/mismatch/missing identity never retries or verifies a task.
  */
 export function createReadbackVerifier(input: ReadbackVerifierConfig): BrowserTaskVerifier {
-  const { read, ...values } = input
+  const { read, readScope, ...values } = input
   const parsed = configSchema.safeParse(values)
-  if (!parsed.success || typeof read !== 'function') throw new Error('readback-config-invalid')
+  if (!parsed.success || typeof read !== 'function' || (readScope !== undefined && typeof readScope !== 'function')) {
+    throw new Error('readback-config-invalid')
+  }
   const config = parsed.data, expectedTarget = target(config.targetUrl)
   const baseline = comparableVersion(config.baselineVersion)
   if (expectedTarget === undefined || !Number.isSafeInteger(baseline)) throw new Error('readback-config-invalid')
   const acceptsTarget = (url: string) => target(url) === expectedTarget
   const needsNumberSources = config.checks.some(check => 'equalsInt64' in check)
-  return Object.freeze({ acceptsTarget, verify: async ({ run, url, signal }: Parameters<BrowserTaskVerifier['verify']>[0]) => {
+  type Input = Parameters<BrowserTaskVerifier['verify']>[0]
+  const readFresh = async <T extends IndependentWriteScope>(
+    { run, url, signal }: Input, reader: (request: ReadbackRequest) => Promise<T>, schema: z.ZodType<T>,
+  ): Promise<T | undefined> => {
     if (signal.aborted || !acceptsTarget(url)) return undefined
     const startedAt = Date.now(), timeout = new AbortController()
     const bounded = AbortSignal.any([signal, timeout.signal])
@@ -114,19 +127,33 @@ export function createReadbackVerifier(input: ReadbackVerifierConfig): BrowserTa
         bounded.addEventListener('abort', aborted, { once: true })
         timer = setTimeout(() => timeout.abort(), config.timeoutMs)
       })
-      const result = resultSchema.safeParse(await Promise.race([expired, Promise.resolve().then(() => {
+      const result = schema.safeParse(await Promise.race([expired, Promise.resolve().then(() => {
         bounded.throwIfAborted()
-        return read({ runId: String(run.runId), controlRevision: run.controlRevision, targetUrl: expectedTarget, signal: bounded })
+        return reader({ runId: String(run.runId), controlRevision: run.controlRevision, targetUrl: expectedTarget, signal: bounded })
       })]))
       if (bounded.aborted || !result.success || result.data.contextKey !== config.contextKey
         || result.data.observedAt < startedAt || result.data.observedAt > Date.now()) return undefined
-      const numberSources: NumberSources | undefined = needsNumberSources ? new WeakMap() : undefined
-      const body = parseReadback(result.data.body, numberSources)
-      const version = versionValue.safeParse(at(body, config.versionPath))
-      if (!version.success || typeof version.data !== typeof config.baselineVersion || !(comparableVersion(version.data) > baseline)
-        || !config.checks.every(check => matchesField(body, check, numberSources))) return undefined
-      return { url: expectedTarget, artifactRefs: [result.data.artifactRef, `readback-sha256:${createHash('sha256').update(result.data.body).digest('hex')}`] }
+      return result.data
     } catch { return undefined }
     finally { clearTimeout(timer); if (aborted !== undefined) bounded.removeEventListener('abort', aborted) }
-  } })
+  }
+
+  return Object.freeze({
+    acceptsTarget,
+    ...(readScope === undefined ? {} : {
+      checkWriteScope: async (input: Input) => (await readFresh(input, readScope, scopeSchema)) !== undefined,
+    }),
+    verify: async (input: Input) => {
+      const result = await readFresh(input, read, resultSchema)
+      if (result === undefined || input.signal.aborted) return undefined
+      try {
+        const numberSources: NumberSources | undefined = needsNumberSources ? new WeakMap() : undefined
+        const body = parseReadback(result.body, numberSources)
+        const version = versionValue.safeParse(at(body, config.versionPath))
+        if (!version.success || typeof version.data !== typeof config.baselineVersion || !(comparableVersion(version.data) > baseline)
+          || !config.checks.every(check => matchesField(body, check, numberSources))) return undefined
+        return { url: expectedTarget, artifactRefs: [result.artifactRef, `readback-sha256:${createHash('sha256').update(result.body).digest('hex')}`] }
+      } catch { return undefined }
+    },
+  })
 }

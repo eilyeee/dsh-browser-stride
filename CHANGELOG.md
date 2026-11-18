@@ -9,6 +9,10 @@ package versions currently identify development builds, not supported releases.
 
 ### Added
 
+- Trusted Host integrations can independently recheck an account, tenant and
+  record scope before dispatching a managed write. A failed scope check stops
+  the task for review with the action recorded as unsent.
+
 - Trusted readback integrations can supply an explicit-offset ISO 8601
   timestamp as their pre-action version. The verifier compares instants at
   millisecond precision and requires a strictly newer value of the same type.

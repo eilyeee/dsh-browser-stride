@@ -138,7 +138,7 @@ export interface BridgeServerDeps {
   /** Trusted Host async execution scopes; never caller/model-supplied ids. */
   runs?: Pick<BrowserRunStore, 'executionFor' | 'assertDispatchAuthority' | 'assertObservationAuthority' | 'assertTargetPreparationAuthority' | 'retargetPaused' | 'startTask'> & RunPanelStore
     & Partial<Pick<BrowserRunStore, 'pauseDisconnectedTask' | 'pauseLostTargetTask'>>
-  tasks?: Pick<BrowserTaskRuntime, 'selectTarget' | 'approval'> & Partial<Pick<BrowserTaskRuntime, 'validateTarget'>>
+  tasks?: Pick<BrowserTaskRuntime, 'selectTarget' | 'approval'> & Partial<Pick<BrowserTaskRuntime, 'validateTarget' | 'checkWriteScope'>>
   recovery?: NativeRecovery
   /**
    * Test seam: force the remote address seen by the privilege gate. The
@@ -399,6 +399,16 @@ export class BridgeServer {
       if (prepared.state !== 'prepared' || prepared.identityVersion !== 4) throw new Error('request already consumed or incompatible')
       action = { actionId: prepared.actionId, requestDigest: prepared.requestDigest }
       let stopped = this.beforeDispatch(conn, signal, expiresAt, sessionId, execution, name, id, referencePermit)
+      if (stopped === undefined && execution !== undefined && !isReadOnlyBrowserTool(name)) {
+        const check = this.deps.tasks?.checkWriteScope?.(execution, AbortSignal.any([signal, conn.abort.signal]), expiresAt)
+        if (check !== undefined) {
+          if (!await check) {
+            await ledger.settle(id, { state: 'not_sent', reason: 'cancelled' })
+            throw new BridgeToolError('execution-denied', 'The backend account, tenant or record scope could not be confirmed before dispatch. Verify the scope before continuing.', true)
+          }
+          stopped = this.beforeDispatch(conn, signal, expiresAt, sessionId, execution, name, id, referencePermit)
+        }
+      }
       if (stopped !== undefined) {
         await ledger.settle(id, { state: 'not_sent', reason: stopped.reason })
         throw stopped.error

@@ -10,7 +10,7 @@ export function apply(ctx, config) {
   const registered = new Set()
   const admittedRevisions = new Set()
   let heldSnapshot = false
-  let ptcCalls = 0, nestedBrowserCalls = 0, directBrowserCalls = 0
+  let ptcCalls = 0, nestedBrowserCalls = 0, directBrowserCalls = 0, scopeChecks = 0
   ctx.on('tools/execute', async (exec, next) => {
     if (String(exec.agent?.id) === expected?.sessionId) {
       if (exec.name === 'run_code') ptcCalls += 1
@@ -35,6 +35,12 @@ export function apply(ctx, config) {
     if (run.state === 'running') admittedRevisions.add(run.controlRevision)
     if (run.state === 'queued' && !registered.has(run.runId)) {
       registered.add(run.runId)
+      const readState = async signal => {
+        const response = await fetch(expected.verificationUrl ?? new URL('/state', expected.url), { signal, cache: 'no-store' })
+        if (!response.ok) throw Error('readback-unavailable')
+        const body = await response.text()
+        return { body, value: JSON.parse(body) }
+      }
       ctx.browserTasks.registerVerifier(run.runId, createReadbackVerifier({
         targetUrl: expected.url, contextKey: 'synthetic-setting',
         versionPath: ['updateTime'], baselineVersion: taskSiteBaseline.updateTime,
@@ -43,10 +49,13 @@ export function apply(ctx, config) {
           { path: ['enabled'], equals: true },
           { path: ['saved'], equals: true },
         ],
+        readScope: async ({ signal }) => {
+          const { value } = await readState(signal)
+          scopeChecks++
+          return { contextKey: value.contextKey, observedAt: Date.now() }
+        },
         read: async ({ signal }) => {
-          const response = await fetch(expected.verificationUrl ?? new URL('/state', expected.url), { signal, cache: 'no-store' })
-          if (!response.ok) throw Error('readback-unavailable')
-          const body = await response.text(), value = JSON.parse(body)
+          const { body, value } = await readState(signal)
           const artifactRef = `readback_fixture_${value.version}`
           await writeFile(`${config.result}.${artifactRef}.json`, body, { mode: 0o600 })
           return { body, contextKey: value.contextKey, observedAt: Date.now(), artifactRef }
@@ -54,7 +63,7 @@ export function apply(ctx, config) {
       }))
     }
     const rows = ctx.browserRuns.dispatches.list(run.sessionId).filter(row => row.runId === run.runId)
-    const value = { ptcCalls, nestedBrowserCalls, directBrowserCalls, state: run.state, version: run.version, controlRevision: run.controlRevision, task: run.task,
+    const value = { ptcCalls, nestedBrowserCalls, directBrowserCalls, scopeChecks, state: run.state, version: run.version, controlRevision: run.controlRevision, task: run.task,
       ...(run.pauseReason === undefined ? {} : { pauseReason: run.pauseReason }),
       agentIdle: ctx.agents?.get(run.sessionId)?.status === 'idle',
       facts: run.facts.length, verified: run.facts.some(fact => fact.outcome === 'verified'),

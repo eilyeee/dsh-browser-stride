@@ -201,6 +201,7 @@ try {
     assert.ok(outcome.task.toolCalls > 0 && outcome.task.toolCalls <= 20)
     assert.equal(outcome.task.toolCalls, outcome.nestedBrowserCalls + outcome.directBrowserCalls)
     assert.equal(outcome.verified, true)
+    assert.ok(outcome.scopeChecks > 0, 'trusted scope read before a managed write')
     assert.equal(outcome.runBound, true)
     assert.equal(outcome.dispatches, outcome.returned)
     if (disconnectOnce) assert.deepEqual(outcome.dispatchRevisions, [0, 3])
@@ -228,7 +229,8 @@ try {
       passed: true, newPageStart, nativePage, interruption, independentState: site.state() }, null, 2), { mode: 0o600 })
     console.log(JSON.stringify({ passed: true, modelRequests: outcome.task.modelRequests, browserCalls: outcome.task.toolCalls,
       ptcCalls: outcome.ptcCalls, nestedBrowserCalls: outcome.nestedBrowserCalls, directBrowserCalls: outcome.directBrowserCalls,
-      activeMs: outcome.task.activeMs, verifiedFacts: outcome.facts, realBrowser: true, independentSiteState: true, syntheticStartRefused: true, newPageStart, disconnectOnce }))
+      activeMs: outcome.task.activeMs, verifiedFacts: outcome.facts, scopeChecks: outcome.scopeChecks,
+      realBrowser: true, independentSiteState: true, syntheticStartRefused: true, newPageStart, disconnectOnce }))
   }
 } catch (error) {
   const artifacts = join(repoRoot, '.stride-private/validation/task-runtime')

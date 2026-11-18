@@ -59,7 +59,7 @@ import { TaskBriefStore } from './task-brief.ts'
 import { registerTaskBrief } from './task-brief-runtime.ts'
 import { bridgeRelease } from './release.ts'
 export type { BrowserTaskVerifier } from './task-runtime.ts'
-export { createReadbackVerifier, type IndependentReadback, type ReadbackVerifierConfig } from './readback-verifier.ts'
+export { createReadbackVerifier, type IndependentReadback, type IndependentWriteScope, type ReadbackVerifierConfig } from './readback-verifier.ts'
 export { computeToolCommandDigest } from './tool-identity.ts'
 
 /** Cordis plugin name used by loader diagnostics. */

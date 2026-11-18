@@ -16,14 +16,16 @@ declare module '@deepseek-ai/cordis' { interface Context { browserTasks: Browser
 declare module '@deepseek-ai/dsh-llm' { interface MessageSourceMap { 'browser-task': { kind: 'browser-task'; runId: string } } }
 
 /** Installed by trusted Host code. A model/tool response cannot register evidence. */
+type VerifierInput = { run: BrowserRunRecord; url: string; signal: AbortSignal }
 export interface BrowserTaskVerifier {
   acceptsTarget(url: string): boolean
-  verify(input: { run: BrowserRunRecord; url: string; signal: AbortSignal }): Promise<ActionEvidence | undefined>
+  checkWriteScope?(input: VerifierInput): Promise<boolean>
+  verify(input: VerifierInput): Promise<ActionEvidence | undefined>
 }
 interface Job {
   runId: RunId; revision: number; agent: Agent; abort: AbortController
   done: Promise<void>; tick: number; activeMs: number; waiting: Set<string>
-  interrupted: boolean; exhausted: boolean; userStopped: boolean; frozen: boolean
+  interrupted: boolean; exhausted: boolean; userStopped: boolean; frozen: boolean; writeScopeRejected: boolean
   execution?: BrowserRunExecution
 }
 
@@ -31,6 +33,7 @@ interface Job {
 export class BrowserTaskRuntime {
   private readonly jobs = new Map<RunId, Job>()
   private readonly verifiers = new Map<RunId, BrowserTaskVerifier>()
+  private readonly requiredWriteScopes = new Set<RunId>()
   private readonly targets = new Map<RunId, string>()
   private readonly driven = new Map<RunId, number>()
   private readonly parents = new Map<ToolExecutionToken, { job: Job; execution: BrowserRunExecution }>()
@@ -54,7 +57,53 @@ export class BrowserTaskRuntime {
     const run = this.runs.get(id)
     if (this.closed || run?.task === undefined || run.state !== 'queued' || this.verifiers.has(id)) throw new Error('verifier-registration-refused')
     this.verifiers.set(id, verifier)
+    if (verifier.checkWriteScope !== undefined) this.requiredWriteScopes.add(id)
     return () => { if (this.verifiers.get(id) === verifier) this.verifiers.delete(id) }
+  }
+
+  /** Checked once per managed write before the Host sends it to the extension. */
+  checkWriteScope(execution: BrowserRunExecution, signal: AbortSignal, expiresAt: number): Promise<boolean> | undefined {
+    if (!this.requiredWriteScopes.has(execution.runId)) return undefined
+    return this.checkRequiredWriteScope(execution, signal, expiresAt)
+  }
+
+  private async checkRequiredWriteScope(execution: BrowserRunExecution, signal: AbortSignal, expiresAt: number): Promise<boolean> {
+    const { runId } = execution
+    const job = this.jobs.get(runId), run = this.runs.get(runId), url = this.targets.get(runId)
+    if (job === undefined || job.execution === undefined || job.revision !== execution.controlRevision
+      || run?.sessionId !== execution.sessionId || url === undefined) return false
+    const live = () => {
+      if (signal.aborted || execution.signal.aborted || this.jobs.get(runId) !== job || this.targets.get(runId) !== url) return false
+      try {
+        this.assertJob(job)
+        this.runs.assertDispatchAuthority(execution, execution.sessionId)
+        return true
+      } catch { return false }
+    }
+    const remaining = expiresAt - Date.now()
+    if (!live() || !(remaining > 0)) return false
+    const verifier = this.verifiers.get(runId)
+    const timeout = new AbortController()
+    const bounded = AbortSignal.any([signal, job.abort.signal, execution.signal, timeout.signal])
+    const timer = setTimeout(() => timeout.abort(), Math.min(15_000, remaining))
+    let aborted: (() => void) | undefined
+    let matched = false
+    try {
+      const cancelled = new Promise<false>(resolve => {
+        aborted = () => resolve(false)
+        bounded.addEventListener('abort', aborted, { once: true })
+      })
+      matched = await Promise.race([cancelled, Promise.resolve().then(() => {
+        bounded.throwIfAborted()
+        return verifier?.checkWriteScope?.({ run, url, signal: bounded })
+      })]) === true && !bounded.aborted
+    } catch { /* The trusted reader failed or was cancelled. */ }
+    finally { clearTimeout(timer); if (aborted !== undefined) bounded.removeEventListener('abort', aborted) }
+    if (!live()) return false
+    if (matched && Date.now() < expiresAt && this.verifiers.get(runId) === verifier) return true
+    job.writeScopeRejected = true
+    this.cancel(job)
+    return false
   }
 
   /** Only the authenticated extension's native start/handoff path calls this. */
@@ -205,6 +254,7 @@ export class BrowserTaskRuntime {
     if (this.closed || run.task === undefined) return
     if (isTerminal(run.state) && !this.jobs.has(run.runId)) {
       this.targets.delete(run.runId); this.verifiers.delete(run.runId); this.driven.delete(run.runId)
+      this.requiredWriteScopes.delete(run.runId)
       return
     }
     const job = this.jobs.get(run.runId)
@@ -224,7 +274,8 @@ export class BrowserTaskRuntime {
         return
       }
       const value: Job = { runId: run.runId, revision: run.controlRevision, agent, abort: new AbortController(),
-        done: Promise.resolve(), tick: performance.now(), activeMs: run.task.activeMs, waiting: new Set(), interrupted: false, exhausted: false, userStopped: false, frozen: false }
+        done: Promise.resolve(), tick: performance.now(), activeMs: run.task.activeMs, waiting: new Set(), interrupted: false,
+        exhausted: false, userStopped: false, frozen: false, writeScopeRejected: false }
       this.jobs.set(run.runId, value)
       this.driven.set(run.runId, run.controlRevision)
       value.done = Promise.resolve().then(() => this.drive(value)).catch(async () => {
@@ -292,12 +343,12 @@ export class BrowserTaskRuntime {
     await this.runs.updateTask(job.runId, task => ({ ...task, activeMs: Math.ceil(job.activeMs) }))
     let run = await this.settleStop(job, this.runs.get(job.runId)!)
     if (run.state !== 'running' || run.controlRevision !== job.revision || this.closed) return
-    const uncertain = this.runs.dispatches.list(run.sessionId).some(row => requiresDispatchReview(row)
+    const needsReview = job.writeScopeRejected || this.runs.dispatches.list(run.sessionId).some(row => requiresDispatchReview(row)
       || row.effect === 'write' && (row.state === 'prepared' || row.state === 'sent_unconfirmed'))
-    let outcome: BrowserTask['outcome'] = uncertain ? 'needs-review' : job.exhausted ? 'budget-exhausted'
+    let outcome: BrowserTask['outcome'] = needsReview ? 'needs-review' : job.exhausted ? 'budget-exhausted'
       : scopeError || job.interrupted ? 'not-completed' : 'needs-review'
     const verifier = this.verifiers.get(run.runId)
-    if (!uncertain && !job.exhausted && !job.interrupted && !scopeError && verifier !== undefined) {
+    if (!needsReview && !job.exhausted && !job.interrupted && !scopeError && verifier !== undefined) {
       try {
         const evidence = await verifier.verify({ run, url: this.targets.get(run.runId)!, signal: job.abort.signal })
         this.assertJob(job)
@@ -321,6 +372,6 @@ export class BrowserTaskRuntime {
     this.stopObserving()
     for (const job of this.jobs.values()) this.cancel(job)
     await Promise.allSettled([...this.jobs.values()].map(job => job.done))
-    this.targets.clear(); this.verifiers.clear()
+    this.targets.clear(); this.verifiers.clear(); this.requiredWriteScopes.clear()
   }
 }

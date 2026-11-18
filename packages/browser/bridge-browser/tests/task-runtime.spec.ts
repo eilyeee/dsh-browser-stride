@@ -44,6 +44,38 @@ function execution(agent: Agent, name = 'browser_snapshot', parent?: ToolExecuti
 }
 
 describe('Host-owned browser task executor', () => {
+  it.each(['match', 'mismatch', 'expired', 'unregistered'] as const)(
+    'handles a %s write-scope check without verifying a refused task',
+    async mode => {
+      const h = await setup()
+      const verify = vi.fn(async () => ({ fieldValues: { saved: 'synthetic' } }))
+      const checkWriteScope = vi.fn(async () => mode === 'expired' ? new Promise<never>(() => {}) : mode === 'match')
+      const unregister = h.runtime.registerVerifier(h.run.runId, { acceptsTarget: () => true, checkWriteScope, verify })
+      let allowed: boolean | undefined
+      h.work(async () => {
+        if (mode === 'unregistered') unregister()
+        const expiry = Date.now() + (mode === 'expired' ? 20 : 2000)
+        // PTC can enter another trusted async context for the same job revision.
+        await h.store.withExecution(h.run.runId, 0, async () => {
+          const scope = h.store.executionFor(String(h.agent.id))!
+          allowed = await h.runtime.checkWriteScope(scope, scope.signal, expiry)
+        })
+      })
+      await h.start()
+      await h.settled()
+      expect(allowed).toBe(mode === 'match')
+      expect(checkWriteScope).toHaveBeenCalledTimes(mode === 'unregistered' ? 0 : 1)
+      if (mode === 'match') {
+        expect(h.current()).toMatchObject({ state: 'completed', task: { outcome: 'verified' } })
+        expect(verify).toHaveBeenCalledOnce()
+      } else {
+        expect(h.current()).toMatchObject({ state: 'blocked', task: { outcome: 'needs-review' }, facts: [] })
+        expect(verify).not.toHaveBeenCalled()
+        expect(h.cancel).toHaveBeenCalled()
+      }
+    },
+  )
+
   it('does not publish a delayed busy-Agent verdict after the task was paused', async () => {
     const h = await setup(), hold = gate()
     close.push(async () => { hold.release() })

@@ -373,6 +373,48 @@ describe('recorded tool dispatch', () => {
     expect(h.storage.store.get(run.runId)).toEqual(run)
   })
 
+  it('keeps a refused write scope off the socket and records an unsent action', async () => {
+    const checkWriteScope = vi.fn(async () => false)
+    const h = await connectedLedger(true, true, { tasks: { selectTarget: vi.fn(), approval: vi.fn(), checkWriteScope } })
+    const queued = await h.storage.store.create({ sessionId: asSessionId('different-scope'), requiredCriteriaIds: ['saved'] })
+    const run = await h.storage.store.transition(queued.runId, queued.version, 'running')
+    await h.storage.store.withExecution(run.runId, 0, async () => {
+      const signal = new AbortController().signal
+      await expect(h.bridge.requestTool('browser_click', {}, signal)).rejects.toMatchObject({
+        code: 'execution-denied', notDispatched: true,
+      })
+      expect(h.frames.some(frame => frame.t === 'tool.call')).toBe(false)
+      expect(h.ledger.list()).toMatchObject([{ name: 'browser_click', state: 'not_sent', runId: run.runId }])
+      const result = h.bridge.requestTool('browser_snapshot', {}, signal)
+      await waitFor(() => h.frames.some(frame => frame.t === 'tool.call'))
+      const call = h.frames.find(frame => frame.t === 'tool.call')!
+      await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === `confirm-${call.id}` && frame.ok))
+      send(h.ws, { t: 'tool.result', id: call.id, action: call.action, ok: true, result: { text: 'synthetic' } })
+      await expect(result).resolves.toEqual({ text: 'synthetic' })
+    })
+    expect(checkWriteScope).toHaveBeenCalledOnce()
+  })
+
+  it('drops a late matching scope result after the original revision was paused', async () => {
+    let release!: (matched: boolean) => void
+    const deferred = new Promise<boolean>(resolve => { release = resolve })
+    const checkWriteScope = vi.fn(() => deferred)
+    const h = await connectedLedger(true, true, { tasks: { selectTarget: vi.fn(), approval: vi.fn(), checkWriteScope } })
+    const queued = await h.storage.store.create({ sessionId: asSessionId('paused-in-scope-check'), requiredCriteriaIds: ['saved'] })
+    const run = await h.storage.store.transition(queued.runId, queued.version, 'running')
+    const result = h.storage.store.withExecution(run.runId, 0, () =>
+      h.bridge.requestTool('browser_click', {}, new AbortController().signal)).catch(error => error)
+    try {
+      await waitFor(() => checkWriteScope.mock.calls.length === 1)
+      await h.storage.store.control(run.runId, run.version, 'pause')
+    } finally {
+      release(true)
+    }
+    expect(await result).toMatchObject({ notDispatched: true })
+    expect(h.frames.some(frame => frame.t === 'tool.call')).toBe(false)
+    expect(h.ledger.list()).toMatchObject([{ state: 'not_sent' }])
+  })
+
   it('omits the new persisted pause reason for an older compatible panel', async () => {
     const h = await connectedLedger(true, true, { tasks: { selectTarget: vi.fn(), approval: vi.fn() } })
     const run = await h.storage.store.create({ sessionId: asSessionId('legacy-pause-reason'), requiredCriteriaIds: ['task-goal'], task: newBrowserTask('Synthetic task') })

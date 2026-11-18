@@ -19,6 +19,34 @@ function setup() {
 describe('independent versioned readback', () => {
   const baselineTime = '2026-11-18T17:00:00.500+08:00'
 
+  it.each(['matched', 'different-tenant', 'stale', 'future', 'missing'] as const)(
+    'checks a %s trusted scope separately from saved-record readback',
+    async mode => {
+      const h = setup()
+      const readScope = vi.fn(async () => ({
+        contextKey: mode === 'different-tenant' ? 'other-tenant-record' : mode === 'missing' ? '' : h.result.contextKey,
+        observedAt: Date.now() + (mode === 'stale' ? -1000 : mode === 'future' ? 1000 : 0),
+      }))
+      const verifier = createReadbackVerifier({ ...h.config, readScope })
+      expect(await verifier.checkWriteScope!({ run, url, signal: h.controller.signal })).toBe(mode === 'matched')
+      expect(readScope).toHaveBeenCalledExactlyOnceWith({
+        runId: run.runId, controlRevision: run.controlRevision, targetUrl: url, signal: expect.any(AbortSignal),
+      })
+      expect(h.read).not.toHaveBeenCalled()
+    },
+  )
+
+  it('bounds a scope reader that ignores its signal and never repeats the read', async () => {
+    vi.useFakeTimers()
+    const h = setup()
+    const readScope = vi.fn(() => new Promise<never>(() => {}))
+    const verifier = createReadbackVerifier({ ...h.config, readScope, timeoutMs: 10 })
+    const result = verifier.checkWriteScope!({ run, url, signal: h.controller.signal })
+    await vi.advanceTimersByTimeAsync(11)
+    expect(await result).toBe(false)
+    expect(readScope).toHaveBeenCalledOnce()
+  })
+
   it('compares a timestamp version as an instant across explicit offsets', async () => {
     const h = setup()
     h.result.body = JSON.stringify({ ...h.data, updateTime: '2026-11-18T09:00:00.501Z' })

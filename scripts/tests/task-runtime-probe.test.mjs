@@ -38,6 +38,7 @@ test('the task fixture verifies persisted state over loopback while pinning the 
   assert.equal(verifier.acceptsTarget(site.url), true)
   assert.equal(verifier.acceptsTarget(verificationUrl.href), false)
   const signal = new AbortController().signal
+  assert.equal(await verifier.checkWriteScope({ run: { runId: 'run_synthetic', controlRevision: 0 }, url: site.url, signal }), true)
   assert.equal(await verifier.verify({ run: { runId: 'run_synthetic', controlRevision: 0 }, url: site.url, signal }), undefined, 'no model or page success claim can substitute for saved state')
   const response = await fetch(new URL('/save', verificationUrl), { method: 'POST', headers: { origin: site.origin, 'content-type': 'application/json' }, body: JSON.stringify({ enabled: true }) })
   assert.equal(response.status, 200)
