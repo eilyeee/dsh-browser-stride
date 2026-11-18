@@ -6,6 +6,7 @@ import { readWithin } from './native-wait.ts'
 interface Session {
   current: () => boolean
   worlds: Map<number, { id: string; frameId: string }>
+  attachment?: Promise<void>
   context?: { document: string; id: string }
   preparing?: Promise<string>
   defaultContexts?: Map<number, { frameId: string; uniqueId: string }>
@@ -16,6 +17,10 @@ interface Evaluation { result?: { value?: unknown }; exceptionDetails?: unknown 
 const CONTROLLER_WORLD = 'DSH Stride controller'
 const VISUAL_CAPTURES_KEY = 'dshVisualCaptures'
 const FRAME_READ_TIMEOUT_MS = 8_000
+
+export function isLoadedHttpTab(tab: Pick<chrome.tabs.Tab, 'url' | 'status' | 'pendingUrl'>): boolean {
+  return tab.status === 'complete' && tab.pendingUrl === undefined && /^https?:\/\//i.test(tab.url ?? '')
+}
 
 /** Request authority is checked at the transport's actual delivery boundary. */
 export interface PageDispatch {
@@ -42,6 +47,7 @@ function commitDispatch(dispatch?: PageDispatch): void {
 
 export class DebuggerPages {
   private sessions = new Map<number, Session>()
+  private retiring = new Map<number, Promise<void>>()
   private captures = new Map<number, VisualConnection>()
   private captureRecovery?: Promise<void>
   private captureWrites = Promise.resolve()
@@ -117,7 +123,7 @@ export class DebuggerPages {
     }
   }
   has(tabId: number): boolean { return this.sessions.has(tabId) }
-  private async detachRecordedVisual(tabId: number): Promise<void> {
+  private async detachNative(tabId: number): Promise<void> {
     try { await chrome.debugger.detach({ tabId }) }
     catch (error) {
       // Only native evidence of an absent target/connection confirms cleanup.
@@ -132,7 +138,7 @@ export class DebuggerPages {
       const stored = (await chrome.storage.session.get(VISUAL_CAPTURES_KEY))[VISUAL_CAPTURES_KEY]
       if (stored === undefined) return
       if (Array.isArray(stored)) for (const id of stored) {
-        if (typeof id === 'number' && Number.isSafeInteger(id) && id >= 0) await this.detachRecordedVisual(id)
+        if (typeof id === 'number' && Number.isSafeInteger(id) && id >= 0) await this.detachNative(id)
       }
       await chrome.storage.session.set({ [VISUAL_CAPTURES_KEY]: [] })
     })()
@@ -154,44 +160,46 @@ export class DebuggerPages {
     return answer
   }
   async attachCreated(tabId: number, current: () => boolean, signal?: AbortSignal, timeoutMs = 8000): Promise<void> {
-    if (chrome.debugger === undefined || !current() || this.has(tabId) || this.captures.has(tabId)) throw new Error('Automatic page control is unavailable.')
+    if (chrome.debugger === undefined || !current() || this.has(tabId) || this.retiring.has(tabId) || this.captures.has(tabId)) throw new Error('Automatic page control is unavailable.')
     const session: Session = { current, worlds: new Map() }
     this.sessions.set(tabId, session)
     try {
-      const deadline = Date.now() + timeoutMs
-      let attached = false
-      let lastError: unknown
-      while (!signal?.aborted && Date.now() < deadline) {
-        this.allowed(tabId, session)
-        const tab = await chrome.tabs.get(tabId)
-        this.allowed(tabId, session)
-        if (signal?.aborted) break
-        if (/^https?:\/\//i.test(tab.url ?? '')) {
-          try { await chrome.debugger.attach({ tabId }, '1.3'); attached = true; break }
-          catch (error) {
-            this.allowed(tabId, session)
-            // A transitioning new-tab renderer can still reject attachment.
-            // Completed-page refusals and explicit policy errors are final;
-            // native cancellation removes this session and cannot reattach.
-            if (!(error instanceof Error) || !/^Cannot attach to this target\.?$/.test(error.message)
-              || (tab.status !== 'loading' && tab.pendingUrl === undefined)) throw error
-            lastError = error
+      await readWithin(timeoutMs, async bounded => {
+        while (session.attachment === undefined) {
+          bounded.throwIfAborted()
+          this.allowed(tabId, session)
+          const tab = await chrome.tabs.get(tabId)
+          bounded.throwIfAborted()
+          this.allowed(tabId, session)
+          if (isLoadedHttpTab(tab)) {
+            try {
+              session.attachment = chrome.debugger.attach({ tabId }, '1.3')
+              await session.attachment
+            } catch (error) {
+              bounded.throwIfAborted()
+              this.allowed(tabId, session)
+              session.attachment = undefined
+              if (!(error instanceof Error) || !/^Cannot attach to this target\.?$/.test(error.message)) throw error
+              const live = await chrome.tabs.get(tabId)
+              bounded.throwIfAborted()
+              // Retry only when Chrome reports a new load after that refusal.
+              if (live.status !== 'loading' && live.pendingUrl === undefined) throw error
+            }
+          } else if (!/^https?:\/\//i.test(tab.url ?? '') && !/^https?:\/\//i.test(tab.pendingUrl ?? '')
+            && tab.url !== undefined && tab.url !== 'about:blank' && !/^chrome:\/\/(?:newtab|new-tab-page)\//.test(tab.url)) {
+            throw new Error('Only HTTP(S) pages can be controlled.')
           }
-        } else if (!/^https?:\/\//i.test(tab.pendingUrl ?? '')
-          && tab.url !== 'about:blank' && !/^chrome:\/\/(?:newtab|new-tab-page)\//.test(tab.url ?? '')) {
-          throw new Error('Only HTTP(S) pages can be controlled.')
+          if (session.attachment === undefined) {
+            await new Promise<void>(resolve => { setTimeout(resolve, 50) })
+          }
         }
-        await new Promise<void>(resolve => { setTimeout(resolve, 50) })
-      }
-      if (!attached) throw signal?.aborted ? new Error('Automatic page control was cancelled.')
-        : lastError ?? new Error('The new HTTP(S) tab was not ready for debugging.')
-      if (signal?.aborted) throw new Error('Automatic page control was cancelled.')
-      this.allowed(tabId, session)
-      await this.command(tabId, session, 'Page.enable')
-      await this.command(tabId, session, 'Runtime.enable')
+        bounded.throwIfAborted()
+        await this.command(tabId, session, 'Page.enable')
+        bounded.throwIfAborted()
+        await this.command(tabId, session, 'Runtime.enable')
+      }, signal)
     } catch (error) {
-      if (this.sessions.get(tabId) === session) this.sessions.delete(tabId)
-      await chrome.debugger.detach({ tabId }).catch(() => {})
+      void this.retireSession(tabId, session).catch(() => {})
       throw error
     }
   }
@@ -201,11 +209,12 @@ export class DebuggerPages {
   }
   private async prepareAttachment(tabId: number, current: () => boolean, authorization: () => boolean, visual = false): Promise<void> {
     await this.recoverCaptures()
-    if (!current() || !authorization()) throw new PageDispatchRevoked()
+    if (!current() || !authorization() || this.retiring.has(tabId)) throw new PageDispatchRevoked()
     if (this.has(tabId)) { this.session(tabId); return }
     const previous = this.captures.get(tabId)
     if (previous !== undefined && (!previous.valid || !previous.current())) await this.detachVisual(tabId)
-    if (!current() || !authorization()) throw new PageDispatchRevoked()
+    if (!current() || !authorization() || this.retiring.has(tabId)) throw new PageDispatchRevoked()
+    if (this.has(tabId)) { this.session(tabId); return }
     const live = this.captures.get(tabId)
     if (live !== undefined) {
       if (!live.attached) throw new Error('A visual connection is still being prepared.')
@@ -227,7 +236,7 @@ export class DebuggerPages {
         // Keep ownership through a late attach and its confirmed detach. A
         // successor cannot acquire this native tab while cleanup is pending.
         const closing = Promise.resolve().then(async () => {
-          if (lease.attached) await this.detachRecordedVisual(tabId)
+          if (lease.attached) await this.detachNative(tabId)
           if (this.captures.get(tabId) === lease) this.captures.delete(tabId)
           await this.persistCaptures()
         })
@@ -334,7 +343,7 @@ export class DebuggerPages {
       return
     }
     const closing = Promise.resolve().then(async () => {
-      if (lease.attached) await this.detachRecordedVisual(tabId)
+      if (lease.attached) await this.detachNative(tabId)
       if (this.captures.get(tabId) === lease) this.captures.delete(tabId)
       await this.persistCaptures()
     })
@@ -344,10 +353,21 @@ export class DebuggerPages {
   async releaseStaleVisual(): Promise<void> {
     await Promise.all([...this.captures].filter(([, lease]) => !lease.current()).map(([id]) => this.detachVisual(id)))
   }
-  async detach(tabId: number): Promise<void> {
-    // Withdraw locally before awaiting Chrome. No late command can acquire a new session.
+  private retireSession(tabId: number, session: Session): Promise<void> {
+    if (this.sessions.get(tabId) !== session) return this.retiring.get(tabId) ?? Promise.resolve()
     this.sessions.delete(tabId)
-    if (chrome.debugger !== undefined) await chrome.debugger.detach({ tabId }).catch(() => {})
+    if (session.attachment === undefined) return Promise.resolve()
+    // Preserve the slot until a late native attach is rejected or safely detached.
+    const closing = session.attachment.then(() => this.detachNative(tabId), () => {}).then(() => {
+      if (this.retiring.get(tabId) === closing) this.retiring.delete(tabId)
+    })
+    this.retiring.set(tabId, closing)
+    return closing
+  }
+  async detach(tabId: number, recover = false): Promise<void> {
+    const session = this.sessions.get(tabId)
+    if (session !== undefined) await this.retireSession(tabId, session).catch(() => {})
+    else if (recover && !this.retiring.has(tabId) && chrome.debugger !== undefined) await this.detachNative(tabId).catch(() => {})
   }
   private session(tabId: number): Session {
     const session = this.sessions.get(tabId)
@@ -405,9 +425,12 @@ export class DebuggerPages {
     const frame = await this.frame(tabId, session)
     const document = `${frame.id}:${frame.loaderId}`
     if (options?.documentId !== undefined && options.documentId !== document) throw new Error('The target document changed before dispatch.')
-    const uniqueContextId = await this.context(tabId, session, frame)
-    const live = await this.frame(tabId, session)
-    if (`${live.id}:${live.loaderId}` !== document || live.url !== frame.url) throw new Error('The target document changed before dispatch.')
+    let uniqueContextId = session.context?.document === document ? session.context.id : undefined
+    if (uniqueContextId === undefined) {
+      uniqueContextId = await this.context(tabId, session, frame)
+      const live = await this.frame(tabId, session)
+      if (`${live.id}:${live.loaderId}` !== document || live.url !== frame.url) throw new Error('The target document changed before dispatch.')
+    }
     const response = await this.command<Evaluation>(tabId, session, 'Runtime.evaluate', {
       uniqueContextId, expression: `globalThis.__strideDebuggerAction(JSON.parse(${JSON.stringify(JSON.stringify(message))}))`,
       awaitPromise: true, returnByValue: true,
@@ -425,15 +448,11 @@ export class DebuggerPages {
       while (!bounded.aborted && this.has(tabId)) {
         try {
           const session = this.session(tabId)
-          const frame = await this.frame(tabId, session, bounded)
+          const tab = await chrome.tabs.get(tabId)
           bounded.throwIfAborted()
-          if (`${frame.id}:${frame.loaderId}` !== previousDocumentId) {
-            const uniqueContextId = await this.context(tabId, session, frame)
-            bounded.throwIfAborted()
-            const state = await this.command<Evaluation>(tabId, session, 'Runtime.evaluate', {
-              uniqueContextId, expression: 'document.readyState', returnByValue: true,
-            })
-            if (state.result?.value === 'interactive' || state.result?.value === 'complete') return !bounded.aborted
+          if (isLoadedHttpTab(tab)) {
+            const frame = await this.frame(tabId, session, bounded)
+            if (`${frame.id}:${frame.loaderId}` !== previousDocumentId) return !bounded.aborted
           }
         } catch { /* Navigation can destroy an execution context; continue only within the readiness budget. */ }
         if (!bounded.aborted) {

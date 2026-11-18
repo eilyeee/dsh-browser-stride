@@ -1,5 +1,5 @@
 import { readPageAccessEpoch, writePageAccessEpoch } from './credential-store.ts'
-import { debuggerPages } from './debugger-pages.ts'
+import { debuggerPages, isLoadedHttpTab } from './debugger-pages.ts'
 import { PageAuthorizationError, type PageAuthorizationFailure } from '../page-authorization.ts'
 
 /** Native action or the opted-in newly-created-tab path grants access. Group membership never does. */
@@ -57,7 +57,7 @@ export class PageAccess {
     const value = cached[PAGE_ACCESS_KEY] as { grants?: unknown; epoch?: unknown } | undefined
     // Debugger sessions are never recovered into authority. Detach only our recorded targets.
     if (Array.isArray(value?.grants)) for (const row of value.grants) {
-      if (row?.mode === 'debugger' && Number.isSafeInteger(row.tabId) && row.tabId >= 0) await debuggerPages.detach(row.tabId)
+      if (row?.mode === 'debugger' && Number.isSafeInteger(row.tabId) && row.tabId >= 0) await debuggerPages.detach(row.tabId, true)
     }
     if (!Array.isArray(value?.grants) || value.epoch !== epoch) return
     let pruned = false
@@ -194,11 +194,14 @@ export class PageAccess {
       await debuggerPages.attachCreated(tabId, allowed, signal, Math.max(0, deadline - Date.now()))
       if (!await debuggerPages.ready(tabId, undefined, signal, Math.max(0, deadline - Date.now()))) throw new Error('The new page did not become ready for automatic control.')
       const live = await chrome.tabs.get(tabId)
-      if (!allowed() || signal.aborted || live.id !== tabId || live.windowId !== grant.windowId || origin(live.url) === undefined
+      if (!allowed() || signal.aborted || live.id !== tabId || live.windowId !== grant.windowId || !isLoadedHttpTab(live)
         || (requiresGroup() && live.pinned)) throw new Error('The new page changed before it could be controlled.')
       grant.origin = origin(live.url)!
       await this.joinGroup(grant)
       const grouped = await chrome.tabs.get(tabId)
+      if (!allowed() || signal.aborted || !isLoadedHttpTab(grouped) || grouped.url !== live.url) {
+        throw new Error('The new page changed while joining the control group.')
+      }
       delete grant.pending
       if (!this.allows(grouped)) throw new Error('The new page left its control group.')
       await this.persist()

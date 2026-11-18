@@ -78,6 +78,84 @@ describe('shared read debugger lease', () => {
 })
 
 describe('new-tab debugger transport', () => {
+  it('waits for the browser to finish loading the new document before attaching', async () => {
+    vi.useFakeTimers()
+    const h = fixture()
+    let loading = true
+    h.get.mockImplementation(async () => ({
+      id: 42, windowId: 1, url: 'https://example.test/', status: loading ? 'loading' : 'complete',
+    }))
+    const started = h.pages.attachCreated(42, () => true)
+    await vi.advanceTimersByTimeAsync(110)
+    expect(h.attach).not.toHaveBeenCalled()
+    expect(h.commands).not.toHaveBeenCalled()
+    loading = false
+    await vi.advanceTimersByTimeAsync(50)
+    await started
+    expect(h.attach).toHaveBeenCalledOnce()
+  })
+
+  it('retires an unanswered native attach and cleans up its late reply without sharing the slot', async () => {
+    vi.useFakeTimers()
+    const h = fixture()
+    let finish!: () => void
+    h.attach.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve }))
+    const outcome = vi.fn()
+    void h.pages.attachCreated(42, () => true, undefined, 900).then(outcome, outcome)
+    await vi.advanceTimersByTimeAsync(900)
+    expect(outcome).toHaveBeenCalledExactlyOnceWith(expect.any(Error))
+    expect(h.pages.has(42)).toBe(false)
+    expect(h.detach).not.toHaveBeenCalled()
+    await expect(h.pages.prepareViewportCapture(42, () => true, () => true)).rejects.toThrow()
+    await expect(h.pages.attachCreated(42, () => true)).rejects.toThrow()
+    let detach!: () => void
+    h.detach.mockImplementationOnce(() => new Promise<void>(resolve => { detach = resolve }))
+    finish()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(h.detach).toHaveBeenCalledOnce()
+    expect(h.commands).not.toHaveBeenCalled()
+    await expect(h.pages.attachCreated(42, () => true)).rejects.toThrow()
+    detach()
+    await vi.advanceTimersByTimeAsync(0)
+    await h.pages.attachCreated(42, () => true)
+    expect(h.attach).toHaveBeenCalledTimes(2)
+  })
+
+  it('expires native domain setup and does not continue enabling after a late reply', async () => {
+    vi.useFakeTimers()
+    const h = fixture()
+    let finish!: (value: object) => void
+    h.commands.mockImplementationOnce(() => new Promise<object>(resolve => { finish = resolve }))
+    const outcome = vi.fn()
+    void h.pages.attachCreated(42, () => true, undefined, 900).then(outcome, outcome)
+    await vi.advanceTimersByTimeAsync(900)
+    expect(outcome).toHaveBeenCalledExactlyOnceWith(expect.any(Error))
+    expect(h.pages.has(42)).toBe(false)
+    expect(h.detach).toHaveBeenCalledOnce()
+    finish({})
+    await vi.advanceTimersByTimeAsync(0)
+    expect(h.commands.mock.calls.map(([, method]) => method)).toEqual(['Page.enable'])
+  })
+
+  it('checks the loaded replacement frame without preparing the page controller', async () => {
+    vi.useFakeTimers()
+    const h = fixture()
+    await h.pages.attachCreated(42, () => true)
+    h.commands.mockClear()
+    h.navigate()
+    let loading = true
+    h.get.mockImplementation(async () => ({
+      id: 42, windowId: 1, url: 'https://example.test/', status: loading ? 'loading' : 'complete',
+    }))
+    const ready = h.pages.ready(42, 'main:document-a', new AbortController().signal, 900)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(h.commands).not.toHaveBeenCalled()
+    loading = false
+    await vi.advanceTimersByTimeAsync(50)
+    await expect(ready).resolves.toBe(true)
+    expect(h.commands.mock.calls.map(([, method]) => method)).toEqual(['Page.getFrameTree'])
+  })
+
   it('bounds a frame lookup with no native reply and allows a new explicit observation', async () => {
     vi.useFakeTimers()
     const h = fixture()
@@ -203,11 +281,12 @@ describe('new-tab debugger transport', () => {
   it('waits for the new HTTP(S) tab and retries only an explicit not-ready attachment', async () => {
     const h = fixture()
     h.get.mockResolvedValueOnce({ id: 42, windowId: 1, url: 'chrome://newtab/', pendingUrl: 'https://example.test/', status: 'loading' })
+    h.get.mockResolvedValueOnce({ id: 42, windowId: 1, url: 'https://example.test/', status: 'complete' })
     h.get.mockResolvedValueOnce({ id: 42, windowId: 1, url: 'https://example.test/', status: 'loading' })
     h.attach.mockRejectedValueOnce(new Error('Cannot attach to this target.'))
     await h.pages.attachCreated(42, () => true)
     expect(h.attach).toHaveBeenCalledTimes(2)
-    expect(h.get).toHaveBeenCalledTimes(3)
+    expect(h.get).toHaveBeenCalledTimes(4)
     expect(h.commands.mock.calls.filter(([, method]) => method === 'Page.enable')).toHaveLength(1)
   })
 
@@ -276,6 +355,16 @@ describe('new-tab debugger transport', () => {
     expect(evaluations.map(params => params.uniqueContextId)).toEqual([
       'context-document-a', 'context-document-a', 'context-document-b', 'context-document-b',
     ])
+  })
+
+  it('checks the document before and after a dispatch in an already prepared context', async () => {
+    const h = fixture()
+    await h.pages.attachCreated(42, () => true)
+    await h.pages.send(42, { type: 'DSH_PING' })
+    h.commands.mockClear()
+    await h.pages.send(42, { type: 'DSH_PING' })
+    expect(h.commands.mock.calls.map(([, method]) => method)).toEqual(['Page.getFrameTree', 'Runtime.evaluate', 'Page.getFrameTree'])
+    expect(h.commands.mock.calls[1]?.[2]?.uniqueContextId).toBe('context-document-a')
   })
 
   it('does not execute when opt-in is revoked during packaged source loading', async () => {

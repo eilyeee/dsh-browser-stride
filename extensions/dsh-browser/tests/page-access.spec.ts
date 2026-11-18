@@ -8,7 +8,7 @@ function fixture() {
   const data: Record<string, unknown> = {}
   const tabs = new Map<number, chrome.tabs.Tab>()
   const page = (id: number, windowId = 1, url = 'https://example.com/page') => {
-    const tab = { id, windowId, url, groupId: -1 } as chrome.tabs.Tab
+    const tab = { id, windowId, url, groupId: -1, status: 'complete' } as chrome.tabs.Tab
     tabs.set(id, tab); return tab
   }
   let nextGroup = 50
@@ -18,17 +18,17 @@ function fixture() {
     : [{ frameId: 0, result: new URL(tabs.get(details.target.tabId)!.url!).origin }])
   const sendMessage = vi.fn(async (): Promise<unknown> => ({}))
   const ungroup = vi.fn(async (id: number | number[]) => { for (const key of [id].flat()) { const tab = tabs.get(key); if (tab) tab.groupId = -1 } })
+  const group = vi.fn(async ({ tabIds, groupId }: { tabIds: number; groupId?: number }) => {
+    const id = groupId ?? nextGroup++
+    const tab = tabs.get(tabIds)!
+    groups.set(id, { id, windowId: tab.windowId }); tab.groupId = id
+    return id
+  })
   vi.stubGlobal('chrome', {
     storage: { session: { get: vi.fn(async (key: string) => ({ [key]: data[key] })), set } },
     scripting: { executeScript: inject },
     tabs: { get: vi.fn(async (id: number) => { if (!tabs.has(id)) throw new Error('closed'); return tabs.get(id)! }),
-      sendMessage, ungroup,
-      group: vi.fn(async ({ tabIds, groupId }: { tabIds: number; groupId?: number }) => {
-        const id = groupId ?? nextGroup++
-        const tab = tabs.get(tabIds)!
-        groups.set(id, { id, windowId: tab.windowId }); tab.groupId = id
-        return id
-      }),
+      sendMessage, ungroup, group,
       query: vi.fn(async ({ groupId }: { groupId: number }) => [...tabs.values()].filter(tab => tab.groupId === groupId)),
     },
     tabGroups: { get: vi.fn(async (id: number) => groups.get(id)),
@@ -38,7 +38,7 @@ function fixture() {
   })
   const changed = vi.fn()
   const access = new PageAccess(changed)
-  return { access, page, data, changed, inject, sendMessage, set, tabs, groups, ungroup }
+  return { access, page, data, changed, inject, sendMessage, set, tabs, groups, group, ungroup }
 }
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
@@ -133,7 +133,7 @@ describe('native page access and visible control group', () => {
     const detach = vi.spyOn(debuggerPages, 'detach').mockResolvedValue()
     await h.access.grantCreated(42, () => true, new AbortController().signal)
     const restarted = new PageAccess(vi.fn()); await restarted.ready
-    expect(detach).toHaveBeenCalledWith(42)
+    expect(detach).toHaveBeenCalledWith(42, true)
     expect(restarted.allows(created)).toBe(false)
     expect((h.data[PAGE_ACCESS_KEY] as { grants: unknown[] }).grants).toEqual([])
   })
@@ -149,6 +149,25 @@ describe('native page access and visible control group', () => {
     expect(h.access.has(42)).toBe(false)
     expect(detach).toHaveBeenCalledWith(42)
     expect(chrome.tabs.group).not.toHaveBeenCalled()
+  })
+
+  it('withdraws the pending grant when the tab starts loading again while joining the group', async () => {
+    const h = fixture(), tab = h.page(42)
+    vi.spyOn(debuggerPages, 'attachCreated').mockResolvedValue()
+    vi.spyOn(debuggerPages, 'ready').mockResolvedValue(true)
+    vi.spyOn(debuggerPages, 'has').mockReturnValue(true)
+    vi.spyOn(debuggerPages, 'detach').mockResolvedValue()
+    const join = h.group.getMockImplementation()!
+    h.group.mockImplementationOnce(async options => {
+      const id = await join(options)
+      tab.status = 'loading'
+      tab.pendingUrl = 'https://other.example/'
+      return id
+    })
+    await expect(h.access.grantCreated(42, () => true, new AbortController().signal)).rejects.toThrow('changed while joining')
+    expect(h.access.has(42)).toBe(false)
+    expect(h.access.allows(tab)).toBe(false)
+    expect((h.data[PAGE_ACCESS_KEY] as { grants: unknown[] }).grants).toEqual([])
   })
 
   it.each(['stop', 'reauthorize'])('does not revoke or close a page taken over by a user %s during automatic preparation', async action => {

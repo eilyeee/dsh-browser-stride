@@ -46,6 +46,12 @@ package versions currently identify development builds, not supported releases.
 
 ### Fixed
 
+- Development build 0.1.36 waits for the browser to finish the new page's
+  load before attaching Chrome's debugger. Setup has a deadline and late
+  attachments retain their tab slot until cleanup. The readiness check uses
+  Chrome's load state and frame identity. The page controller runs when an
+  observation or action needs it.
+
 - Development build 0.1.34 bounds Chrome frame discovery and page readiness
   reads. A confirmed open or navigation can report success when its optional
   snapshot takes more than 2.5 seconds. Expiry of a diagnostic start can retire
