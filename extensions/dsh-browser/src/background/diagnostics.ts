@@ -1,6 +1,7 @@
 /** Explicit panel-owned, document-bound diagnostics; model calls can only read. */
 import { DIAGNOSTIC_LIMIT, diagnosticRoute, diagnosticEntrySchema, diagnosticsSchema, type DiagnosticEntry, type DiagnosticsSnapshot } from '@eilyeee/dsh-browser-stride/src/diagnostics.ts'
 import { debuggerPages, type DebuggerPages, type ReadDebugLease } from './debugger-pages.ts'
+import { waitForReply } from './native-wait.ts'
 
 export interface DiagnosticsStatus { enabled: boolean; captureId?: string; startedAt?: number; count: number; dropped: number }
 interface Capture {
@@ -12,8 +13,8 @@ interface Capture {
 const number = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 const record = (value: unknown): Record<string, unknown> => typeof value === 'object' && value !== null ? value as Record<string, unknown> : {}
 const errorTypes = new Set(['Error', 'TypeError', 'ReferenceError', 'SyntaxError', 'RangeError', 'URIError', 'EvalError', 'AggregateError'])
-// Settle before the panel's 15-second RPC deadline. Native commands cannot be
-// cancelled: expired work keeps its queue slot until its owned cleanup settles.
+// Settle before the panel's 15-second RPC deadline. The original queue slot
+// remains owned until native cleanup or a confirmed exclusive detach.
 const START_TIMEOUT_MS = 10_000
 
 export class PageDiagnostics {
@@ -51,6 +52,7 @@ export class PageDiagnostics {
     if (previous !== undefined) this.clear(previous)
     const capture: Capture = { active: true, ready: false, id: `diag_${crypto.randomUUID()}`, startedAt: Date.now(), current,
       contexts: new Map(), pending: new Map(), entries: [], sequence: 0, dropped: 0, ownerScope }
+    const detached = new AbortController()
     this.captures.set(tabId, capture)
     const starting = this.serial(tabId, async () => {
       if (previous !== undefined) await this.close(previous)
@@ -60,7 +62,7 @@ export class PageDiagnostics {
         // checked separately, so stopping can still clean its owned domains.
         capture.lease = await this.pages.acquireReadLease(tabId, authorization, authorization)
         if (!this.valid(tabId, capture)) throw Error('diagnostics-revoked')
-        const tree = await capture.lease.command<{ frameTree?: { frame?: { id?: string; loaderId?: string; url?: string } } }>('Page.getFrameTree')
+        const tree = await waitForReply(capture.lease.command<{ frameTree?: { frame?: { id?: string; loaderId?: string; url?: string } } }>('Page.getFrameTree'), detached.signal)
         if (!this.valid(tabId, capture)) throw Error('diagnostics-revoked')
         const frame = tree.frameTree?.frame
         if (!frame?.id || !frame.loaderId || !frame.url || !/^https?:/.test(frame.url)) throw Error('diagnostics-document-unavailable')
@@ -72,8 +74,8 @@ export class PageDiagnostics {
         for (const context of capture.lease.contexts()) if (context.frameId === capture.frame) capture.contexts.set(context.id, context.uniqueId)
         for (const method of ['Page.enable', 'Runtime.enable', 'Network.enable'] as const) {
           if (!this.valid(tabId, capture)) throw Error('diagnostics-revoked')
-          await capture.lease.command(method, method === 'Network.enable'
-            ? { maxTotalBufferSize: 65_536, maxResourceBufferSize: 4_096, maxPostDataSize: 0 } : undefined)
+          await waitForReply(capture.lease.command(method, method === 'Network.enable'
+            ? { maxTotalBufferSize: 65_536, maxResourceBufferSize: 4_096, maxPostDataSize: 0 } : undefined), detached.signal)
         }
         if (!this.valid(tabId, capture)) throw Error('diagnostics-revoked')
         capture.ready = true
@@ -92,7 +94,13 @@ export class PageDiagnostics {
         // serial slot while an older native attach/command still owns it.
         this.clear(capture)
         if (this.captures.get(tabId) === capture) this.captures.delete(tabId)
-        reject(Error('diagnostics-start-timeout'))
+        const error = Error('diagnostics-start-timeout')
+        reject(error)
+        // A reply from the retired connection cannot enable a new capture.
+        // Shared connections retain the original wait and cleanup order.
+        void capture.lease?.detachIfExclusive().then(confirmed => {
+          if (confirmed) detached.abort(error)
+        }).catch(() => {})
       }, START_TIMEOUT_MS)
     })
     // The losing native promise remains observed and performs its own cleanup;

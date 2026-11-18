@@ -10,7 +10,7 @@ function fixture() {
   const release = vi.fn(async () => {})
   const command = vi.fn(async (method: string) => method === 'Page.getFrameTree'
     ? { frameTree: { frame: { id: 'main', loaderId: loader, url: 'https://example.test/app' } } } : {})
-  const lease: ReadDebugLease = { current: () => allowed, command: command as ReadDebugLease['command'], release,
+  const lease: ReadDebugLease = { current: () => allowed, command: command as ReadDebugLease['command'], release, detachIfExclusive: async () => false,
     contexts: () => [{ id: 7, frameId: 'main', uniqueId: 'main-a' }], subscribe: listener => { receive = listener; return () => { receive = () => {} } } }
   const acquireReadLease = vi.fn(async () => lease)
   const diagnostics = new PageDiagnostics({ acquireReadLease } as unknown as DebuggerPages)

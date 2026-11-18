@@ -20,7 +20,8 @@ const cli = join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'lib
 const root = await mkdtemp(join(tmpdir(), 'stride-diagnostics-')), home = join(root, 'home')
 const realModel = process.env.STRIDE_REAL_MODEL === '1'
 const statusRace = process.env.STRIDE_DIAGNOSTIC_STATUS_RACE === '1' || process.argv.includes('--status-race')
-const startExpiry = process.argv.includes('--start-expiry')
+const unresponsiveStartRead = process.argv.includes('--start-expiry-read')
+const startExpiry = unresponsiveStartRead || process.argv.includes('--start-expiry')
 if (statusRace && startExpiry) throw Error('Run status ordering and native start expiry separately')
 const traceNative = process.argv.includes('--trace-native') || startExpiry
 const version = JSON.parse(await readFile(join(repo, 'package.json'), 'utf8')).version
@@ -101,7 +102,9 @@ let requests=0;ctx.on('agent/request',(_p,next)=>{if(++requests>12)throw Error('
     }
     if (traceNative) {
       const background = join(extensionDir, 'background.js')
-      const delayStart = startExpiry ? await readFile(join(repo, 'scripts/fixtures/diagnostic-start-delay.js'), 'utf8') : ''
+      const delayStart = startExpiry
+        ? 'globalThis.__strideDiagnosticHoldFrameRead = ' + String(unresponsiveStartRead) + ';\n' + await readFile(join(repo, 'scripts/fixtures/diagnostic-start-delay.js'), 'utf8')
+        : ''
       await writeFile(background, (await readFile(join(repo, 'scripts/fixtures/diagnostic-native-trace.js'), 'utf8')) + ';\n' + delayStart + ';\n' + await readFile(background, 'utf8'))
     }
   }
@@ -121,23 +124,29 @@ let requests=0;ctx.on('agent/request',(_p,next)=>{if(++requests>12)throw Error('
   const enable = browser.panel.locator('.page-diagnostics button'); await enable.waitFor(); await enable.click()
   if (startExpiry) {
     phase = 'native-start-expiry'
-    await waitWorker(() => globalThis.__strideDiagnosticStartDelay.status().held, 'The native enable reply was not held')
+    await waitWorker(() => globalThis.__strideDiagnosticStartDelay.status().held, 'The native start reply was not held')
     // This must settle before the panel's own 15-second RPC timeout.
     await browser.panel.locator('.page-diagnostics [role="status"]').waitFor({ timeout: 12500 })
     assert.match(await browser.panel.locator('.page-diagnostics [role="status"]').innerText(), /请求未能确认|Request was not confirmed/)
     assert.match(await enable.innerText(), /开启|Enable/)
     phase = 'late-native-start-cleanup'
-    await browser.worker.evaluate(() => globalThis.__strideDiagnosticStartDelay.release())
+    if (!unresponsiveStartRead) await browser.worker.evaluate(() => globalThis.__strideDiagnosticStartDelay.release())
     await waitWorker(() => globalThis.__strideDiagnosticNativeTrace.some(item => item.command === 'detach' && item.state === 'resolved'), 'Late native cleanup did not settle')
     assert.match(await enable.innerText(), /开启|Enable/, 'The expired native start must not enable capture after its late reply')
     const trace = await browser.worker.evaluate(() => globalThis.__strideDiagnosticNativeTrace)
-    assert.equal(trace.filter(item => item.command === 'Network.enable' && item.state === 'started').length, 1, 'Expired native work must not replay itself')
+    const delayedCommand = unresponsiveStartRead ? 'Page.getFrameTree' : 'Network.enable'
+    assert.equal(trace.filter(item => item.command === delayedCommand && item.state === 'started').length, 1, 'Expired native work must not replay itself')
+    if (unresponsiveStartRead) assert.deepEqual(await browser.worker.evaluate(() => globalThis.__strideDiagnosticStartDelay.status()), { held: true, released: false })
     // Only a new native click may start a later capture after confirmed cleanup.
     phase = 'explicit-native-restart'
     await enable.click()
   }
   await browser.panel.locator('.page-diagnostics [role="status"]').waitFor({ timeout: 15000 })
   await browser.panel.locator('.page-diagnostics [role="status"]').filter({ hasText: /已记录|entries/ }).waitFor({ timeout: 15000 })
+  if (unresponsiveStartRead) {
+    await browser.worker.evaluate(() => globalThis.__strideDiagnosticStartDelay.release())
+    assert.match(await enable.innerText(), /停止并清空|Stop and clear/)
+  }
   if (statusRace) {
     phase = 'late-status'
     assert.equal(await browser.panel.evaluate(() => window.__strideDiagnosticRace.status().delayedDeliveries), 1)
@@ -163,6 +172,7 @@ let requests=0;ctx.on('agent/request',(_p,next)=>{if(++requests>12)throw Error('
   const result = { passed: true, version, realHost: true, isolatedChrome: true, realModel, scriptedModel: !realModel, browserVersion: browser.browserVersion, nativeEnable: true, nativeStop: true, diagnosticReadCalls: dispatches.filter(v => v.name === 'browser_get_diagnostics').length, observedConsole: 'TypeError', observedHttp: 500, sensitiveSyntheticValuesAbsent: true, serverWrites: writes, originalHostUntouched: true,
     ...(statusRace ? { statusRaceInjected: true, staleStatusDidNotOverwriteStart: true, extensionObserverCopy: true } : {}),
     ...(startExpiry ? { startReplyDelayed: true, expiredStartRejected: true, lateStartNeverReenabled: true, nativeSlotCleanupConfirmed: true, newNativeEnableRequired: true, extensionObserverCopy: true } : {}),
+    ...(unresponsiveStartRead ? { exclusiveDetachBeforeOldReply: true, freshStartBeforeOldReply: true } : {}),
     ...(traceNative ? { nativeCommandObserver: true, nativeCommandTrace: await browser.worker.evaluate(() => globalThis.__strideDiagnosticNativeTrace) } : {}),
     sourceExtensionDigest, candidateUnchangedDuringRun: true,
     hostBundleSha256: createHash('sha256').update(await readFile(join(repo, 'packages/browser/bridge-browser/lib/index.js'))).digest('hex'), extensionBundleSha256: createHash('sha256').update(await readFile(join(repo, 'extensions/dsh-browser/dist/background.js'))).digest('hex'), evidenceDirectory: artifacts.slice(base.length + 1) }

@@ -1,6 +1,7 @@
 /** Chrome transport: automatic new pages and authorized visual connections. */
 import type { TabFrame } from './frames.ts'
 import { MAX_SCREENSHOT_BASE64, type VisualObservation } from '@eilyeee/dsh-browser-stride/src/visual.ts'
+import { readWithin } from './native-wait.ts'
 
 interface Session {
   current: () => boolean
@@ -14,6 +15,7 @@ interface VisualConnection { valid: boolean; attached: boolean; current: () => b
 interface Evaluation { result?: { value?: unknown }; exceptionDetails?: unknown }
 const CONTROLLER_WORLD = 'DSH Stride controller'
 const VISUAL_CAPTURES_KEY = 'dshVisualCaptures'
+const FRAME_READ_TIMEOUT_MS = 8_000
 
 /** Request authority is checked at the transport's actual delivery boundary. */
 export interface PageDispatch {
@@ -27,6 +29,7 @@ export interface ReadDebugLease {
   contexts(): Array<{ id: number; frameId: string; uniqueId: string }>
   command<T>(method: ReadDebugCommand, params?: object): Promise<T>
   subscribe(listener: (method: string, params?: Record<string, unknown>) => void): () => void
+  detachIfExclusive(): Promise<boolean>
   release(): Promise<void>
 }
 export class PageDispatchRevoked extends Error {
@@ -250,6 +253,16 @@ export class DebuggerPages {
       throw new PageDispatchRevoked()
     }
     if (capture !== undefined) (capture.readers ??= new Set()).add(owner)
+    let releasing: Promise<void> | undefined
+    const release = (): Promise<void> => {
+      if (releasing !== undefined) return releasing
+      active = false
+      for (const stop of [...subscriptions]) stop()
+      capture?.readers?.delete(owner)
+      releasing = capture !== undefined && !capture.visualUsed && capture.readers?.size === 0 && this.captures.get(tabId) === capture
+        ? this.detachVisual(tabId) : Promise.resolve()
+      return releasing
+    }
     return {
       current: owned,
       contexts: () => !owned() ? [] : [...((session ?? capture)?.defaultContexts ?? new Map())].map(([id, value]) => ({ id, ...value })),
@@ -272,13 +285,14 @@ export class DebuggerPages {
         subscriptions.add(stop)
         return stop
       },
-      release: async () => {
-        if (!active) return
-        active = false
-        for (const stop of [...subscriptions]) stop()
-        capture?.readers?.delete(owner)
-        if (capture !== undefined && !capture.visualUsed && capture.readers?.size === 0 && this.captures.get(tabId) === capture) await this.detachVisual(tabId)
+      detachIfExclusive: async () => {
+        if (!active || session !== undefined || capture === undefined || capture.visualUsed
+          || this.captures.get(tabId) !== capture || capture.readers?.size !== 1 || !capture.readers.has(owner)) return false
+        // Release synchronously withdraws this owner before starting detach.
+        await release()
+        return true
       },
+      release,
     }
   }
   /** Only already-authorized native targets; never the currently visible personal tab. */
@@ -341,8 +355,9 @@ export class DebuggerPages {
     this.allowed(tabId, session)
     return session
   }
-  private async frame(tabId: number, session: Session): Promise<Frame> {
-    const result = await this.command<{ frameTree: { frame: Frame } }>(tabId, session, 'Page.getFrameTree')
+  private async frame(tabId: number, session: Session, signal?: AbortSignal): Promise<Frame> {
+    const result = await readWithin(FRAME_READ_TIMEOUT_MS,
+      () => this.command<{ frameTree: { frame: Frame } }>(tabId, session, 'Page.getFrameTree'), signal)
     if (!/^https?:\/\//i.test(result.frameTree.frame.url)) throw new Error('Only HTTP(S) pages can be controlled.')
     return result.frameTree.frame
   }
@@ -406,22 +421,27 @@ export class DebuggerPages {
     return response.result?.value
   }
   async ready(tabId: number, previousDocumentId: string | undefined, signal: AbortSignal, timeoutMs: number): Promise<boolean> {
-    const deadline = Date.now() + timeoutMs
-    while (!signal.aborted && Date.now() < deadline && this.has(tabId)) {
-      try {
-        const session = this.session(tabId)
-        const frame = await this.frame(tabId, session)
-        if (`${frame.id}:${frame.loaderId}` !== previousDocumentId) {
-          const uniqueContextId = await this.context(tabId, session, frame)
-          const state = await this.command<Evaluation>(tabId, session, 'Runtime.evaluate', {
-            uniqueContextId, expression: 'document.readyState', returnByValue: true,
-          })
-          if (state.result?.value === 'interactive' || state.result?.value === 'complete') return !signal.aborted
+    return readWithin(timeoutMs, async bounded => {
+      while (!bounded.aborted && this.has(tabId)) {
+        try {
+          const session = this.session(tabId)
+          const frame = await this.frame(tabId, session, bounded)
+          bounded.throwIfAborted()
+          if (`${frame.id}:${frame.loaderId}` !== previousDocumentId) {
+            const uniqueContextId = await this.context(tabId, session, frame)
+            bounded.throwIfAborted()
+            const state = await this.command<Evaluation>(tabId, session, 'Runtime.evaluate', {
+              uniqueContextId, expression: 'document.readyState', returnByValue: true,
+            })
+            if (state.result?.value === 'interactive' || state.result?.value === 'complete') return !bounded.aborted
+          }
+        } catch { /* Navigation can destroy an execution context; continue only within the readiness budget. */ }
+        if (!bounded.aborted) {
+          await new Promise<void>(resolve => { setTimeout(resolve, 50) })
         }
-      } catch { /* navigation can destroy an execution context; never replay an action */ }
-      await new Promise<void>(resolve => { setTimeout(resolve, 50) })
-    }
-    return false
+      }
+      return false
+    }, signal).catch(() => false)
   }
 }
 

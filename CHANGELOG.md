@@ -42,6 +42,12 @@ package versions currently identify development builds, not supported releases.
 
 ### Fixed
 
+- Development build 0.1.34 bounds Chrome frame discovery and page readiness
+  reads. A confirmed open or navigation can report success when its optional
+  snapshot takes more than 2.5 seconds. Expiry of a diagnostic start can retire
+  its exclusive debugger attachment after Chrome confirms detach. A new
+  explicit start remains necessary, and shared attachments retain their owner.
+
 - Development build 0.1.33 keeps an unanswered managed write tied to its
   original tab when the same paired Chrome session reconnects, including after
   a Host restart. Another managed task stays queued or paused until the write

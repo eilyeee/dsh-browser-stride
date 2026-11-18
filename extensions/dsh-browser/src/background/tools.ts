@@ -26,6 +26,7 @@ import { waitForNextDocumentReady } from './navigation.ts'
 import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
 import { getUiLocale } from '../i18n.ts'
 import { debuggerPages, sendPageMessage, PageDispatchRevoked, type PageDispatch } from './debugger-pages.ts'
+import { readWithin } from './native-wait.ts'
 import type { CreatedPageAccess } from './page-access.ts'
 import { selectionAttemptSummary, type SelectionAttemptStatus } from './selection-attempts.ts'
 
@@ -513,6 +514,8 @@ function stripDuplicateSnapshotPrompt(status: string): string {
   return status.replace(/ Call browser_snapshot again after (?:navigation settles|the page loads|it loads)\.$/, '')
 }
 
+const NAVIGATION_PREVIEW_TIMEOUT_MS = 2_500
+
 async function snapshotAfterNavigation(
   tabId: number,
   call: ToolCall,
@@ -523,19 +526,22 @@ async function snapshotAfterNavigation(
   const prefix = `${stripDuplicateSnapshotPrompt(status)}\n${NAVIGATION_SNAPSHOT_GUIDANCE}`
   const snapshotMaxChars = budget.maxChars - prefix.length - 2
   if (snapshotMaxChars < 500) return undefined
-  const frames = await listTabFrames(tabId, undefined)
-  if (targetStillAllowed?.() === false) return targetChanged()
-  const answer = await snapshotAllFrames(
-    tabId,
-    frames,
-    { ...call, name: 'browser_snapshot', args: {} },
-    { ...budget, maxChars: snapshotMaxChars },
-    targetStillAllowed,
-  )
-  const snapshot = answerText(answer)
-  if (snapshot === undefined) return undefined
-  const coverage = (answer.result as { coverage?: unknown }).coverage
-  return { ok: true, result: { text: `${prefix}\n\n${snapshot}`, ...(coverage === undefined ? {} : { coverage }) } }
+  return readWithin(NAVIGATION_PREVIEW_TIMEOUT_MS, async deadline => {
+    const current = () => !deadline.aborted && targetStillAllowed?.() !== false
+    const frames = await listTabFrames(tabId, undefined)
+    if (!current()) return targetChanged()
+    const answer = await snapshotAllFrames(
+      tabId,
+      frames,
+      { ...call, name: 'browser_snapshot', args: {} },
+      { ...budget, maxChars: snapshotMaxChars },
+      current,
+    )
+    const snapshot = answerText(answer)
+    if (snapshot === undefined) return undefined
+    const coverage = (answer.result as { coverage?: unknown }).coverage
+    return { ok: true, result: { text: `${prefix}\n\n${snapshot}`, ...(coverage === undefined ? {} : { coverage }) } }
+  })
 }
 
 async function dispatchOnce(

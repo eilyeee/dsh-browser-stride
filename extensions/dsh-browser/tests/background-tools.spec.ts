@@ -1022,6 +1022,38 @@ describe('dispatchToolCall', () => {
 })
 
 describe('dispatchOpenTab', () => {
+  it('reports the committed background tab when its optional preview never returns', async () => {
+    vi.useFakeTimers()
+    try {
+      const { dispatchOpenTab } = await import('../src/background/tools.ts')
+      const created = { id: 77, windowId: 3, url: 'https://docs.example/' }
+      let finishFrames!: (frames: unknown[]) => void
+      const getAllFrames = vi.fn(() => new Promise<unknown[]>(resolve => { finishFrames = resolve }))
+      const sendMessage = vi.fn()
+      const remove = vi.fn()
+      const bind = vi.fn(() => true)
+      const commit = vi.fn()
+      vi.stubGlobal('chrome', {
+        tabs: { create: vi.fn(async () => created), update: vi.fn(async () => created), get: vi.fn(async () => created), sendMessage, remove },
+        webNavigation: { getAllFrames },
+        runtime: { onMessage: { addListener: vi.fn(), removeListener: vi.fn() } },
+      })
+      let observed: ToolAnswer | undefined
+      void dispatchOpenTab({ id: 'open-preview-timeout', name: 'browser_open_tab', args: { url: created.url, active: false } },
+        3, 'auto', undefined, async () => 'approved', undefined, bind, () => true, commit, false, async () => {})
+        .then(value => { observed = value })
+      await vi.advanceTimersByTimeAsync(2_500)
+      expect(getAllFrames).toHaveBeenCalledOnce()
+      expect(observed).toMatchObject({ ok: true, result: { text: expect.stringContaining('Opened a new background tab') } })
+      expect(bind).toHaveBeenCalledOnce()
+      expect(commit).toHaveBeenCalledOnce()
+      expect(remove).not.toHaveBeenCalled()
+      finishFrames([{ frameId: 0, parentFrameId: -1, documentId: 'late-page', url: created.url }])
+      await vi.advanceTimersByTimeAsync(0)
+      expect(sendMessage).not.toHaveBeenCalled()
+    } finally { vi.useRealTimers() }
+  })
+
   it('creates a blank tab, navigates after arming readiness, rebinds, and snapshots', async () => {
     const { dispatchOpenTab } = await import('../src/background/tools.ts')
     const runtimeListeners = new Set<(message: unknown, sender: chrome.runtime.MessageSender) => void>()

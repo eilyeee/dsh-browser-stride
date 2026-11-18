@@ -30,19 +30,22 @@ function fixture() {
   const pages = new DebuggerPages()
   return { pages, attach, detach, get, commands, event, cache, navigate: () => { loader = 'document-b' }, disconnect: () => detached({ tabId: 42 }) }
 }
-afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
+afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 describe('shared read debugger lease', () => {
   it('releases its temporary connection but never a visual or automatic owner', async () => {
     const h = fixture()
     const first = await h.pages.acquireReadLease(42, () => true, () => true)
+    await expect(first.detachIfExclusive()).resolves.toBe(true)
     await first.release(); expect(h.detach).toHaveBeenCalledTimes(1)
     const second = await h.pages.acquireReadLease(42, () => true, () => true)
     await h.pages.prepareViewportCapture(42, () => true, () => true)
+    await expect(second.detachIfExclusive()).resolves.toBe(false)
     await second.release(); expect(h.detach).toHaveBeenCalledTimes(1)
     await h.pages.detachVisual(42)
     await h.pages.attachCreated(42, () => true)
     const automatic = await h.pages.acquireReadLease(42, () => true, () => true)
+    await expect(automatic.detachIfExclusive()).resolves.toBe(false)
     await automatic.command('Runtime.disable'); await automatic.release()
     expect(h.pages.has(42)).toBe(true)
     expect(h.commands.mock.calls.some(([, method]) => method === 'Runtime.disable')).toBe(false)
@@ -75,6 +78,56 @@ describe('shared read debugger lease', () => {
 })
 
 describe('new-tab debugger transport', () => {
+  it('bounds a frame lookup with no native reply and allows a new explicit observation', async () => {
+    vi.useFakeTimers()
+    const h = fixture()
+    await h.pages.attachCreated(42, () => true)
+    h.commands.mockImplementationOnce(() => new Promise(() => {}))
+    let failure: unknown
+    void h.pages.frames(42).catch(error => { failure = error })
+    await vi.advanceTimersByTimeAsync(8_000)
+    expect(failure).toMatchObject({ message: 'Chrome did not respond while reading the page.' })
+    expect(h.detach).not.toHaveBeenCalled()
+    await expect(h.pages.frames(42)).resolves.toMatchObject([{ documentId: 'main:document-a' }])
+  })
+
+  it('respects the whole document readiness budget even if a native read never replies', async () => {
+    vi.useFakeTimers()
+    const h = fixture()
+    await h.pages.attachCreated(42, () => true)
+    h.commands.mockImplementationOnce(() => new Promise(() => {}))
+    let ready: boolean | undefined
+    void h.pages.ready(42, undefined, new AbortController().signal, 900).then(value => { ready = value })
+    await vi.advanceTimersByTimeAsync(900)
+    expect(ready).toBe(false)
+    expect(h.commands.mock.calls.filter(([, method]) => method === 'Page.getFrameTree')).toHaveLength(1)
+    expect(h.detach).not.toHaveBeenCalled()
+  })
+
+  it('keeps a dispatched mutation pending past the read deadline', async () => {
+    vi.useFakeTimers()
+    const h = fixture()
+    await h.pages.attachCreated(42, () => true)
+    const original = h.commands.getMockImplementation()!
+    let completeWrite!: (value: { result: { value: { ok: boolean } } }) => void
+    h.commands.mockImplementation((target, method, params) => {
+      if (method === 'Runtime.evaluate' && params?.expression?.startsWith('globalThis.__strideDebuggerAction(')) {
+        return new Promise(resolve => { completeWrite = resolve })
+      }
+      return original(target, method, params)
+    })
+    const commit = vi.fn()
+    const outcome = vi.fn()
+    const pending = h.pages.send(42, { type: 'DSH_ACTION', action: 'browser_click' }, undefined, { commit })
+      .then(outcome, outcome)
+    await vi.advanceTimersByTimeAsync(8_001)
+    expect(commit).toHaveBeenCalledOnce()
+    expect(outcome).not.toHaveBeenCalled()
+    completeWrite({ result: { value: { ok: true } } })
+    await pending
+    expect(outcome).toHaveBeenCalledExactlyOnceWith({ ok: true })
+  })
+
   it('captures an explicitly authorized native target without querying or activating the human tab', async () => {
     const h = fixture()
     h.commands.mockResolvedValueOnce({ data: '/9j/2Q==' } as never)
