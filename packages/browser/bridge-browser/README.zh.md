@@ -129,6 +129,8 @@ ctx.browserTasks.registerVerifier(runId, verifier) // 仅排队期间注册
 
 后台若以更新时间标识版本，可把 `baselineVersion` 设为带时区的 ISO 8601 日期时间，例如 `2026-06-01T08:00:00Z`。`versionPath` 指向同类型的响应字段。核验器按毫秒比较实际时刻，要求后台返回的记录更新时间晚于操作前记录的值。
 
+如果后台的记录 ID 是有符号 64 位整数，可配置 `{ path: ['record', 'id'], equalsInt64: '9007199254740993' }`。读取回调应返回后台的原始 JSON 文本，避免 JavaScript 数字丢失精度。核验器精确匹配 JSON 整数或同样的十进制字符串。`equals` 会拒绝超出 JavaScript 安全整数范围的数字配置。记录 ID 匹配后，仍须由集成方核实适用的账号和租户。
+
 已有页面须先在当前对话的「DSH 控制分组」明确选中；另一对话的目标不会自动继承。验收脚本同样真实点击该选页按钮，再点击开始，不跳过这层绑定。
 
 可选的 `STRIDE_REAL_MODEL=1 pnpm run test:smoke-task` 使用临时 Host Home、临时浏览器配置和本地合成表单。`STRIDE_MODEL_PATCH` 可指定私人模型及预设配置，`STRIDE_MODEL_CREDENTIALS` 可指定已保存的凭据文件；凭据以私有权限复制到临时 Home，结束后清理，不复制原有会话或浏览器配置。检查会调用已认证的 DSH Web 命令接口并操作真实扩展控件，不代表桌面端或 CLI 验收，也不以模型输出判断成功。

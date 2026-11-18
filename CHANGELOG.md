@@ -12,6 +12,8 @@ package versions currently identify development builds, not supported releases.
 - Trusted readback integrations can supply an explicit-offset ISO 8601
   timestamp as their pre-action version. The verifier compares instants at
   millisecond precision and requires a strictly newer value of the same type.
+- Trusted readback checks can verify signed 64-bit record IDs against their
+  exact decimal representation in the original backend JSON.
 
 - Development build 0.1.35 shows the version reported by the connected
   extension in DSH's browser pairing settings. Older extensions still

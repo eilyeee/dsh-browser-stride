@@ -5,7 +5,21 @@ import type { BrowserTaskVerifier } from './task-runtime.ts'
 
 const segment = z.string().min(1).max(80).refine(value => !['__proto__', 'prototype', 'constructor'].includes(value))
 const path = z.array(segment).min(1).max(12)
-const primitive = z.union([z.string().max(512), z.number().finite(), z.boolean(), z.null()])
+const primitive = z.union([
+  z.string().max(512),
+  z.number().finite().refine(value => !Number.isInteger(value) || Number.isSafeInteger(value)),
+  z.boolean(),
+  z.null(),
+])
+const int64 = z.string().refine(value => {
+  if (!/^(?:0|-?[1-9][0-9]{0,18})$/.test(value)) return false
+  const integer = BigInt(value)
+  return integer >= -9223372036854775808n && integer <= 9223372036854775807n
+})
+const fieldCheck = z.union([
+  z.strictObject({ path, equals: primitive }),
+  z.strictObject({ path, equalsInt64: int64 }),
+])
 const versionValue = z.union([
   z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
   z.iso.datetime({ offset: true }).max(64),
@@ -13,7 +27,7 @@ const versionValue = z.union([
 const configSchema = z.strictObject({
   targetUrl: z.string().max(2048), contextKey: z.string().min(1).max(200),
   versionPath: path, baselineVersion: versionValue,
-  checks: z.array(z.strictObject({ path, equals: primitive })).min(1).max(32),
+  checks: z.array(fieldCheck).min(1).max(32),
   timeoutMs: z.number().int().min(1).max(15_000).default(10_000),
 })
 export interface IndependentReadback {
@@ -42,6 +56,33 @@ function at(value: unknown, keys: readonly string[]): unknown {
   return value
 }
 
+type NumberSources = WeakMap<object, Map<string, string>>
+
+function parseReadback(body: string, numberSources: NumberSources | undefined): unknown {
+  if (numberSources === undefined) return JSON.parse(body)
+  return JSON.parse(body, function (this: object, key: string, value: unknown, context?: { source: string }) {
+    if (typeof value !== 'number' || context === undefined) return value
+    // Preserve the literal even for parsed safe integers, which may be rounded fractions.
+    let fields = numberSources.get(this)
+    if (fields === undefined) {
+      fields = new Map()
+      numberSources.set(this, fields)
+    }
+    fields.set(key, context.source)
+    return value
+  })
+}
+
+function matchesField(body: unknown, check: z.output<typeof fieldCheck>, numberSources: NumberSources | undefined): boolean {
+  if ('equals' in check) return at(body, check.path) === check.equals
+  const key = check.path.at(-1)!
+  const parent = at(body, check.path.slice(0, -1))
+  if (typeof parent !== 'object' || parent === null) return false
+  const value = at(parent, [key])
+  if (typeof value === 'string') return value === check.equalsInt64
+  return typeof value === 'number' && numberSources?.get(parent)?.get(key) === check.equalsInt64
+}
+
 function comparableVersion(value: number | string): number {
   return typeof value === 'number' ? value : Date.parse(value)
 }
@@ -60,6 +101,7 @@ export function createReadbackVerifier(input: ReadbackVerifierConfig): BrowserTa
   const baseline = comparableVersion(config.baselineVersion)
   if (expectedTarget === undefined || !Number.isSafeInteger(baseline)) throw new Error('readback-config-invalid')
   const acceptsTarget = (url: string) => target(url) === expectedTarget
+  const needsNumberSources = config.checks.some(check => 'equalsInt64' in check)
   return Object.freeze({ acceptsTarget, verify: async ({ run, url, signal }: Parameters<BrowserTaskVerifier['verify']>[0]) => {
     if (signal.aborted || !acceptsTarget(url)) return undefined
     const startedAt = Date.now(), timeout = new AbortController()
@@ -78,10 +120,11 @@ export function createReadbackVerifier(input: ReadbackVerifierConfig): BrowserTa
       })]))
       if (bounded.aborted || !result.success || result.data.contextKey !== config.contextKey
         || result.data.observedAt < startedAt || result.data.observedAt > Date.now()) return undefined
-      const body: unknown = JSON.parse(result.data.body)
+      const numberSources: NumberSources | undefined = needsNumberSources ? new WeakMap() : undefined
+      const body = parseReadback(result.data.body, numberSources)
       const version = versionValue.safeParse(at(body, config.versionPath))
       if (!version.success || typeof version.data !== typeof config.baselineVersion || !(comparableVersion(version.data) > baseline)
-        || config.checks.some(check => at(body, check.path) !== check.equals)) return undefined
+        || !config.checks.every(check => matchesField(body, check, numberSources))) return undefined
       return { url: expectedTarget, artifactRefs: [result.data.artifactRef, `readback-sha256:${createHash('sha256').update(result.data.body).digest('hex')}`] }
     } catch { return undefined }
     finally { clearTimeout(timer); if (aborted !== undefined) bounded.removeEventListener('abort', aborted) }

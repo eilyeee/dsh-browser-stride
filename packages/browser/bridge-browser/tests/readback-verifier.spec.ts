@@ -49,6 +49,60 @@ describe('independent versioned readback', () => {
     expect(h.read).not.toHaveBeenCalled()
   })
 
+  it.each([
+    ['9007199254740993', '9007199254740993'],
+    ['"9007199254740993"', '9007199254740993'],
+    ['-9223372036854775808', '-9223372036854775808'],
+    ['9223372036854775807', '9223372036854775807'],
+    ['0', '0'],
+  ])('checks %s as an exact record ID alongside a fresh timestamp and field value', async (id, expected) => {
+    const h = setup()
+    h.result.body = `{"updateTime":"2026-11-18T09:00:00.501Z","records":[{"id":${id},"enabled":true}]}`
+    const verifier = createReadbackVerifier({
+      ...h.config, versionPath: ['updateTime'], baselineVersion: baselineTime,
+      checks: [
+        { path: ['records', '0', 'id'], equalsInt64: expected },
+        { path: ['records', '0', 'enabled'], equals: true },
+      ],
+    })
+    const evidence = await verifier.verify({ run, url, signal: h.controller.signal })
+    expect(evidence).toMatchObject({ url })
+    expect(h.read).toHaveBeenCalledOnce()
+    expect(JSON.stringify(evidence)).not.toContain('"records"')
+  })
+
+  it.each([
+    ['9007199254740992', '9007199254740993'],
+    ['9007199254740991.1', '9007199254740991'],
+    ['1e0', '1'],
+    ['-0', '0'],
+    ['"01"', '1'],
+    ['true', '1'],
+  ])('does not match record ID %s to %s', async (id, expected) => {
+    const h = setup()
+    h.result.body = `{"version":8,"record":{"id":${id}}}`
+    const verifier = createReadbackVerifier({ ...h.config, checks: [{ path: ['record', 'id'], equalsInt64: expected }] })
+    expect(await verifier.verify({ run, url, signal: h.controller.signal })).toBeUndefined()
+    expect(h.read).toHaveBeenCalledOnce()
+  })
+
+  it.each(['9223372036854775808', '-9223372036854775809', '+1', '-0', '01', '1.0', '1e0', '1\n'])(
+    'rejects a noncanonical or out-of-range int64 expectation %j',
+    equalsInt64 => {
+      const h = setup()
+      expect(() => createReadbackVerifier({ ...h.config, checks: [{ path: ['record', 'id'], equalsInt64 }] }))
+        .toThrow('readback-config-invalid')
+      expect(h.read).not.toHaveBeenCalled()
+    },
+  )
+
+  it('requires unsafe integer expectations to use an exact decimal string', () => {
+    const h = setup()
+    expect(() => createReadbackVerifier({ ...h.config, checks: [{ path: ['record', 'id'], equals: Number.MAX_SAFE_INTEGER + 1 }] }))
+      .toThrow('readback-config-invalid')
+    expect(h.read).not.toHaveBeenCalled()
+  })
+
   it('reads once in the captured scope and records only artifact identity and a body digest', async () => {
     const h = setup(), evidence = await h.verify()
     expect(h.read).toHaveBeenCalledExactlyOnceWith({ runId: run.runId, controlRevision: 2, targetUrl: url, signal: expect.any(AbortSignal) })

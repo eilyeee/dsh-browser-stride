@@ -112,6 +112,8 @@ In 0.1.28, trusted integrations may use the exported `createReadbackVerifier` he
 
 Backends that version records by modification time can supply an ISO 8601 datetime with an explicit offset as `baselineVersion`, such as `2026-06-01T08:00:00Z`. The version field returned by the reader must use the same type and represent a later instant at millisecond precision.
 
+For signed 64-bit record IDs, use a check such as `{ path: ['record', 'id'], equalsInt64: '9007199254740993' }`. Pass the backend's original JSON text to preserve numeric precision. The check matches the exact canonical decimal, either as a JSON integer or as a string. `equals` rejects integer expectations outside JavaScript's safe integer range. Record ID checks still require separate account and tenant verification where applicable.
+
 Select an existing authorized page explicitly for this conversation before starting; a target from another conversation is not inherited. The smoke uses the actual group-page button before native start.
 
 The opt-in `STRIDE_REAL_MODEL=1 pnpm run test:smoke-task` uses disposable Host/browser homes and a synthetic local form. `STRIDE_MODEL_PATCH` may name a private DSH model/preset patch; `STRIDE_MODEL_CREDENTIALS` may name a saved credentials file copied with private permissions into the temporary home and removed on exit. No saved user sessions or browser profiles are copied. This check invokes the authenticated DSH Web command endpoint and the real extension controls; it is not Desktop or CLI acceptance. Model outputs are not used as its result oracle.

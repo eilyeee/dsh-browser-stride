@@ -1,5 +1,6 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import { createReadbackVerifier } from '../../packages/browser/bridge-browser/src/readback-verifier.ts'
+import { taskSiteBaseline } from './task-site.mjs'
 
 export const name = 'stride-task-runtime-probe'
 export const inject = ['browserRuns', 'browserTasks', 'agents']
@@ -35,8 +36,13 @@ export function apply(ctx, config) {
     if (run.state === 'queued' && !registered.has(run.runId)) {
       registered.add(run.runId)
       ctx.browserTasks.registerVerifier(run.runId, createReadbackVerifier({
-        targetUrl: expected.url, contextKey: 'synthetic-setting', versionPath: ['version'], baselineVersion: 0,
-        checks: [{ path: ['enabled'], equals: true }, { path: ['saved'], equals: true }],
+        targetUrl: expected.url, contextKey: 'synthetic-setting',
+        versionPath: ['updateTime'], baselineVersion: taskSiteBaseline.updateTime,
+        checks: [
+          { path: ['id'], equalsInt64: taskSiteBaseline.id },
+          { path: ['enabled'], equals: true },
+          { path: ['saved'], equals: true },
+        ],
         read: async ({ signal }) => {
           const response = await fetch(expected.verificationUrl ?? new URL('/state', expected.url), { signal, cache: 'no-store' })
           if (!response.ok) throw Error('readback-unavailable')

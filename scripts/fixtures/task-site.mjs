@@ -1,5 +1,7 @@
 import { createServer } from 'node:http'
 
+export const taskSiteBaseline = Object.freeze({ id: '9007199254740993', updateTime: '2026-01-01T00:00:00.000Z' })
+
 /** Synthetic business state belongs to this test server, never model output. */
 export async function startTaskSite({ hostname = '127.0.0.1' } = {}) {
   let state = { enabled: false, saved: false }, version = 0
@@ -7,7 +9,12 @@ export async function startTaskSite({ hostname = '127.0.0.1' } = {}) {
     response.setHeader('cache-control', 'no-store')
     if (request.url === '/state' && request.method === 'GET') {
       response.setHeader('content-type', 'application/json')
-      response.end(JSON.stringify({ ...state, version, contextKey: 'synthetic-setting' })); return
+      response.end(JSON.stringify({
+        ...state, version, contextKey: 'synthetic-setting',
+        id: JSON.rawJSON(taskSiteBaseline.id),
+        updateTime: new Date(Date.parse(taskSiteBaseline.updateTime) + version).toISOString(),
+      }))
+      return
     }
     if (request.url === '/save' && request.method === 'POST') {
       try {

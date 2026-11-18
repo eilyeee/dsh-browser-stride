@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
-import { startTaskSite } from '../fixtures/task-site.mjs'
+import { startTaskSite, taskSiteBaseline } from '../fixtures/task-site.mjs'
 import { apply } from '../fixtures/task-runtime-probe.mjs'
 
 test('the task fixture verifies persisted state over loopback while pinning the browser test domain', async t => {
@@ -45,7 +45,12 @@ test('the task fixture verifies persisted state over loopback while pinning the 
   assert.equal(evidence.url, site.url)
   assert.equal(evidence.artifactRefs[0], 'readback_fixture_1')
   assert.match(evidence.artifactRefs[1], /^readback-sha256:[a-f0-9]{64}$/)
-  assert.deepEqual(JSON.parse(await readFile(`${result}.readback_fixture_1.json`, 'utf8')), { enabled: true, saved: true, version: 1, contextKey: 'synthetic-setting' })
+  const artifact = await readFile(`${result}.readback_fixture_1.json`, 'utf8')
+  const record = JSON.parse(artifact, (key, value, context) => key === 'id' ? context.source : value)
+  assert.deepEqual(record, {
+    enabled: true, saved: true, version: 1, contextKey: 'synthetic-setting',
+    id: taskSiteBaseline.id, updateTime: '2026-01-01T00:00:00.001Z',
+  })
 })
 
 for (const mode of ['disconnectOnce', 'targetLossOnce']) test(`the ${mode} fixture holds just one completed snapshot until its original tool signal aborts`, async t => {
