@@ -170,13 +170,21 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
         } finally { await cdp.detach() }
       },
       /** Keep installation data while replacing the whole browser/worker lifetime. */
-      async restart({ connected = true } = {}) {
+      async restart({ connected = true, reloadExtension = false } = {}) {
         const targetUrl = target.url()
         await context.close()
         context = await launch()
         const restartedWorker = context.serviceWorkers().find(value => new URL(value.url()).host === extensionId)
           ?? await context.waitForEvent('serviceworker', { timeout: 15000 })
-        await restartedWorker.evaluate(() => chrome.sidePanel.setOptions({ enabled: false }))
+        if (reloadExtension) {
+          const manager = await context.newPage()
+          try {
+            await manager.goto('chrome://extensions/')
+            const developerMode = manager.locator('extensions-toolbar').locator('#devMode')
+            if (!await developerMode.evaluate(toggle => toggle.checked)) await developerMode.click()
+            await manager.locator(`extensions-item[id=${JSON.stringify(extensionId)}]`).locator('#dev-reload-button').click({ timeout: 15000 })
+          } finally { await manager.close() }
+        } else await restartedWorker.evaluate(() => chrome.sidePanel.setOptions({ enabled: false }))
         target = await context.newPage()
         target.setDefaultTimeout(actionTimeoutMs)
         await target.goto(targetUrl, { waitUntil: 'domcontentloaded' })
@@ -187,6 +195,7 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
         if (connected) await panel.locator('.connection .dot.connected').waitFor({ state: 'visible', timeout: connectTimeoutMs })
         worker = context.serviceWorkers().find(value => new URL(value.url()).host === extensionId)
           ?? await context.waitForEvent('serviceworker', { timeout: 15000 })
+        if (reloadExtension) await worker.evaluate(() => chrome.sidePanel.setOptions({ enabled: false }))
         await panel.evaluate(() => { window.__dshBenchmarkPort = chrome.runtime.connect({ name: 'dsh-panel' }) })
         await target.bringToFront()
         return { context, worker, target, panel }
