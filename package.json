@@ -1,6 +1,6 @@
 {
   "name": "dsh-browser-stride",
-  "version": "0.1.36",
+  "version": "0.1.37",
   "description": "DSH Stride (寻行): product branch of the dsh browser bridge and controlled-tab Chrome/Firefox extension workspace",
   "author": "Yuxiang Lin",
   "license": "MIT",
