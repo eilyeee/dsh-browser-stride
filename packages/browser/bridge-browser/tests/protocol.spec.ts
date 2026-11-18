@@ -5,6 +5,15 @@ const execution = { kind: 'legacy' as const }
 const action = { actionId: 'act_synthetic', requestDigest: 'a'.repeat(64) }
 
 describe('parseBridgeFrame', () => {
+  it('treats the browser version as optional, bounded greeting metadata', () => {
+    const hello = { t: 'hello', token: 'synthetic', caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } }
+    for (const extensionVersion of ['0.1.35', '1.2.3.4']) {
+      expect(parseBridgeFrame(JSON.stringify({ ...hello, extensionVersion }))).toEqual({ ...hello, extensionVersion })
+    }
+    for (const extensionVersion of [undefined, null, 35, '0.1.35-rc.1', '1.2.3.4.5', '1'.repeat(40)]) {
+      expect(parseBridgeFrame(JSON.stringify({ ...hello, extensionVersion }))).toEqual(hello)
+    }
+  })
   it('allows the optional browser tab scope on a legacy-compatible greeting', () => {
     const hello = { t: 'hello', token: 'synthetic', caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } }
     expect(parseBridgeFrame(JSON.stringify(hello))).toEqual(hello)

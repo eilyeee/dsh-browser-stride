@@ -69,7 +69,7 @@ export function createPairingRequestRoute(requests: PairingRequests, self?: { st
 }
 
 /** Register through Connection.fetch, whose carrier requires an authenticated owner. */
-export function createPairingOwnerRoute(requests: PairingRequests): ConnectionFetchRoute {
+export function createPairingOwnerRoute(requests: PairingRequests, server: Pick<BridgeServer, 'browserConnectionStatus'>): ConnectionFetchRoute {
   const json = (status: number, value: unknown): Response => new Response(JSON.stringify(value), {
     status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' },
   })
@@ -89,7 +89,7 @@ export function createPairingOwnerRoute(requests: PairingRequests): ConnectionFe
         } catch { /* malformed origins fail closed */ }
         if (!sameOrigin) return json(403, { error: 'same-origin-required' })
       }
-      if (request.method === 'GET') return json(200, { requests: requests.list() })
+      if (request.method === 'GET') return json(200, { requests: requests.list(), connection: server.browserConnectionStatus() })
       if (request.method !== 'POST') return json(405, { error: 'POST-required' })
       if (request.headers.get('content-type')?.split(';', 1)[0]?.trim() !== 'application/json') return json(415, { error: 'JSON-required' })
       try {

@@ -9,6 +9,10 @@ package versions currently identify development builds, not supported releases.
 
 ### Added
 
+- Development build 0.1.35 shows the version reported by the connected
+  extension in DSH's browser pairing settings. Older extensions still
+  connect on wire v4 and appear as connected with the version unavailable.
+
 - Development build 0.1.28 adds operation time, bounded operation type and
   uncertainty reason to native review lists, without storing input values or
   deciding whether an action took effect. Changes to this context invalidate

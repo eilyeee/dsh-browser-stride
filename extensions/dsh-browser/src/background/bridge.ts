@@ -160,6 +160,7 @@ export class BridgeClient {
 
       // Authenticate: hello must be accepted before any other traffic.
       const presentedToken = this.token
+      const extensionVersion = globalThis.chrome?.runtime?.getManifest?.().version
       const offeredCaps: BridgeCaps = { textOnly: true, snapshotMaxChars: DEFAULT_SNAPSHOT_MAX_CHARS, maxInteractiveItems: 60, taskTargetLoss: true, taskPageOwnership: true, layoutMetrics: true, elementScroll: true, elementReadScope: true, snapshotBase: true, designViewZoom: true, taskNotes: true, ...(import.meta.env.EXT_TARGET === 'firefox' ? {} : { visualViewport: true, pageDiagnostics: true, manualRecovery: true }) }
       socket.send(JSON.stringify({
         t: 'hello',
@@ -167,6 +168,7 @@ export class BridgeClient {
         token: presentedToken,
         ...(this.installationId === '' ? {} : { installationId: this.installationId }),
         ...(this.browserTabScope === undefined ? {} : { browserTabScope: this.browserTabScope }),
+        ...(extensionVersion === undefined ? {} : { extensionVersion }),
         caps: offeredCaps,
       } satisfies ClientFrame))
 

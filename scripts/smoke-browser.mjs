@@ -587,6 +587,8 @@ try {
   })
   await owner.getByText('设置', { exact: true }).click()
   await owner.getByText(verificationCode, { exact: true }).waitFor()
+  const connectedVersionStatus = owner.locator('.dshBridgeConnectionStatus')
+  await connectedVersionStatus.filter({ hasText: /扩展未连接|Extension disconnected/ }).waitFor()
   await owner.getByText(verificationCode, { exact: true }).scrollIntoViewIfNeeded()
   await owner.screenshot({ path: join(uiArtifacts, 'host.png') })
   // An untrusted script click must not approve the pending request.
@@ -599,6 +601,8 @@ try {
   })
   await browser.panel.getByRole('button', { name: '返回对话', exact: true }).click()
   await browser.panel.locator('.connection .dot.connected').waitFor({ state: 'visible', timeout: 15_000 })
+  const loadedVersion = await browser.worker.evaluate(() => chrome.runtime.getManifest().version)
+  await connectedVersionStatus.getByText(loadedVersion, { exact: true }).waitFor()
   await browser.panel.reload()
   await browser.panel.locator('.connection .dot.connected').waitFor({ state: 'visible', timeout: 15_000 })
   await browser.panel.evaluate(() => { window.__dshBenchmarkPort = chrome.runtime.connect({ name: 'dsh-panel' }) })

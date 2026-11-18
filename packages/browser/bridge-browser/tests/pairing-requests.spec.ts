@@ -104,7 +104,7 @@ describe('owner-confirmed browser pairing', () => {
   it('requires a same-origin JSON decision and rejects stale confirmation', async () => {
     const { requests } = await fixture()
     const request = requests.request(installation, proof)
-    const route = createPairingOwnerRoute(requests)
+    const route = createPairingOwnerRoute(requests, { browserConnectionStatus: () => null })
     expect(route.path).toBe('/api/stride-browser-pairing')
     const decision = JSON.stringify({ requestId: request.requestId, verificationCode: request.verificationCode, decision: 'approve' })
     const make = (origin: string, contentType = 'application/json') => new Request('http://dsh.internal/api/stride-browser-pairing', {
@@ -114,5 +114,22 @@ describe('owner-confirmed browser pairing', () => {
     expect((await route.fetch(make('http://127.0.0.1:3080', 'text/plain'))).status).toBe(415)
     expect((await route.fetch(make('http://127.0.0.1:3080'))).status).toBe(200)
     expect((await route.fetch(make('http://127.0.0.1:3080'))).status).toBe(409)
+  })
+
+  it('returns current connection metadata only in the same-origin owner view', async () => {
+    const { requests } = await fixture()
+    const browserConnectionStatus = vi.fn((): { extensionVersion: string | null } | null => ({ extensionVersion: '0.1.35' }))
+    const route = createPairingOwnerRoute(requests, { browserConnectionStatus })
+    const get = (origin: string) => new Request('http://dsh.internal/api/stride-browser-pairing', {
+      headers: { host: '127.0.0.1:3080', origin },
+    })
+    expect((await route.fetch(get('https://untrusted.example'))).status).toBe(403)
+    expect(browserConnectionStatus).not.toHaveBeenCalled()
+    const response = await route.fetch(get('http://127.0.0.1:3080'))
+    expect(response.headers.get('cache-control')).toBe('no-store')
+    await expect(response.json()).resolves.toEqual({ requests: [], connection: { extensionVersion: '0.1.35' } })
+    browserConnectionStatus.mockReturnValue(null)
+    const disconnected = await route.fetch(get('http://127.0.0.1:3080'))
+    await expect(disconnected.json()).resolves.toEqual({ requests: [], connection: null })
   })
 })

@@ -220,7 +220,7 @@ export function isBrowserTabScope(value: unknown): value is string {
 /** Frames sent by the extension to the bridge plugin. */
 export type ClientFrame =
   /** First frame, within HELLO_TIMEOUT_MS of socket open. */
-  | { t: 'hello'; token: string; caps: BridgeCaps; installationId?: string; browserTabScope?: string; protocolVersion?: number }
+  | { t: 'hello'; token: string; caps: BridgeCaps; installationId?: string; browserTabScope?: string; protocolVersion?: number; extensionVersion?: string }
   /** Unary call projected by the active dsh Host adapter. */
   | { t: 'rpc'; id: string; method: string; payload: unknown }
   /** Answer or cancel a pending Host interaction waterfall. */
@@ -299,7 +299,9 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
   const frame = value as Record<string, unknown>
   if (typeof frame.t !== 'string') return undefined
   switch (frame.t) {
-    case 'hello':
+    case 'hello': {
+      const version = frame.extensionVersion
+      const extensionVersion = typeof version === 'string' && /^[0-9]{1,5}(?:\.[0-9]{1,5}){0,3}$/.test(version) ? version : undefined
       return typeof frame.token === 'string'
         && isOptionalProtocolVersion(frame.protocolVersion)
         && (frame.installationId === undefined || typeof frame.installationId === 'string')
@@ -308,8 +310,10 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
         ? { t: 'hello', token: frame.token, caps: frame.caps,
             ...(typeof frame.installationId === 'string' ? { installationId: frame.installationId } : {}),
             ...(typeof frame.browserTabScope === 'string' ? { browserTabScope: frame.browserTabScope } : {}),
-            ...(typeof frame.protocolVersion === 'number' ? { protocolVersion: frame.protocolVersion } : {}) }
+            ...(typeof frame.protocolVersion === 'number' ? { protocolVersion: frame.protocolVersion } : {}),
+            ...(extensionVersion === undefined ? {} : { extensionVersion }) }
         : undefined
+    }
     case 'rpc':
       return typeof frame.id === 'string' && typeof frame.method === 'string'
         ? { t: 'rpc', id: frame.id, method: frame.method, payload: frame.payload }

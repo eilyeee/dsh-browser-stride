@@ -350,7 +350,7 @@ function mountBridge(
   lifetime.requests = requests
   ctx.effect(() => ctx.webServer.register(createPairingRoute(pairing, server, tokenRes.token, requests)), 'bridge-browser: pairing administration')
   ctx.effect(() => ctx.webServer.register(createPairingRequestRoute(requests, { store: pairing, server })), 'bridge-browser: browser pairing requests')
-  ctx.effect(() => ctx.connection.fetch.register(createPairingOwnerRoute(requests)), 'bridge-browser: authenticated pairing approval')
+  ctx.effect(() => ctx.connection.fetch.register(createPairingOwnerRoute(requests, server)), 'bridge-browser: authenticated pairing approval')
 
   // Discovery contains no secret and is only exposed to local clients.
   const configRoute: WebRoute = {

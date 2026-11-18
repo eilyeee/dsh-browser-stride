@@ -1167,6 +1167,31 @@ describe('recorded tool dispatch', () => {
 })
 
 describe('BridgeServer', () => {
+  it('reports only the current authenticated extension version and clears it on disconnect', async () => {
+    const h = await startBridge()
+    harnesses.push(h)
+    const first = await connect(h.url)
+    const hello = { t: 'hello' as const, protocolVersion: BRIDGE_PROTOCOL_VERSION, token: TOKEN, caps: CAPS }
+    expect(h.bridge.browserConnectionStatus()).toBeNull()
+    send(first.ws, { ...hello, extensionVersion: '0.1.35' })
+    await waitFor(() => first.frames.some(frame => frame.t === 'hello.ok'))
+    expect(h.bridge.browserConnectionStatus()).toEqual({ extensionVersion: '0.1.35' })
+
+    const rejected = await connect(h.url)
+    send(rejected.ws, { ...hello, token: 'wrong-token', extensionVersion: '9.9.9' })
+    await rejected.done
+    expect(h.bridge.browserConnectionStatus()).toEqual({ extensionVersion: '0.1.35' })
+
+    const older = await connect(h.url)
+    send(older.ws, hello)
+    await waitFor(() => older.frames.some(frame => frame.t === 'hello.ok'))
+    await first.done
+    expect(h.bridge.browserConnectionStatus()).toEqual({ extensionVersion: null })
+    older.ws.close()
+    await older.done
+    expect(h.bridge.browserConnectionStatus()).toBeNull()
+  })
+
   it('reports unavailable notes to new peers without blocking ordinary RPCs or advertising support to older peers', async () => {
     const h = await startBridge({ caps: { ...CAPS, taskNotesUnavailable: true } })
     harnesses.push(h)

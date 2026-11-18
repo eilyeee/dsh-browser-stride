@@ -27,6 +27,9 @@ window.__ModuleLoader__.load({
         'pairing.title': '浏览器配对',
         'pairing.help': '先在扩展设置中点击「连接本机 DSH」，核对两端校验码一致后再确认。配对允许该浏览器访问当前 DSH 会话，以后自动重连。连接将替换当前浏览器连接，页面操作仍遵循扩展审批设置。',
         'pairing.empty': '暂无配对请求',
+        'pairing.disconnected': '扩展未连接',
+        'pairing.versionUnknown': '扩展已连接，版本未上报',
+        'pairing.currentVersion': '当前连接的扩展版本',
         'pairing.approve': '确认配对',
         'pairing.deny': '拒绝',
         'pairing.approved': '已确认，等待扩展领取凭据…',
@@ -42,6 +45,9 @@ window.__ModuleLoader__.load({
         'pairing.title': 'Browser pairing',
         'pairing.help': 'Click “Connect to local DSH” in the extension settings first. Confirm only if both codes match. Pairing grants this browser access to current DSH sessions, with automatic reconnect. Connecting replaces the current browser connection; page actions still follow extension approval settings.',
         'pairing.empty': 'No pairing requests',
+        'pairing.disconnected': 'Extension disconnected',
+        'pairing.versionUnknown': 'Extension connected, version unavailable',
+        'pairing.currentVersion': 'Connected extension version',
         'pairing.approve': 'Confirm pairing',
         'pairing.deny': 'Deny',
         'pairing.approved': 'Confirmed; waiting for the extension…',
@@ -101,24 +107,36 @@ window.__ModuleLoader__.load({
       const [status, setStatus] = React.useState('loading')
       const [copied, setCopied] = React.useState(false)
       const [requests, setRequests] = React.useState([])
+      const [browserConnection, setBrowserConnection] = React.useState(undefined)
       const [pairingError, setPairingError] = React.useState(false)
       const [deciding, setDeciding] = React.useState(false)
       const pairingPath = `${window.location.origin}/api/stride-browser-pairing`
 
       React.useEffect(() => {
         let cancelled = false
+        let timer
         const refresh = async () => {
           try {
             const response = await fetch(pairingPath, { cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(3_000) })
             if (!response.ok) throw new Error('unavailable')
             const body = await response.json()
             if (!Array.isArray(body.requests)) throw new Error('invalid response')
-            if (!cancelled) { setRequests(body.requests); setPairingError(false) }
-          } catch { if (!cancelled) setPairingError(true) }
+            if (!cancelled) {
+              setRequests(body.requests)
+              setBrowserConnection(body.connection)
+              setPairingError(false)
+            }
+          } catch {
+            if (!cancelled) {
+              setBrowserConnection(undefined)
+              setPairingError(true)
+            }
+          } finally {
+            if (!cancelled) timer = window.setTimeout(() => { void refresh() }, 2_000)
+          }
         }
         void refresh()
-        const timer = window.setInterval(() => { void refresh() }, 2_000)
-        return () => { cancelled = true; window.clearInterval(timer) }
+        return () => { cancelled = true; window.clearTimeout(timer) }
       }, [pairingPath])
 
       const decide = async (event, request, decision) => {
@@ -180,6 +198,13 @@ window.__ModuleLoader__.load({
         : status === 'error'
           ? t('bridgeAddress.unavailable')
           : address
+      const connectionStatus = browserConnection === undefined
+        ? null
+        : browserConnection === null
+          ? t('pairing.disconnected')
+          : typeof browserConnection.extensionVersion !== 'string'
+            ? t('pairing.versionUnknown')
+            : React.createElement(React.Fragment, null, t('pairing.currentVersion'), ' ', React.createElement('code', null, browserConnection.extensionVersion))
 
       return React.createElement(
         'div',
@@ -211,6 +236,7 @@ window.__ModuleLoader__.load({
         ),
         React.createElement('div', { className: 'dshBridgeAddressTitle' }, t('pairing.title')),
         React.createElement('p', { className: 'dshBridgeAddressHelp' }, t('pairing.help')),
+        connectionStatus === null ? null : React.createElement('p', { className: 'dshBridgeAddressHelp dshBridgeConnectionStatus', role: 'status' }, connectionStatus),
         pairingError ? React.createElement('p', { role: 'alert' }, t('pairing.error')) : null,
         requests.length === 0 ? React.createElement('p', { className: 'dshBridgeAddressHelp' }, t('pairing.empty')) : null,
         ...requests.map(request => React.createElement('div', { key: request.requestId, className: 'dshBridgeAddressBody' },

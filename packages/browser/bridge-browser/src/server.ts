@@ -169,6 +169,8 @@ interface ReadyConnection {
   connectionId: string
   ws: WebSocket
   installationId?: string
+  /** Reported by the running extension for the owner settings view. */
+  extensionVersion?: string
   /** Remote address captured at upgrade time (loopback gate for privileged methods). */
   remoteAddress: string | undefined
   abort: AbortController
@@ -566,6 +568,12 @@ export class BridgeServer {
     return this.current !== null
   }
 
+  browserConnectionStatus(): { extensionVersion: string | null } | null {
+    const connection = this.current
+    if (connection === null || connection.ws.readyState !== WebSocket.OPEN || connection.abort.signal.aborted) return null
+    return { extensionVersion: connection.extensionVersion ?? null }
+  }
+
   /** Disconnect a revoked installation immediately after the revocation commits. */
   revokeInstallation(installationId: string): void {
     if (this.current?.installationId === installationId) this.replaceConnection()
@@ -635,8 +643,7 @@ export class BridgeServer {
           if (helloTimer === undefined || ws.readyState !== WebSocket.OPEN) return
           clearTimeout(helloTimer)
           helloTimer = undefined
-          this.promote(ws, remoteAddress, caps, frame.installationId, result.credential,
-            this.deps.pairing === undefined ? undefined : frame.browserTabScope)
+          this.promote(ws, remoteAddress, caps, frame, result.credential)
         }, () => { ws.close(1011, 'authentication unavailable') })
         return
       }
@@ -654,7 +661,8 @@ export class BridgeServer {
   }
 
   /** Promote an authenticated socket to the single active slot. */
-  private promote(ws: WebSocket, remoteAddress: string | undefined, caps: BridgeCaps, installationId?: string, credential?: string, browserTabScope?: string): void {
+  private promote(ws: WebSocket, remoteAddress: string | undefined, caps: BridgeCaps, hello: Extract<BridgeFrame, { t: 'hello' }>, credential?: string): void {
+    const { installationId, browserTabScope, extensionVersion } = hello
     this.replaceConnection()
     const abort = new AbortController()
     const ping = setInterval(() => { sendFrame(ws, { t: 'ping' }) }, this.deps.pingIntervalMs ?? PING_INTERVAL_MS)
@@ -679,8 +687,9 @@ export class BridgeServer {
     })()
     this.current = { connectionId: randomUUID(), ws, remoteAddress, abort, pump, ping, orderedSessionRpcs: new Map(), confirmedTools: new Set(), lostRunTargets: new Set(), taskTargetLoss: caps.taskTargetLoss === true, visualViewport: caps.visualViewport === true, layoutMetrics: caps.layoutMetrics === true, elementScroll: caps.elementScroll === true, elementReadScope: caps.elementReadScope === true, snapshotBase: caps.snapshotBase === true, pageDiagnostics: caps.pageDiagnostics === true, manualRecovery: caps.manualRecovery === true, designViewZoom: caps.designViewZoom === true,
       ...(caps.taskPageOwnership === true ? { taskPageOwners: new Map() } : {}),
-      ...(caps.taskPageOwnership === true && browserTabScope !== undefined ? { browserTabScope } : {}),
-      ...(installationId === undefined ? {} : { installationId }) }
+      ...(caps.taskPageOwnership === true && this.deps.pairing !== undefined && browserTabScope !== undefined ? { browserTabScope } : {}),
+      ...(installationId === undefined ? {} : { installationId }),
+      ...(extensionVersion === undefined ? {} : { extensionVersion }) }
     sendFrame(ws, { t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps, ...(credential === undefined ? {} : { credential }) })
     ws.once('close', () => {
       clearInterval(ping)
