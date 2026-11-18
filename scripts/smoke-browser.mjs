@@ -722,7 +722,7 @@ try {
   await writeFile(`${trigger}.auto-navigate`, '', { mode: 0o600 })
   await browser.panel.getByRole('button', { name: '仅允许这一次', exact: true }).click()
   await waitForPhase('auto-navigated')
-  assert.equal(automaticPage.url(), automaticNextUrl)
+  await automaticPage.waitForURL(automaticNextUrl, { waitUntil: 'domcontentloaded' })
   await browser.panel.getByRole('button', { name: '停止控制此页', exact: true }).click()
   await browser.panel.waitForFunction(async url => {
     const [created] = await chrome.tabs.query({ url })

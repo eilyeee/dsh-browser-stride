@@ -116,7 +116,7 @@ export function apply(ctx, config) {
       await writeFile(`${config.result}.phase`, JSON.stringify({ phase: 'auto-opened' }), { mode: 0o600 })
       await waitFor(() => exists(`${config.trigger}.auto-navigate`), 'cross-site automatic page navigation')
       const navigated = await tool('browser_navigate', { url: automatic.nextUrl }, agent)
-      assert.match(navigated, /Navigation completed/)
+      assert.match(navigated, /Navigation completed|Call browser_snapshot again after the page loads\./)
       await writeFile(`${config.result}.phase`, JSON.stringify({ phase: 'auto-navigated' }), { mode: 0o600 })
       await waitFor(() => exists(`${config.trigger}.auto-verified`), 'new-tab control browser verification')
       await waitFor(() => exists(`${config.trigger}.cleanup-fault`), 'new-tab cleanup fault injection')
