@@ -158,7 +158,7 @@ export class BridgeClient {
 
       // Authenticate: hello must be accepted before any other traffic.
       const presentedToken = this.token
-      const offeredCaps: BridgeCaps = { textOnly: true, snapshotMaxChars: DEFAULT_SNAPSHOT_MAX_CHARS, maxInteractiveItems: 60, taskTargetLoss: true, layoutMetrics: true, elementScroll: true, elementReadScope: true, snapshotBase: true, designViewZoom: true, taskNotes: true, ...(import.meta.env.EXT_TARGET === 'firefox' ? {} : { visualViewport: true, pageDiagnostics: true, manualRecovery: true }) }
+      const offeredCaps: BridgeCaps = { textOnly: true, snapshotMaxChars: DEFAULT_SNAPSHOT_MAX_CHARS, maxInteractiveItems: 60, taskTargetLoss: true, taskPageOwnership: true, layoutMetrics: true, elementScroll: true, elementReadScope: true, snapshotBase: true, designViewZoom: true, taskNotes: true, ...(import.meta.env.EXT_TARGET === 'firefox' ? {} : { visualViewport: true, pageDiagnostics: true, manualRecovery: true }) }
       socket.send(JSON.stringify({
         t: 'hello',
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
@@ -192,6 +192,7 @@ export class BridgeClient {
               if (frame.caps.snapshotMaxChars > offeredCaps.snapshotMaxChars || frame.caps.maxInteractiveItems > offeredCaps.maxInteractiveItems
                 || (frame.caps.visualViewport === true && offeredCaps.visualViewport !== true)
                 || (frame.caps.layoutMetrics === true && offeredCaps.layoutMetrics !== true)
+                || (frame.caps.taskPageOwnership === true && offeredCaps.taskPageOwnership !== true)
                 || (frame.caps.elementScroll === true && offeredCaps.elementScroll !== true)
                 || (frame.caps.elementReadScope === true && offeredCaps.elementReadScope !== true)
                 || (frame.caps.snapshotBase === true && offeredCaps.snapshotBase !== true)

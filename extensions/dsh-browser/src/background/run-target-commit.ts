@@ -2,7 +2,7 @@ import { BRIDGE_RUN_RETARGET_METHOD, BRIDGE_TASK_START_METHOD } from '@eilyeee/d
 import { BridgeRpcError } from './rpc.ts'
 
 interface TargetCommit {
-  runId: string; sessionId: string; expectedVersion: number; controlRevision: number; targetBinding: string; targetUrl?: string
+  runId: string; sessionId: string; expectedVersion: number; controlRevision: number; targetBinding: string; targetUrl?: string; targetTabId?: number
 }
 interface PreparedTarget { current(): boolean; discard(): void }
 type Request = (method: string, payload: unknown, options: { signal: AbortSignal; timeoutMs: number }) => Promise<unknown>

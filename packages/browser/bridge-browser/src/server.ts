@@ -23,14 +23,14 @@ import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer } from 'ws'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
 import { isRecord, type BrowserHostApi } from './host-api.ts'
-import { canonicalize, makeActionId, asRunId } from './contracts/ids.ts'
+import { canonicalize, makeActionId, asRunId, type RunId } from './contracts/ids.ts'
 import { z } from 'zod'
 import { BRIDGE_TASK_START_METHOD, BRIDGE_TASK_APPROVAL_METHOD, BRIDGE_TASK_PAGE_PREPARE_METHOD, BRIDGE_TASK_PAGE_CANCEL_METHOD, BRIDGE_TASK_TARGET_LOST_METHOD, BRIDGE_RUN_LIST_METHOD, taskPageUrl, type BrowserTaskTargetLoss } from './protocol.ts'
 import { TaskPageAdmissions, TaskPageAdmissionError } from './task-page-admissions.ts'
 import type { BrowserTaskRuntime } from './task-runtime.ts'
 import { toolCommandMaterial } from './tool-identity.ts'
 import type { ToolActionIdentity, ToolDispatchConfirmation } from './protocol.ts'
-import { transportReceipt, type BrowserDispatchLedger, type DispatchSettlement } from './dispatch-ledger.ts'
+import { requiresDispatchReview, transportReceipt, type BrowserDispatchLedger, type DispatchSettlement } from './dispatch-ledger.ts'
 import {
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
   BRIDGE_SESSION_PURGE_METHOD,
@@ -54,7 +54,7 @@ import {
 import { SessionPurgeError } from './session-purge.ts'
 import { verifyToken } from './token.ts'
 import type { PairingStore } from './pairing.ts'
-import { BrowserRunStoreError, type BrowserRunStore, type BrowserRunExecution } from './run-store.ts'
+import { BrowserRunStoreError, summarizeReviewedFacts, type BrowserRunStore, type BrowserRunExecution } from './run-store.ts'
 import { browserRunPanelRpc, browserRunPanelFailure, type RunPanelStore } from './run-panel.ts'
 import { TaskBriefError, taskBriefInputSchema, type TaskBriefStore } from './task-brief.ts'
 import { TASK_BRIEF_GET, TASK_BRIEF_SAVE, TASK_BRIEF_REVIEW, TASK_BRIEF_OPEN } from './task-brief-contract.ts'
@@ -180,6 +180,8 @@ interface ReadyConnection {
   /** Revocation can arrive before its matching native startup commits. */
   lostRunTargets: Set<string>
   taskTargetLoss: boolean
+  /** Native tab IDs are scoped to this authenticated connection. */
+  taskPageOwners?: Map<number, RunId>
   visualViewport: boolean
   layoutMetrics: boolean
   elementScroll: boolean
@@ -229,7 +231,7 @@ export class BridgeServer {
   private current: ReadyConnection | null = null
   private readonly pendingTools = new Map<string, PendingTool>()
   /** Kept across socket replacement; a new connection cannot borrow an old pin. */
-  private readonly runTargets = new Map<string, { sessionId: string; controlRevision: number; connectionId: string; id: string }>()
+  private readonly runTargets = new Map<string, { sessionId: string; controlRevision: number; connectionId: string; id: string; tabId?: number }>()
   private readonly operations = new Set<Promise<unknown>>()
   private readonly writeTurns = new Map<string | undefined, Promise<unknown>>()
   private readonly referencePermits = new Map<string, { owner: ReadyConnection; url: string; expiresAt: number; consumed?: true }>()
@@ -607,6 +609,7 @@ export class BridgeServer {
           snapshotMaxChars: Math.min(this.deps.caps.snapshotMaxChars, frame.caps.snapshotMaxChars),
           maxInteractiveItems: Math.min(this.deps.caps.maxInteractiveItems, frame.caps.maxInteractiveItems),
           ...(frame.caps.taskTargetLoss === true && this.deps.runs?.pauseLostTargetTask !== undefined ? { taskTargetLoss: true } : {}),
+          ...(frame.caps.taskPageOwnership === true && this.deps.runs !== undefined && this.deps.tasks !== undefined ? { taskPageOwnership: true } : {}),
           ...(frame.caps.taskNotes === true && this.deps.briefs !== undefined ? { taskNotes: true } : {}),
           ...(frame.caps.taskNotes === true && this.deps.caps.taskNotesUnavailable === true ? { taskNotesUnavailable: true } : {}),
           ...(this.deps.caps.release === undefined ? {} : { release: this.deps.caps.release }),
@@ -666,6 +669,7 @@ export class BridgeServer {
       }
     })()
     this.current = { connectionId: randomUUID(), ws, remoteAddress, abort, pump, ping, orderedSessionRpcs: new Map(), confirmedTools: new Set(), lostRunTargets: new Set(), taskTargetLoss: caps.taskTargetLoss === true, visualViewport: caps.visualViewport === true, layoutMetrics: caps.layoutMetrics === true, elementScroll: caps.elementScroll === true, elementReadScope: caps.elementReadScope === true, snapshotBase: caps.snapshotBase === true, pageDiagnostics: caps.pageDiagnostics === true, manualRecovery: caps.manualRecovery === true, designViewZoom: caps.designViewZoom === true,
+      ...(caps.taskPageOwnership === true ? { taskPageOwners: new Map() } : {}),
       ...(installationId === undefined ? {} : { installationId }) }
     sendFrame(ws, { t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps, ...(credential === undefined ? {} : { credential }) })
     ws.once('close', () => {
@@ -837,6 +841,7 @@ export class BridgeServer {
         const counter = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER)
         const payload = z.strictObject({ runId: id, sessionId: id, expectedVersion: counter,
           controlRevision: counter, targetBinding: id, targetUrl: z.string().max(8192).optional(),
+          targetTabId: counter.optional(),
           startTicket: id.optional(), launchUrl: z.string().max(8192).optional() }).parse(frame.payload)
         // A duplicate of an earlier committed/uncertain pin must not tell its
         // original owner that releasing that pin is safe.
@@ -845,19 +850,37 @@ export class BridgeServer {
         if (runs === undefined) throw new Error('unavailable')
         const run = runs.get(asRunId(payload.runId))
         if (run === undefined || run.sessionId !== payload.sessionId) throw new Error('foreign run')
+        const owners = conn.taskPageOwners
+        const tabId = payload.targetTabId
+        if ((owners !== undefined && run.task !== undefined) !== (tabId !== undefined)) throw new Error('native page identity required')
         if (newPage && run.state !== 'queued') throw new TaskPageAdmissionError(true)
         const attachTarget = (revision: number) => {
           if (conn.lostRunTargets.has(targetLossKey({ ...payload, controlRevision: revision }))) throw new Error('target revoked')
-          targetMayHaveChanged = true
           if (this.current !== conn || conn.abort.signal.aborted) throw new Error('connection changed')
           const previous = this.runTargets.get(run.runId)
           if (previous !== undefined && previous.controlRevision >= revision) throw new Error('target revision consumed')
           if (previous === undefined && this.runTargets.size >= 5000) throw new Error('target cache full')
+          // startTask and retargetPaused call this inside the run store's
+          // serialized update. A second native start cannot race the first.
+          const otherId = tabId === undefined ? undefined : owners?.get(tabId)
+          const other = otherId === undefined || otherId === run.runId ? undefined : runs.get(otherId)
+          if (other !== undefined && (['queued', 'running', 'stopping'].includes(other.state) || other.recoveryRequired
+            || summarizeReviewedFacts(other).pendingReconciliation.length > 0
+            || runs.dispatches.list(other.sessionId).some(row => row.runId === other.runId && row.effect === 'write'
+              && (row.state === 'prepared' || row.state === 'sent_unconfirmed' || requiresDispatchReview(row))))) {
+            throw new BrowserRunStoreError('task-page-busy')
+          }
           if (run.task !== undefined) {
             if (payload.targetUrl === undefined || this.deps.tasks === undefined) throw new Error('native target required')
+            targetMayHaveChanged = true
             this.deps.tasks.selectTarget(run.runId, payload.targetUrl)
           }
-          this.runTargets.set(run.runId, { sessionId: run.sessionId, controlRevision: revision, connectionId: conn.connectionId, id: payload.targetBinding })
+          targetMayHaveChanged = true
+          if (previous?.connectionId === conn.connectionId && previous.tabId !== undefined && previous.tabId !== tabId
+            && owners?.get(previous.tabId) === run.runId) owners.delete(previous.tabId)
+          if (tabId !== undefined) owners!.set(tabId, run.runId)
+          this.runTargets.set(run.runId, { sessionId: run.sessionId, controlRevision: revision, connectionId: conn.connectionId,
+            id: payload.targetBinding, ...(tabId === undefined ? {} : { tabId }) })
         }
         if (payload.controlRevision !== run.controlRevision) throw new Error('stale revision')
         if (payload.startTicket !== undefined) {

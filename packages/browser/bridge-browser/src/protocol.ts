@@ -186,6 +186,8 @@ export interface BridgeCaps {
   maxInteractiveItems: number
   /** Both peers support background-owned task-target revocation on this connection. */
   taskTargetLoss?: boolean
+  /** Native managed task starts identify the tab on this authenticated connection. */
+  taskPageOwnership?: boolean
   /** Bounded image observations and single-use viewport coordinate clicks. */
   visualViewport?: boolean
   /** Read-only DOM box and computed-spacing observations. */
@@ -395,6 +397,7 @@ function isCaps(value: unknown): value is BridgeCaps {
     && caps.snapshotMaxChars >= MIN_SNAPSHOT_MAX_CHARS
     && typeof caps.maxInteractiveItems === 'number' && Number.isSafeInteger(caps.maxInteractiveItems) && caps.maxInteractiveItems > 0
     && (caps.taskTargetLoss === undefined || typeof caps.taskTargetLoss === 'boolean')
+    && (caps.taskPageOwnership === undefined || typeof caps.taskPageOwnership === 'boolean')
     && (caps.visualViewport === undefined || typeof caps.visualViewport === 'boolean')
     && (caps.layoutMetrics === undefined || typeof caps.layoutMetrics === 'boolean')
     && (caps.elementScroll === undefined || typeof caps.elementScroll === 'boolean')

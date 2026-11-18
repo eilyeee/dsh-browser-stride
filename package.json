@@ -1,6 +1,6 @@
 {
   "name": "dsh-browser-stride",
-  "version": "0.1.31",
+  "version": "0.1.32",
   "description": "DSH Stride (寻行): product branch of the dsh browser bridge and controlled-tab Chrome/Firefox extension workspace",
   "author": "Yuxiang Lin",
   "license": "MIT",
@@ -20,6 +20,7 @@
     "pair:browser": "node scripts/pair-browser.mjs",
     "stride:baseline:json": "node scripts/stride-baseline.mjs --json --no-write",
     "test:smoke-task": "node scripts/smoke-browser-task.mjs",
+    "test:smoke-task-page-ownership": "node scripts/smoke-task-page-ownership.mjs",
     "test:smoke-auto-tab-model": "node scripts/smoke-auto-tab-model.mjs",
     "test:smoke-page-access": "node scripts/smoke-page-access.mjs",
     "test:smoke-layout": "node scripts/smoke-layout.mjs",

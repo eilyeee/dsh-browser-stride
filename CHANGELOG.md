@@ -42,6 +42,12 @@ package versions currently identify development builds, not supported releases.
 
 ### Fixed
 
+- Development build 0.1.32 admits one managed task per Chrome tab on a
+  compatible authenticated connection. The Host checks ownership inside the
+  start or continuation transaction. A competing task stays idle while the
+  owner runs, stops, or has writes or recovery awaiting review. Other tabs may
+  run tasks independently, including tabs that share a URL.
+
 - Development build 0.1.31 shows a sidebar target only after the background
   reports the page state for that conversation. A panel without a registered
   conversation can see existing page grants. Switching conversations or losing

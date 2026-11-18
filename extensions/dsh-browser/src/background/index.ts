@@ -2110,6 +2110,7 @@ chrome.runtime.onConnect.addListener((port) => {
                   if (prepared === undefined) throw new Error('Task page pin unavailable')
                   preparedId = prepared.id
                   return { targetUrl: boundTarget.target.url, targetBinding: prepared.id,
+                    ...(caps?.taskPageOwnership === true ? { targetTabId: boundTarget.target.tabId } : {}),
                     current: () => nativeCurrent() && access?.current() === true && prepared.current(), cleanup,
                     discard: () => runTargets.discardPrepared(prepared.id) }
                 } catch (error) {
@@ -2146,6 +2147,7 @@ chrome.runtime.onConnect.addListener((port) => {
           if (prepared === undefined) throw new Error('target unavailable')
           await commitRunTarget((method, payload, options) => boundRpc.request(method, payload, options), start ? BRIDGE_TASK_START_METHOD : BRIDGE_RUN_RETARGET_METHOD, { runId, sessionId: sid,
             expectedVersion: version, controlRevision: revision, targetBinding: prepared.id,
+            ...(caps?.taskPageOwnership === true && (start || request.task === true) ? { targetTabId: target.target.tabId } : {}),
             ...(start || request.task === true ? { targetUrl: target.target.url } : {}) },
             { current: prepared.current, discard: () => runTargets.discardPrepared(prepared.id) }, controller.signal)
           reply(true)

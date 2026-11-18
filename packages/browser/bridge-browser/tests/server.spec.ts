@@ -141,6 +141,79 @@ async function taskRpc(h: { ws: WebSocket; frames: BridgeFrame[] }, method: stri
   return h.frames.find((frame): frame is Extract<BridgeFrame, { t: 'rpc.result' }> => frame.t === 'rpc.result' && frame.id === id)!
 }
 
+async function taskPageFixture() {
+  const storage = await createRunStorage()
+  storageFixtures.push(storage)
+  const h = await startBridge({ runs: storage.store, dispatches: storage.store.dispatches,
+    tasks: { selectTarget: vi.fn(), approval: vi.fn() } })
+  harnesses.push(h)
+  const client = await connect(h.url)
+  const caps = { ...CAPS, taskPageOwnership: true }
+  send(client.ws, { t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: TOKEN, caps })
+  await waitFor(() => client.frames.some(frame => frame.t === 'hello.ok'))
+  const hello = client.frames.find(frame => frame.t === 'hello.ok')
+  const supportsOwnership = hello?.caps.taskPageOwnership === true
+  const task = (name: string) => storage.store.create({ sessionId: asSessionId(name),
+    requiredCriteriaIds: ['task-goal'], task: newBrowserTask('Synthetic page task') })
+  const commit = (run: Awaited<ReturnType<typeof task>>, tabId: number, method: string) => taskRpc(client, method, {
+    runId: run.runId, sessionId: run.sessionId, expectedVersion: run.version, controlRevision: run.controlRevision,
+    targetBinding: `page_${crypto.randomUUID()}`, targetUrl: 'http://127.0.0.1/synthetic-form',
+    ...(supportsOwnership ? { targetTabId: tabId } : {}),
+  })
+  return { store: storage.store, task,
+    start: (run: Awaited<ReturnType<typeof task>>, tabId: number) => commit(run, tabId, BRIDGE_TASK_START_METHOD),
+    retarget: (run: Awaited<ReturnType<typeof task>>, tabId: number) => commit(run, tabId, BRIDGE_RUN_RETARGET_METHOD) }
+}
+
+describe('managed page ownership', () => {
+  it('admits only one concurrent task for the same tab and allows another tab at the same URL', async () => {
+    const { store, task, start } = await taskPageFixture()
+    const [first, second, independent] = await Promise.all([task('first-owner'), task('second-owner'), task('different-tab')])
+    const page = 24
+    const [a, b] = await Promise.all([start(first, page), start(second, page)])
+    expect(a).toMatchObject({ ok: true })
+    expect(b).toMatchObject({ ok: false, error: { code: 'task-page-busy', targetState: 'unchanged' } })
+    expect(store.get(second.runId)).toEqual(second)
+    expect(await start(independent, 25)).toMatchObject({ ok: true })
+    const active = store.get(first.runId)!
+    await store.control(first.runId, active.version, 'pause')
+    expect(await start(second, page)).toMatchObject({ ok: true })
+  })
+
+  it.each(['prepared', 'unknown'] as const)('keeps a paused task’s page reserved while its %s write needs resolution', async state => {
+    const { store, task, start } = await taskPageFixture()
+    const [first, second] = await Promise.all([task('first-owner'), task('second-owner')])
+    const page = 24
+    expect(await start(first, page)).toMatchObject({ ok: true })
+    const requestId = 'synthetic-write'
+    await store.dispatches.prepare({ requestId, connectionId: 'synthetic', name: 'browser_click',
+      sessionId: first.sessionId, runId: first.runId, controlRevision: 0, args: {},
+      expiresAt: Date.now() + 10_000 })
+    if (state === 'unknown') {
+      await store.dispatches.markSent(requestId)
+      await store.dispatches.settle(requestId, { state: 'unresolved', reason: 'expired' })
+    }
+    const active = store.get(first.runId)!
+    await store.control(first.runId, active.version, 'pause')
+    const before = store.dispatches.get(requestId)
+    expect(await start(second, page)).toMatchObject({ ok: false, error: { code: 'task-page-busy' } })
+    expect(store.get(second.runId)).toEqual(second)
+    expect(store.dispatches.get(requestId)).toEqual(before)
+  })
+
+  it('keeps the original page selection when continuing onto another task’s tab is refused', async () => {
+    const { store, task, start, retarget } = await taskPageFixture()
+    const [owner, second] = await Promise.all([task('existing-owner'), task('paused-task')])
+    expect(await start(owner, 24)).toMatchObject({ ok: true })
+    expect(await start(second, 25)).toMatchObject({ ok: true })
+    const active = store.get(second.runId)!
+    const paused = await store.control(second.runId, active.version, 'pause')
+    expect(await retarget(paused, 24)).toMatchObject({ ok: false, error: { code: 'task-page-busy', targetState: 'unchanged' } })
+    expect(store.get(second.runId)).toEqual(paused)
+    expect(await retarget(paused, 25)).toMatchObject({ ok: true })
+  })
+})
+
 describe('recorded tool dispatch', () => {
   it.each(['other-session','expired','new-connection'] as const)('refuses an unrelated or stale reference admission: %s', async kind => {
     const h=await connectedLedger(true),signal=new AbortController().signal,url='https://reference.example/wiki'

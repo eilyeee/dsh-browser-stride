@@ -120,7 +120,7 @@ type RunDomain = Domain<ReturnType<typeof specFor>>
 /** Stable failures contain no page content, arguments or credentials. */
 export class BrowserRunStoreError extends Error {
   constructor(readonly code: 'not-found' | 'stale-version' | 'session-busy' | 'reconciliation-required' | 'action-conflict' | 'invalid-state' | 'storage-unavailable' | 'closed'
-    | 'execution-context-required' | 'execution-context-expired' | 'execution-session-mismatch' | 'not-dispatching' | 'stale-control-revision' | 'cancelled' | 'budget-exhausted') {
+    | 'execution-context-required' | 'execution-context-expired' | 'execution-session-mismatch' | 'not-dispatching' | 'stale-control-revision' | 'cancelled' | 'budget-exhausted' | 'task-page-busy') {
     super(`browser run store: ${code}`)
     this.name = 'BrowserRunStoreError'
   }

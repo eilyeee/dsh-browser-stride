@@ -226,6 +226,7 @@ const EN: PanelCopy = {
     truncated: (shown, total) => `Showing ${shown} of ${total} tasks, with unfinished tasks first.`,
     error: code => code === 'stale-version' ? 'Task status changed. Review the refreshed status before trying again.'
       : code === 'budget-exhausted' ? 'Execution limit reached. Stop this task before creating another; pausing or changing pages does not reset its limits.'
+      : code === 'task-page-busy' ? 'Another task is using this tab or has actions there that still need review. Choose another tab or resolve the earlier task first.'
       : code === 'start-uncertain' ? 'Startup is unconfirmed. The page was kept; check task status before doing anything else.'
       : code === 'start-cleanup-unconfirmed' ? 'Task did not start. Check whether the new page is still open.'
       : code === 'load-failed' ? 'Could not read task status. Refresh to try again.'
@@ -496,6 +497,7 @@ const ZH: PanelCopy = {
     truncated: (shown, total) => `显示 ${total} 项任务中的 ${shown} 项，未结束任务优先。`,
     error: code => code === 'stale-version' ? '任务状态已变化，请核对刷新后的状态再操作。'
       : code === 'budget-exhausted' ? '已达到执行上限。请先停止本任务后新建；暂停或更换页面不会重置上限。'
+      : code === 'task-page-busy' ? '这个标签页已有任务，或有该任务的操作待核对。请选择其他标签页，或先处理原任务。'
       : code === 'start-uncertain' ? '尚未确认是否启动，已保留页面。请先核对任务状态。'
       : code === 'start-cleanup-unconfirmed' ? '任务未启动，请检查新建页面是否仍然打开。'
       : code === 'load-failed' ? '无法读取任务状态，请点击刷新重试。'

@@ -24,7 +24,7 @@ export interface TaskPageStartRequest {
   runId: string; sessionId: string; expectedVersion: number; controlRevision: number; url: string
 }
 export interface PreparedTaskPage {
-  targetUrl: string; targetBinding: string
+  targetUrl: string; targetBinding: string; targetTabId?: number
   current(): boolean
   /** Only releases this attempt's grant/tab, and respects native takeover. */
   cleanup(): Promise<void>
@@ -67,7 +67,8 @@ export async function startTaskPage(input: TaskPageStartRequest, deps: Dependenc
         sent = true
         cancelReservation = false
         const result = await deps.request(BRIDGE_TASK_START_METHOD, { ...scope, startTicket, launchUrl: url,
-          targetBinding: page.targetBinding, targetUrl: page.targetUrl }, { signal, timeoutMs: 12000 })
+          targetBinding: page.targetBinding, targetUrl: page.targetUrl,
+          ...(page.targetTabId === undefined ? {} : { targetTabId: page.targetTabId }) }, { signal, timeoutMs: 12000 })
         if (!record(result) || result.runId !== input.runId || result.sessionId !== input.sessionId
           || result.controlRevision !== input.controlRevision || result.state !== 'running' || result.targetBinding !== page.targetBinding) {
           throw new Error('Task startup reply was not confirmed')

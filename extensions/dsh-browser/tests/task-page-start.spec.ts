@@ -49,10 +49,11 @@ describe('native new task page startup', () => {
   })
   it('reserves before page effects and pins before a single start request', async () => {
     const h = fixture()
+    h.page.targetTabId = 7
     await startTaskPage(h.input, h.deps, h.signal)
     expect(h.order).toEqual([PREPARE, 'create-authorize-bind-pin', START])
     expect(h.deps.request).toHaveBeenLastCalledWith(START, expect.objectContaining({ startTicket: 'start_synthetic', launchUrl: h.input.url,
-      targetUrl: h.input.url, targetBinding: h.page.targetBinding }), expect.any(Object))
+      targetUrl: h.input.url, targetBinding: h.page.targetBinding, targetTabId: 7 }), expect.any(Object))
   })
   it('does not create after revocation during Host preparation', async () => {
     const h = fixture(), original = h.deps.request.getMockImplementation()!
