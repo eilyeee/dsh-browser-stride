@@ -5,6 +5,15 @@ const execution = { kind: 'legacy' as const }
 const action = { actionId: 'act_synthetic', requestDigest: 'a'.repeat(64) }
 
 describe('parseBridgeFrame', () => {
+  it('allows the optional browser tab scope on a legacy-compatible greeting', () => {
+    const hello = { t: 'hello', token: 'synthetic', caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } }
+    expect(parseBridgeFrame(JSON.stringify(hello))).toEqual(hello)
+    const browserTabScope = 'ab'.repeat(16)
+    expect(parseBridgeFrame(JSON.stringify({ ...hello, browserTabScope }))).toEqual({ ...hello, browserTabScope })
+    for (const badScope of [null, '', 1, 'x'.repeat(32), 'a'.repeat(33)]) {
+      expect(parseBridgeFrame(JSON.stringify({ ...hello, browserTabScope: badScope }))).toBeUndefined()
+    }
+  })
   it.each(['pageDiagnostics', 'manualRecovery'])('validates optional %s capability in both handshake directions', capability => {
     for (const t of ['hello', 'hello.ok']) {
       const frame = { t, token: 'test', caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } }

@@ -44,7 +44,27 @@ export async function startIsolatedModelRun({ repo, origin, startUrl, artifacts,
     await writeFile(fixture, `${imports}\nimport {LlmAdapter} from ${JSON.stringify(pathToFileURL(bridgeRequire.resolve('@deepseek-ai/dsh-llm')).href)};
 const programs=${JSON.stringify(programs)};
 class Scripted extends LlmAdapter {async listModels(provider){return [{provider,id:'fixture',name:'Synthetic acceptance',contextWindow:128000}]}
-async *stream(options){const messages=options.messages,texts=messages.map(m=>m.content?.filter(b=>b.type==='text').map(b=>b.text).join(' ')||'');const index=texts.findLastIndex((t,i)=>messages[i].role==='user'&&t.startsWith('FIXTURE_CASE=')),key=texts[index]?.slice(13);if(!programs[key])throw Error('Unknown fixture case');const done=messages.slice(index+1).some(m=>m.role==='tool');const block=done?{type:'text',text:'FIXTURE_DONE'}:{type:'tool-call',id:'fixture-'+key,name:'run_code',arguments:JSON.stringify({code:programs[key],description:'Synthetic local acceptance'})};yield {type:'block-start',index:0,blockType:block.type};yield {type:'block-end',index:0,block};yield {type:'finish',reason:{kind:done?'stop':'tool-calls'}}}}
+async *stream(options) {
+  const messages = options.messages;
+  const cases = messages.map(message => {
+    if (message.role !== 'user') return undefined;
+    const text = message.content?.filter(block => block.type === 'text').map(block => block.text).join(' ') ?? '';
+    const casePrefix = 'FIXTURE_CASE=';
+    const managedPrefix = 'Browser task goal: ' + casePrefix;
+    if (text.startsWith(managedPrefix)) return text.slice(managedPrefix.length).split('\\n', 1)[0];
+    if (text.startsWith(casePrefix)) return text.slice(casePrefix.length);
+  });
+  const index = cases.findLastIndex(key => key !== undefined), key = cases[index];
+  if (!Object.hasOwn(programs, key)) throw Error('Unknown fixture case');
+  const done = messages.slice(index + 1).some(message => message.role === 'tool');
+  const block = done ? { type: 'text', text: 'FIXTURE_DONE' } : {
+    type: 'tool-call', id: 'fixture-' + key, name: 'run_code',
+    arguments: JSON.stringify({ code: programs[key], description: 'Synthetic local acceptance' }),
+  };
+  yield { type: 'block-start', index: 0, blockType: block.type };
+  yield { type: 'block-end', index: 0, block };
+  yield { type: 'finish', reason: { kind: done ? 'stop' : 'tool-calls' } };
+}}
 export const inject=['llm','tools','agents','browserRuns'];export async function apply(ctx){${realModel ? '' : "ctx.on('agent/created',({agent})=>agent.ctx.effect(()=>agent.ctx.tools.presentAs('ptc')));ctx.effect(()=>ctx.llm.registerAdapter(['stride-fixture'],new Scripted()));"}
 let requests=0;ctx.on('agent/request',(_p,next)=>{if(++requests>80)throw Error('Synthetic request budget');return next()});${guardSource}}
 `, { mode: 0o600 })

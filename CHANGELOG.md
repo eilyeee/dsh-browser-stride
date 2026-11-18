@@ -42,6 +42,11 @@ package versions currently identify development builds, not supported releases.
 
 ### Fixed
 
+- Development build 0.1.33 keeps an unanswered managed write tied to its
+  original tab when the same paired Chrome session reconnects, including after
+  a Host restart. Another managed task stays queued or paused until the write
+  is resolved. The original task still needs explicit continuation.
+
 - Development build 0.1.32 admits one managed task per Chrome tab on a
   compatible authenticated connection. The Host checks ownership inside the
   start or continuation transaction. A competing task stays idle while the

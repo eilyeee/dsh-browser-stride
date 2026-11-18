@@ -48,6 +48,7 @@ import {
   BRIDGE_TASK_PAGE_CANCEL_METHOD,
   BRIDGE_TASK_TARGET_LOST_METHOD,
   BRIDGE_TASK_APPROVAL_METHOD,
+  isBrowserTabScope,
   isPageBrowserTool,
   isRunTabMutation,
   isRespondResult,
@@ -190,6 +191,7 @@ async function probeBridge(url: string): Promise<boolean> {
 
 const STORAGE_KEY = 'dshSettings'
 const INSTALLATION_KEY = 'dshBridgeInstallationId'
+const BROWSER_TAB_SCOPE_KEY = 'dshBrowserTabScope'
 const TAB_AFFINITY_STORAGE_KEY = 'dshTabAffinity'
 const DETACHED_SESSIONS_STORAGE_KEY = 'dshDetachedSessions'
 
@@ -460,6 +462,23 @@ function ensureInstallationId(): Promise<string> {
     })().catch((error: unknown) => { installationIdPromise = undefined; throw error })
   }
   return installationIdPromise
+}
+
+// Browser session storage outlives the worker, but resets before Chrome can
+// reuse tab IDs. This ID correlates an existing write and grants no authority.
+let browserTabScopePromise: Promise<string | undefined> | undefined
+function ensureBrowserTabScope(): Promise<string | undefined> {
+  if (browserTabScopePromise === undefined) {
+    browserTabScopePromise = (async () => {
+      const stored = await chrome.storage.session.get(BROWSER_TAB_SCOPE_KEY)
+      const existing: unknown = stored[BROWSER_TAB_SCOPE_KEY]
+      if (isBrowserTabScope(existing)) return existing
+      const scope = crypto.randomUUID().replaceAll('-', '')
+      await chrome.storage.session.set({ [BROWSER_TAB_SCOPE_KEY]: scope })
+      return scope
+    })().catch(() => { browserTabScopePromise = undefined; return undefined })
+  }
+  return browserTabScopePromise
 }
 
 function armBridgeKeepalive(): void {
@@ -1706,7 +1725,8 @@ async function startBridge(): Promise<void> {
     return
   }
   url = localUrl
-  const installationId = settings.token === '' ? '' : await ensureInstallationId()
+  const [installationId, browserTabScope] = settings.token === '' ? ['', undefined] as const
+    : await Promise.all([ensureInstallationId(), ensureBrowserTabScope()])
   if (revision !== bridgeStartRevision || panelPorts.size === 0 || connectionDisconnected || unpairing) return
   if (bridge === null) {
     const client = new BridgeClient({
@@ -1752,7 +1772,7 @@ async function startBridge(): Promise<void> {
   }
   activeBridgeUrl = url
   activeInstallationId = installationId
-  bridge.start(url, settings.token, installationId)
+  bridge.start(url, settings.token, installationId, browserTabScope)
 }
 
 /** Gateway RPC with a helpful error when the bridge is down. */

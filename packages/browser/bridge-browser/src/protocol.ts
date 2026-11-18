@@ -212,10 +212,15 @@ export interface BridgeCaps {
   release?: { bridgeVersion: string; dshVersion: string }
 }
 
+/** Tab IDs can be correlated only for the lifetime of this browser session. */
+export function isBrowserTabScope(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-f0-9]{32}$/.test(value)
+}
+
 /** Frames sent by the extension to the bridge plugin. */
 export type ClientFrame =
   /** First frame, within HELLO_TIMEOUT_MS of socket open. */
-  | { t: 'hello'; token: string; caps: BridgeCaps; installationId?: string; protocolVersion?: number }
+  | { t: 'hello'; token: string; caps: BridgeCaps; installationId?: string; browserTabScope?: string; protocolVersion?: number }
   /** Unary call projected by the active dsh Host adapter. */
   | { t: 'rpc'; id: string; method: string; payload: unknown }
   /** Answer or cancel a pending Host interaction waterfall. */
@@ -298,9 +303,11 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
       return typeof frame.token === 'string'
         && isOptionalProtocolVersion(frame.protocolVersion)
         && (frame.installationId === undefined || typeof frame.installationId === 'string')
+        && (frame.browserTabScope === undefined || isBrowserTabScope(frame.browserTabScope))
         && isCaps(frame.caps)
         ? { t: 'hello', token: frame.token, caps: frame.caps,
             ...(typeof frame.installationId === 'string' ? { installationId: frame.installationId } : {}),
+            ...(typeof frame.browserTabScope === 'string' ? { browserTabScope: frame.browserTabScope } : {}),
             ...(typeof frame.protocolVersion === 'number' ? { protocolVersion: frame.protocolVersion } : {}) }
         : undefined
     case 'rpc':

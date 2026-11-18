@@ -2,6 +2,7 @@ import { BRIDGE_PROTOCOL_VERSION, BRIDGE_TASK_TARGET_LOST_METHOD } from '../src/
 import { createServer, type Server } from 'node:http'
 import { readFile, rename, rm, writeFile } from 'node:fs/promises'
 import type { AddressInfo } from 'node:net'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { setTimeout as delay } from 'node:timers/promises'
 import WebSocket from 'ws'
@@ -14,6 +15,8 @@ import { newBrowserTask } from '../src/task-contract.ts'
 import { asSessionId } from '../src/contracts/ids.ts'
 import { BRIDGE_TASK_PAGE_PREPARE_METHOD, BRIDGE_TASK_PAGE_CANCEL_METHOD } from '../src/protocol.ts'
 import { TaskBriefStore } from '../src/task-brief.ts'
+import { PairingStore } from '../src/pairing.ts'
+import type { BrowserRunRecord, BrowserRunStore } from '../src/run-store.ts'
 
 const TOKEN = 'deadbeefdeadbeefdeadbeefdeadbeef'
 
@@ -144,25 +147,36 @@ async function taskRpc(h: { ws: WebSocket; frames: BridgeFrame[] }, method: stri
 async function taskPageFixture() {
   const storage = await createRunStorage()
   storageFixtures.push(storage)
-  const h = await startBridge({ runs: storage.store, dispatches: storage.store.dispatches,
-    tasks: { selectTarget: vi.fn(), approval: vi.fn() } })
-  harnesses.push(h)
-  const client = await connect(h.url)
+  const pairing = new PairingStore(join(storage.root, 'task-page-pairings.json'))
+  const installationId = 'synthetic_task_installation'
+  const token = await pairing.enroll(installationId)
   const caps = { ...CAPS, taskPageOwnership: true }
-  send(client.ws, { t: 'hello', protocolVersion: BRIDGE_PROTOCOL_VERSION, token: TOKEN, caps })
-  await waitFor(() => client.frames.some(frame => frame.t === 'hello.ok'))
-  const hello = client.frames.find(frame => frame.t === 'hello.ok')
-  const supportsOwnership = hello?.caps.taskPageOwnership === true
+  async function createHost(store: BrowserRunStore) {
+    const host = await startBridge({ pairing, runs: store, dispatches: store.dispatches,
+      tasks: { selectTarget: vi.fn(), approval: vi.fn() } })
+    harnesses.push(host)
+    return host
+  }
+  const h = await createHost(storage.store)
+  async function connectBrowser(host = h, browserTabScope = 'a'.repeat(32)) {
+    const client = await connect(host.url)
+    const greeting = { t: 'hello' as const, protocolVersion: BRIDGE_PROTOCOL_VERSION, token, caps, installationId, browserTabScope }
+    send(client.ws, greeting)
+    await waitFor(() => client.frames.some(frame => frame.t === 'hello.ok'))
+    const supportsOwnership = client.frames.find(frame => frame.t === 'hello.ok')?.caps.taskPageOwnership === true
+    const commit = (run: BrowserRunRecord, tabId: number, method: string) => taskRpc(client, method, {
+      runId: run.runId, sessionId: run.sessionId, expectedVersion: run.version, controlRevision: run.controlRevision,
+      targetBinding: `page_${crypto.randomUUID()}`, targetUrl: 'http://127.0.0.1/synthetic-form',
+      ...(supportsOwnership ? { targetTabId: tabId } : {}),
+    })
+    return { ...client,
+      start: (run: BrowserRunRecord, tabId: number) => commit(run, tabId, BRIDGE_TASK_START_METHOD),
+      retarget: (run: BrowserRunRecord, tabId: number) => commit(run, tabId, BRIDGE_RUN_RETARGET_METHOD) }
+  }
+  const client = await connectBrowser()
   const task = (name: string) => storage.store.create({ sessionId: asSessionId(name),
     requiredCriteriaIds: ['task-goal'], task: newBrowserTask('Synthetic page task') })
-  const commit = (run: Awaited<ReturnType<typeof task>>, tabId: number, method: string) => taskRpc(client, method, {
-    runId: run.runId, sessionId: run.sessionId, expectedVersion: run.version, controlRevision: run.controlRevision,
-    targetBinding: `page_${crypto.randomUUID()}`, targetUrl: 'http://127.0.0.1/synthetic-form',
-    ...(supportsOwnership ? { targetTabId: tabId } : {}),
-  })
-  return { store: storage.store, task,
-    start: (run: Awaited<ReturnType<typeof task>>, tabId: number) => commit(run, tabId, BRIDGE_TASK_START_METHOD),
-    retarget: (run: Awaited<ReturnType<typeof task>>, tabId: number) => commit(run, tabId, BRIDGE_RUN_RETARGET_METHOD) }
+  return { ...h, ...client, store: storage.store, storage, task, createHost, connectBrowser }
 }
 
 describe('managed page ownership', () => {
@@ -211,6 +225,45 @@ describe('managed page ownership', () => {
     expect(await retarget(paused, 24)).toMatchObject({ ok: false, error: { code: 'task-page-busy', targetState: 'unchanged' } })
     expect(store.get(second.runId)).toEqual(paused)
     expect(await retarget(paused, 25)).toMatchObject({ ok: true })
+  })
+
+  it.each(['socket', 'Host'] as const)('keeps an unanswered write tied to the same browser tab after %s restart', async restart => {
+    const h = await taskPageFixture()
+    const [owner, second, independent] = await Promise.all([
+      h.task('interrupted-owner'), h.task('same-tab-task'), h.task('independent-tab-task'),
+    ])
+    const tab = 24
+    expect(await h.start(owner, tab)).toMatchObject({ ok: true })
+    const pending = h.store.withExecution(owner.runId, 0, () =>
+      h.bridge.requestTool('browser_click', { ref: 'synthetic' }, new AbortController().signal)).catch(error => error)
+    await waitFor(() => h.frames.some(frame => frame.t === 'tool.call'))
+    const call = h.frames.find(frame => frame.t === 'tool.call')!
+    await waitFor(() => h.frames.some(frame => frame.t === 'rpc.result' && frame.id === `confirm-${call.id}` && frame.ok))
+    h.ws.close()
+    await h.done
+    expect(await pending).toBeInstanceOf(BridgeToolError)
+    await waitFor(() => h.store.get(owner.runId)?.state === 'paused')
+    const original = h.store.dispatches.get(call.id)
+    expect(original).toMatchObject({ state: 'unresolved', interruption: { reason: 'connection-closed' } })
+
+    let store = h.store
+    let host: Harness = h
+    if (restart === 'Host') {
+      await h.bridge.close()
+      await store.close()
+      store = await h.storage.open()
+      host = await h.createHost(store)
+    }
+    const resumed = await h.connectBrowser(host)
+    expect(await resumed.start(second, tab)).toMatchObject({ ok: false, error: { code: 'task-page-busy', targetState: 'unchanged' } })
+    expect(store.get(second.runId)).toEqual(second)
+    expect(store.dispatches.get(call.id)).toEqual(original)
+    expect(resumed.frames.filter(frame => frame.t === 'tool.call')).toHaveLength(0)
+    expect(await resumed.start(independent, tab + 1)).toMatchObject({ ok: true })
+
+    const newBrowser = await h.connectBrowser(host, 'b'.repeat(32))
+    expect(await newBrowser.start(second, tab)).toMatchObject({ ok: true })
+    expect(store.dispatches.get(call.id)).toEqual(original)
   })
 })
 

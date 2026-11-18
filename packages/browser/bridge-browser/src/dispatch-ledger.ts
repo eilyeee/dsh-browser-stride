@@ -32,6 +32,7 @@ const recordSchema = z.strictObject({
   installationId: id.optional(), sessionId: id.optional(), name: id,
   runId: id.optional(), controlRevision: time.optional(),
   targetBinding: id.optional(),
+  taskPageKey: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   effect: z.enum(['read', 'write']),
   state: z.enum(['prepared', 'sent_unconfirmed', 'not_sent', 'unresolved', 'returned']),
   preparedAt: time, expiresAt: time,
@@ -50,6 +51,7 @@ const recordSchema = z.strictObject({
     && (row.previousNativeReview === undefined || row.nativeReview !== undefined)
     && ((row.runId === undefined) === (row.controlRevision === undefined))
     && (row.targetBinding === undefined || (row.runId !== undefined && row.identityVersion === 4))
+    && (row.taskPageKey === undefined || (row.effect === 'write' && row.targetBinding !== undefined && row.installationId !== undefined))
     && (row.runId === undefined || (row.sessionId !== undefined && row.identityVersion !== undefined))
     && (row.identityVersion !== undefined ? row.transportDigest !== undefined : row.transportDigest === undefined)
     && row.effect === (isReadOnlyBrowserTool(row.name) ? 'read' : 'write')
@@ -132,8 +134,20 @@ export class BrowserDispatchLedger {
       .filter(row => sessionId === undefined || row.sessionId === sessionId).map(row => structuredClone(row))
   }
 
+  /** Unresolved writes can protect the same tab across transport replacements. */
+  hasPendingTaskPageWrite(taskPageKey: string, runId: string): boolean {
+    this.assertOpen()
+    if (this.writeFaulted) throw new DispatchLedgerError('storage-unavailable')
+    for (const [, row] of this.domain.table('dispatches').entries()) {
+      if (row.taskPageKey === taskPageKey && row.runId !== runId
+        && (row.state === 'prepared' || row.state === 'sent_unconfirmed' || requiresDispatchReview(row))) return true
+    }
+    return false
+  }
+
   prepare(input: { requestId: string; connectionId: string; installationId?: string; sessionId?: string;
-    name: string; args: Record<string, unknown>; expiresAt: number; runId?: string; controlRevision?: number; targetBinding?: string }): Promise<DispatchRecord> {
+    name: string; args: Record<string, unknown>; expiresAt: number; runId?: string; controlRevision?: number;
+    targetBinding?: string; taskPageKey?: string }): Promise<DispatchRecord> {
     // Snapshot before awaiting anything. Only the digest and metadata survive
     // this method: field values, credentials and page content are not stored.
     const material = canonicalize(input)

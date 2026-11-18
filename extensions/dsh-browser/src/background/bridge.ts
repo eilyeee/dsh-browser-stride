@@ -47,6 +47,7 @@ export class BridgeClient {
   private url = ''
   private token = ''
   private installationId = ''
+  private browserTabScope: string | undefined
   private ackTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(
@@ -65,11 +66,12 @@ export class BridgeClient {
    * @param url - bridge WebSocket URL (e.g. ws://127.0.0.1:3080/ext/bridge).
    * @param token - bearer token from settings.
    */
-  start(url: string, token: string, installationId = ''): void {
+  start(url: string, token: string, installationId = '', browserTabScope?: string): void {
     this.stop()
     this.url = url
     this.token = token
     this.installationId = installationId
+    this.browserTabScope = browserTabScope
     this.running = true
     this.attempt = 0
     this.generation += 1
@@ -164,6 +166,7 @@ export class BridgeClient {
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
         token: presentedToken,
         ...(this.installationId === '' ? {} : { installationId: this.installationId }),
+        ...(this.browserTabScope === undefined ? {} : { browserTabScope: this.browserTabScope }),
         caps: offeredCaps,
       } satisfies ClientFrame))
 

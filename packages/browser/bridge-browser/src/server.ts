@@ -182,6 +182,8 @@ interface ReadyConnection {
   taskTargetLoss: boolean
   /** Native tab IDs are scoped to this authenticated connection. */
   taskPageOwners?: Map<number, RunId>
+  /** Optional browser-session scope from the authenticated paired extension. */
+  browserTabScope?: string
   visualViewport: boolean
   layoutMetrics: boolean
   elementScroll: boolean
@@ -231,7 +233,9 @@ export class BridgeServer {
   private current: ReadyConnection | null = null
   private readonly pendingTools = new Map<string, PendingTool>()
   /** Kept across socket replacement; a new connection cannot borrow an old pin. */
-  private readonly runTargets = new Map<string, { sessionId: string; controlRevision: number; connectionId: string; id: string; tabId?: number }>()
+  private readonly runTargets = new Map<string, {
+    sessionId: string; controlRevision: number; connectionId: string; id: string; tabId?: number; taskPageKey?: string
+  }>()
   private readonly operations = new Set<Promise<unknown>>()
   private readonly writeTurns = new Map<string | undefined, Promise<unknown>>()
   private readonly referencePermits = new Map<string, { owner: ReadyConnection; url: string; expiresAt: number; consumed?: true }>()
@@ -379,11 +383,15 @@ export class BridgeServer {
 
   private async recordAndSend(conn: ReadyConnection, id: string, name: string, args: Record<string, unknown>, signal: AbortSignal, expiresAt: number, sessionId?: string, execution?: BrowserRunExecution, targetBinding?: string, referencePermit?: () => boolean): Promise<unknown> {
     const ledger = this.deps.dispatches!
+    const target = execution === undefined || targetBinding === undefined ? undefined : this.runTargets.get(execution.runId)
+    const taskPageKey = target?.id === targetBinding && target?.connectionId === conn.connectionId && !isReadOnlyBrowserTool(name)
+      ? target.taskPageKey : undefined
     let action: ToolActionIdentity
     try {
       const prepared = await ledger.prepare({ requestId: id, connectionId: conn.connectionId,
         name, args, expiresAt, ...(sessionId === undefined ? {} : { sessionId }),
         ...(targetBinding === undefined ? {} : { targetBinding }),
+        ...(taskPageKey === undefined ? {} : { taskPageKey }),
         ...(execution === undefined ? {} : { runId: execution.runId, controlRevision: execution.controlRevision }),
         ...(conn.installationId === undefined ? {} : { installationId: conn.installationId }) })
       if (prepared.state !== 'prepared' || prepared.identityVersion !== 4) throw new Error('request already consumed or incompatible')
@@ -627,7 +635,8 @@ export class BridgeServer {
           if (helloTimer === undefined || ws.readyState !== WebSocket.OPEN) return
           clearTimeout(helloTimer)
           helloTimer = undefined
-          this.promote(ws, remoteAddress, caps, frame.installationId, result.credential)
+          this.promote(ws, remoteAddress, caps, frame.installationId, result.credential,
+            this.deps.pairing === undefined ? undefined : frame.browserTabScope)
         }, () => { ws.close(1011, 'authentication unavailable') })
         return
       }
@@ -645,7 +654,7 @@ export class BridgeServer {
   }
 
   /** Promote an authenticated socket to the single active slot. */
-  private promote(ws: WebSocket, remoteAddress: string | undefined, caps: BridgeCaps, installationId?: string, credential?: string): void {
+  private promote(ws: WebSocket, remoteAddress: string | undefined, caps: BridgeCaps, installationId?: string, credential?: string, browserTabScope?: string): void {
     this.replaceConnection()
     const abort = new AbortController()
     const ping = setInterval(() => { sendFrame(ws, { t: 'ping' }) }, this.deps.pingIntervalMs ?? PING_INTERVAL_MS)
@@ -670,6 +679,7 @@ export class BridgeServer {
     })()
     this.current = { connectionId: randomUUID(), ws, remoteAddress, abort, pump, ping, orderedSessionRpcs: new Map(), confirmedTools: new Set(), lostRunTargets: new Set(), taskTargetLoss: caps.taskTargetLoss === true, visualViewport: caps.visualViewport === true, layoutMetrics: caps.layoutMetrics === true, elementScroll: caps.elementScroll === true, elementReadScope: caps.elementReadScope === true, snapshotBase: caps.snapshotBase === true, pageDiagnostics: caps.pageDiagnostics === true, manualRecovery: caps.manualRecovery === true, designViewZoom: caps.designViewZoom === true,
       ...(caps.taskPageOwnership === true ? { taskPageOwners: new Map() } : {}),
+      ...(caps.taskPageOwnership === true && browserTabScope !== undefined ? { browserTabScope } : {}),
       ...(installationId === undefined ? {} : { installationId }) }
     sendFrame(ws, { t: 'hello.ok', protocolVersion: BRIDGE_PROTOCOL_VERSION, caps, ...(credential === undefined ? {} : { credential }) })
     ws.once('close', () => {
@@ -853,6 +863,8 @@ export class BridgeServer {
         const owners = conn.taskPageOwners
         const tabId = payload.targetTabId
         if ((owners !== undefined && run.task !== undefined) !== (tabId !== undefined)) throw new Error('native page identity required')
+        const taskPageKey = tabId === undefined || conn.installationId === undefined || conn.browserTabScope === undefined
+          ? undefined : createHash('sha256').update(canonicalize([conn.installationId, conn.browserTabScope, tabId])).digest('hex')
         if (newPage && run.state !== 'queued') throw new TaskPageAdmissionError(true)
         const attachTarget = (revision: number) => {
           if (conn.lostRunTargets.has(targetLossKey({ ...payload, controlRevision: revision }))) throw new Error('target revoked')
@@ -862,6 +874,9 @@ export class BridgeServer {
           if (previous === undefined && this.runTargets.size >= 5000) throw new Error('target cache full')
           // startTask and retargetPaused call this inside the run store's
           // serialized update. A second native start cannot race the first.
+          if (taskPageKey !== undefined && runs.dispatches.hasPendingTaskPageWrite(taskPageKey, run.runId)) {
+            throw new BrowserRunStoreError('task-page-busy')
+          }
           const otherId = tabId === undefined ? undefined : owners?.get(tabId)
           const other = otherId === undefined || otherId === run.runId ? undefined : runs.get(otherId)
           if (other !== undefined && (['queued', 'running', 'stopping'].includes(other.state) || other.recoveryRequired
@@ -880,7 +895,8 @@ export class BridgeServer {
             && owners?.get(previous.tabId) === run.runId) owners.delete(previous.tabId)
           if (tabId !== undefined) owners!.set(tabId, run.runId)
           this.runTargets.set(run.runId, { sessionId: run.sessionId, controlRevision: revision, connectionId: conn.connectionId,
-            id: payload.targetBinding, ...(tabId === undefined ? {} : { tabId }) })
+            id: payload.targetBinding, ...(tabId === undefined ? {} : { tabId }),
+            ...(taskPageKey === undefined ? {} : { taskPageKey }) })
         }
         if (payload.controlRevision !== run.controlRevision) throw new Error('stale revision')
         if (payload.startTicket !== undefined) {
