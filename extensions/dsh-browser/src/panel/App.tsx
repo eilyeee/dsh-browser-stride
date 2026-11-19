@@ -1608,6 +1608,7 @@ export function App(): React.JSX.Element {
     setError(null)
     // 不渲染乐观行：live user/message 事件即时回显，避免同一消息出现两行。
     try {
+      await confirmDisplayedSession(id)
       const clientTimeZone = browserTimeZone()
       await api.rpc('session.prompt', {
         sessionId: id,
@@ -1924,20 +1925,31 @@ export function App(): React.JSX.Element {
     }
   }
 
+  async function confirmDisplayedSession(sessionId: string): Promise<void> {
+    const transition = sessionTransitionRef.current
+    await api.setActiveSession(sessionId, undefined, true)
+    if (sessionRef.current !== sessionId || transition !== sessionTransitionRef.current
+      || sessionChangingRef.current || lastStateRef.current !== 'connected') throw new Error(copy.app.restoreSessionFailed)
+  }
+
   async function selectGroupPage(tabId: number): Promise<void> {
-    if (tabAffinity === null || sessionRef.current === null || sessionChangingRef.current || state !== 'connected') {
+    const sessionId = sessionRef.current
+    if (tabAffinity === null || sessionId === null || sessionChangingRef.current || state !== 'connected') {
       throw new Error(copy.controlGroup.notReady)
     }
     const page = pageAccess.pages?.find(page => page.tabId === tabId)
     if (page === undefined) throw new Error(copy.controlGroup.failed)
-    await api.rebindTabAffinity({ tabId, expectedUrl: page.url, revision: tabAffinity.revision, sessionId: sessionRef.current })
+    await confirmDisplayedSession(sessionId)
+    await api.rebindTabAffinity({ tabId, expectedUrl: page.url, revision: tabAffinity.revision, sessionId })
   }
 
   async function selectMaterialPage(page: AffinityTab): Promise<void> {
-    if (tabAffinity === null || sessionRef.current === null || sessionSwitchBlocked || state !== 'connected') {
+    const sessionId = sessionRef.current
+    if (tabAffinity === null || sessionId === null || sessionSwitchBlocked || state !== 'connected') {
       throw new Error('Material page selection is unavailable')
     }
-    await api.rebindTabAffinity({ tabId: page.tabId, expectedUrl: page.url, revision: tabAffinity.revision, sessionId: sessionRef.current })
+    await confirmDisplayedSession(sessionId)
+    await api.rebindTabAffinity({ tabId: page.tabId, expectedUrl: page.url, revision: tabAffinity.revision, sessionId })
   }
 
   function addTrustedOrigin(): void {

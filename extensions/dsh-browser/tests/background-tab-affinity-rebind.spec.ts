@@ -161,7 +161,9 @@ describe('background tab-affinity rebind protocol', () => {
     other.onMessage.emit({ type: 'tab-affinity.rebind', id: 'choose-b', sessionId: 'view-b', tabId: 2, revision: state(other).revision })
     await vi.waitFor(() => expect(other.postMessage).toHaveBeenCalledWith({ type: 'tab-affinity.rebind.result', id: 'choose-b', ok: true }))
     const revision = state(other).revision
-    h.onMessage.emit({ type: 'session.active', sessionId: 'view-a', restore: true })
+    h.onMessage.emit({ type: 'session.active', id: 'restore-view-a', sessionId: 'view-a', restore: true })
+    expect(h.postMessage).toHaveBeenCalledWith({ type: 'session.active.result', id: 'restore-view-a', sessionId: 'view-a' })
+    expect(other.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ id: 'restore-view-a' }))
     expect(state().controlled?.tabId).toBe(1); expect(state(other).controlled?.tabId).toBe(2)
     expect(state().revision).toBe(revision)
     h.onMessage.emit({ type: 'session.active', sessionId: 'unbound-view', restore: true, isNew: true })

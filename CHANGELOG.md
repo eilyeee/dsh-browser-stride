@@ -56,6 +56,10 @@ package versions currently identify development builds, not supported releases.
 
 ### Fixed
 
+- The sidebar waits for the background to confirm its displayed conversation
+  before submitting a new prompt or selecting a page. A lost registration reply
+  leaves the prompt available to retry and does not replay a page action.
+
 - Native group-page selection waits for session storage before acknowledging
   the selection. The panel distinguishes pending and unconfirmed selections,
   and a changed conversation or page can't receive a late success reply.

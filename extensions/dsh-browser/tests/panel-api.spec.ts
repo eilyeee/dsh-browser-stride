@@ -10,12 +10,71 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
+function viewPort() {
+  let onMessage: (message: unknown) => void = () => {}
+  let onDisconnect: () => void = () => {}
+  const receive = (message: unknown) => onMessage(message)
+  const disconnect = () => onDisconnect()
+  const postMessage = vi.fn((message: Record<string, unknown>) => {
+    if (message.type === 'session.active' && typeof message.id === 'string') {
+      receive({ type: 'session.active.result', id: message.id, sessionId: message.sessionId ?? null })
+    }
+  })
+  return { receive, disconnect, postMessage, port: {
+    postMessage, disconnect,
+    onMessage: { addListener: (callback: (message: unknown) => void) => { onMessage = callback } },
+    onDisconnect: { addListener: (callback: () => void) => { onDisconnect = callback } },
+  } }
+}
+
 describe('panel protocol', () => {
+  it('waits for a matching background acknowledgement of the displayed conversation', async () => {
+    let receive!: (message: unknown) => void
+    const postMessage = vi.fn()
+    vi.stubGlobal('chrome', { runtime: { connect: vi.fn(() => ({
+      postMessage,
+      onMessage: { addListener: (callback: (message: unknown) => void) => { receive = callback } },
+      onDisconnect: { addListener: vi.fn() },
+    })) } })
+    const api = connectPanel()
+    let confirmed = false
+    const registration = api.setActiveSession('original-view').then(() => { confirmed = true })
+    await Promise.resolve()
+    expect(confirmed).toBe(false)
+    const request = postMessage.mock.calls[0]![0]
+    expect(request).toMatchObject({ type: 'session.active', id: expect.any(String), sessionId: 'original-view' })
+    receive({ type: 'session.active.result', id: 'different-request', sessionId: 'original-view' })
+    await Promise.resolve()
+    expect(confirmed).toBe(false)
+    receive({ type: 'session.active.result', id: request.id, sessionId: 'original-view' })
+    await registration
+    expect(confirmed).toBe(true)
+  })
+
+  it('restores the previous view after a posted switch receives no acknowledgement', async () => {
+    vi.useFakeTimers()
+    const { port, postMessage, receive } = viewPort()
+    vi.stubGlobal('chrome', { runtime: { connect: vi.fn(() => port) } })
+    const api = connectPanel(), affinity = vi.fn()
+    api.onTabAffinity(affinity)
+    await api.setActiveSession('displayed')
+    postMessage.mockImplementationOnce(() => {}) // Accepted by the local port, but no worker reply.
+    const registration = api.setActiveSession('unconfirmed').catch(error => error)
+    const missed = postMessage.mock.lastCall![0]
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(await registration).toMatchObject({ code: 'view-unconfirmed' })
+    expect(postMessage).toHaveBeenLastCalledWith({ type: 'session.active', sessionId: 'displayed', restore: true })
+    receive({ type: 'session.active.result', id: missed.id, sessionId: 'unconfirmed' })
+    const state = { revision: 7, status: 'lost', controlled: null, active: null }
+    receive({ type: 'tab-affinity', sessionId: 'unconfirmed', state })
+    expect(affinity).toHaveBeenLastCalledWith(null)
+    receive({ type: 'tab-affinity', sessionId: 'displayed', state })
+    expect(affinity).toHaveBeenLastCalledWith(state)
+  })
+
   it('clears stale target and grant status on view changes and port loss', async () => {
     vi.useFakeTimers()
-    let receive!: (value: unknown) => void, disconnect!: () => void
-    const port = { postMessage: vi.fn(), onMessage: { addListener: (fn: (value: unknown) => void) => { receive = fn } },
-      onDisconnect: { addListener: (fn: () => void) => { disconnect = fn } } }
+    const { port, receive, disconnect } = viewPort()
     vi.stubGlobal('chrome', { runtime: { connect: vi.fn(() => port) } })
     const api = connectPanel(), affinity = vi.fn(), access = vi.fn()
     api.onTabAffinity(affinity); api.onPageAccess(access)
@@ -50,27 +109,23 @@ describe('panel protocol', () => {
 
   it('restores a view without new binding and forgets it after an explicit clear', async () => {
     vi.useFakeTimers()
-    let disconnect!: () => void
-    const firstPost = vi.fn(), secondPost = vi.fn()
-    const first = { postMessage: firstPost, onMessage: { addListener: vi.fn() }, onDisconnect: { addListener: (fn: () => void) => { disconnect = fn } } }
-    const second = { postMessage: secondPost, onMessage: { addListener: vi.fn() }, onDisconnect: { addListener: vi.fn() } }
-    vi.stubGlobal('chrome', { runtime: { connect: vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second) } })
+    const first = viewPort(), second = viewPort()
+    vi.stubGlobal('chrome', { runtime: { connect: vi.fn().mockReturnValueOnce(first.port).mockReturnValueOnce(second.port) } })
     const api = connectPanel()
     await api.registerWindow(3); await api.setActiveSession('retained', undefined, true)
-    expect(firstPost).toHaveBeenLastCalledWith({ type: 'session.active', sessionId: 'retained', restore: true })
+    expect(first.postMessage).toHaveBeenLastCalledWith({ type: 'session.active', id: expect.any(String), sessionId: 'retained', restore: true })
     await api.setActiveSession(null, undefined, true)
-    disconnect(); await vi.advanceTimersByTimeAsync(150)
-    expect(secondPost.mock.calls.map(([message]) => message)).toEqual([{ type: 'panel.window', windowId: 3 }, { type: 'request-status' }])
-    expect(secondPost).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'session.active' }))
+    first.disconnect(); await vi.advanceTimersByTimeAsync(150)
+    expect(second.postMessage.mock.calls.map(([message]) => message)).toEqual([{ type: 'panel.window', windowId: 3 }, { type: 'request-status' }])
+    expect(second.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'session.active' }))
   })
 
   it('restores the still-displayed view after the next registration could not be sent', async () => {
     vi.useFakeTimers()
     const failed = vi.fn(() => { throw Error('port closed') })
-    const first = { postMessage: vi.fn(), onMessage: { addListener: vi.fn() }, onDisconnect: { addListener: vi.fn() } }
-    const replacement = { ...first, postMessage: failed }
-    const connected = { ...first, postMessage: vi.fn() }
-    vi.stubGlobal('chrome', { runtime: { connect: vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(replacement).mockReturnValueOnce(connected) } })
+    const first = viewPort(), replacement = viewPort(), connected = viewPort()
+    replacement.postMessage.mockImplementation(failed)
+    vi.stubGlobal('chrome', { runtime: { connect: vi.fn().mockReturnValueOnce(first.port).mockReturnValueOnce(replacement.port).mockReturnValueOnce(connected.port) } })
     const api = connectPanel()
     await api.setActiveSession('displayed')
     first.postMessage.mockImplementation(failed)
@@ -85,43 +140,37 @@ describe('panel protocol', () => {
   })
   it.each([false, true])('restores only the latest view context after disconnect (new=%s)', async isNew => {
     vi.useFakeTimers()
-    let disconnect!: () => void
-    const firstPost = vi.fn(), secondPost = vi.fn()
-    const first = { postMessage: firstPost, onMessage: { addListener: vi.fn() }, onDisconnect: { addListener: (fn: () => void) => { disconnect = fn } } }
-    const second = { postMessage: secondPost, onMessage: { addListener: vi.fn() }, onDisconnect: { addListener: vi.fn() } }
-    vi.stubGlobal('chrome', { runtime: { connect: vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second) } })
+    const first = viewPort(), second = viewPort()
+    vi.stubGlobal('chrome', { runtime: { connect: vi.fn().mockReturnValueOnce(first.port).mockReturnValueOnce(second.port) } })
     const api = connectPanel()
     await api.registerWindow(1); await api.registerWindow(2)
     await api.setActiveSession('old-view'); await api.setActiveSession('current-view', isNew)
     const prompt = api.rpc('session.prompt', { sessionId: 'current-view' }).catch(error => error)
-    disconnect()
+    first.disconnect()
     expect(await prompt).toBeInstanceOf(Error)
     await vi.advanceTimersByTimeAsync(150)
-    expect(secondPost.mock.calls.map(([value]) => value)).toEqual([
+    expect(second.postMessage.mock.calls.map(([value]) => value)).toEqual([
       { type: 'panel.window', windowId: 2 },
       { type: 'session.active', sessionId: 'current-view', restore: true },
       { type: 'request-status' },
     ])
-    expect(secondPost).not.toHaveBeenCalledWith(expect.objectContaining({ isNew: true }))
-    expect(secondPost).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'rpc' }))
+    expect(second.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ isNew: true }))
+    expect(second.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'rpc' }))
   })
 
   it('registers view context before retrying a synchronously refused selection', async () => {
     vi.useFakeTimers()
-    let receive!: (value: unknown) => void
-    const firstPost = vi.fn(), secondPost = vi.fn()
-    const first = { postMessage: firstPost, onMessage: { addListener: vi.fn() }, onDisconnect: { addListener: vi.fn() } }
-    const second = { postMessage: secondPost, onMessage: { addListener: (fn: (value: unknown) => void) => { receive = fn } }, onDisconnect: { addListener: vi.fn() } }
-    vi.stubGlobal('chrome', { runtime: { connect: vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second) } })
+    const first = viewPort(), second = viewPort()
+    vi.stubGlobal('chrome', { runtime: { connect: vi.fn().mockReturnValueOnce(first.port).mockReturnValueOnce(second.port) } })
     const api = connectPanel(); await api.registerWindow(3); await api.setActiveSession('selected', true)
-    firstPost.mockImplementationOnce(() => { throw Error('stale port') })
+    first.postMessage.mockImplementationOnce(() => { throw Error('stale port') })
     const pending = api.rebindTabAffinity({ tabId: 42, revision: 7, sessionId: 'selected' })
     await vi.advanceTimersByTimeAsync(150)
-    const messages = secondPost.mock.calls.map(([value]) => value)
+    const messages = second.postMessage.mock.calls.map(([value]) => value)
     expect(messages.slice(0, 3)).toEqual([{ type: 'panel.window', windowId: 3 }, { type: 'session.active', sessionId: 'selected', restore: true }, { type: 'request-status' }])
     expect(messages).toHaveLength(4)
     expect(messages[3]).toMatchObject({ type: 'tab-affinity.rebind', tabId: 42, revision: 7, sessionId: 'selected' })
-    receive({ type: 'tab-affinity.rebind.result', id: messages[3].id, ok: true })
+    second.receive({ type: 'tab-affinity.rebind.result', id: messages[3].id, ok: true })
     await pending
   })
 
@@ -332,13 +381,7 @@ describe('panel protocol', () => {
   })
 
   it('delivers a stable control-group target while the human views another page', async () => {
-    let receive: ((message: unknown) => void) | undefined
-    const postMessage = vi.fn()
-    const port = {
-      postMessage,
-      onMessage: { addListener: vi.fn((listener: (message: unknown) => void) => { receive = listener }) },
-      onDisconnect: { addListener: vi.fn() },
-    }
+    const { receive, port } = viewPort()
     vi.stubGlobal('chrome', { runtime: { connect: vi.fn(() => port) } })
     const api = connectPanel()
     const listener = vi.fn()
@@ -433,24 +476,18 @@ describe('panel protocol', () => {
     await expect(pending).rejects.toThrow('current tab unavailable')
   })
 
-  it('delivers a resume hint and records the panel session', () => {
-    let receive: ((message: unknown) => void) | undefined
-    const postMessage = vi.fn()
-    const port = {
-      postMessage,
-      onMessage: { addListener: vi.fn((listener: (message: unknown) => void) => { receive = listener }) },
-      onDisconnect: { addListener: vi.fn() },
-    }
+  it('delivers a resume hint and records the panel session', async () => {
+    const { receive, postMessage, port } = viewPort()
     vi.stubGlobal('chrome', { runtime: { connect: vi.fn(() => port) } })
     const api = connectPanel()
     const listener = vi.fn()
     api.onSessionResumeHint(listener)
 
     receive?.({ type: 'session.resume-hint', sessionId: 'session-recent' })
-    void api.setActiveSession('session-current', true)
+    await api.setActiveSession('session-current', true)
 
     expect(listener).toHaveBeenCalledWith('session-recent')
-    expect(postMessage).toHaveBeenCalledWith({ type: 'session.active', sessionId: 'session-current', isNew: true })
+    expect(postMessage).toHaveBeenCalledWith({ type: 'session.active', id: expect.any(String), sessionId: 'session-current', isNew: true })
   })
 
   it('correlates host-interaction answers with globally unique response ids', async () => {

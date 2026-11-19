@@ -2343,13 +2343,16 @@ chrome.runtime.onConnect.addListener((port) => {
         break
       }
       case 'session.active': {
-        const session = message as { sessionId?: unknown; isNew?: boolean; restore?: boolean }
+        const session = message as { id?: unknown; sessionId?: unknown; isNew?: boolean; restore?: boolean }
         const sid = validSessionId(session.sessionId)
+        if (sid === undefined) panelActiveSessions.delete(port)
+        else panelActiveSessions.set(port, sid)
+        if (typeof session.id === 'string') {
+          try { port.postMessage({ type: 'session.active.result', id: session.id, sessionId: sid ?? null }) } catch { /* port closed */ }
+        }
         if (sid === undefined) {
-          panelActiveSessions.delete(port)
           broadcastTabAffinity()
         } else {
-          panelActiveSessions.set(port, sid)
           if (session.restore === true) {
             // A replacement panel port restores its view, not browser control.
             // Keep the selected target, global focus and observation leases.

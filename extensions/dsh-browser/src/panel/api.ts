@@ -49,6 +49,12 @@ interface SettingsResultMessage {
   error?: { message?: unknown }
 }
 
+interface SessionActiveResultMessage {
+  type: 'session.active.result'
+  id: string
+  sessionId: string | null
+}
+
 interface StatusMessage {
   type: 'status'
   state: BridgeState
@@ -101,7 +107,9 @@ export interface PageDiagnosticsStatus { enabled: boolean; captureId?: string; s
 export interface PageDiagnosticsRequest { action: 'start' | 'stop' | 'status'; sessionId: string; tabId: number; revision: number; expectedUrl: string; captureId?: string }
 export type PageRecoveryRequest = Omit<PageDiagnosticsRequest, 'action' | 'captureId'> & ({ action: 'prepare' } | { action: 'confirm'; reviewId: string; decisions: RecoveryDecisions })
 
-type BackgroundMessage = ({ type: 'page-access'; sessionId: string | null } & PageAccessStatus) | RpcResultMessage | RespondResultMessage | SettingsResultMessage | (Omit<SettingsResultMessage, 'type'> & { type: 'browser-pairing.unpair.result' | 'page-access.revoke.result' | 'page-access.refresh.result' }) | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | (Omit<TabAffinityRebindResultMessage, 'type'> & { type: 'browser-run.retarget.result' | 'tab-affinity.unbind.result' }) | SelectionMessage | SessionResumeHintMessage | { type: 'browser-pairing'; status: BrowserPairingStatus }
+type BackgroundMessage = ({ type: 'page-access'; sessionId: string | null } & PageAccessStatus) | RpcResultMessage | RespondResultMessage | SettingsResultMessage | (Omit<SettingsResultMessage, 'type'> & { type: 'browser-pairing.unpair.result' | 'page-access.revoke.result' | 'page-access.refresh.result' }) | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | (Omit<TabAffinityRebindResultMessage, 'type'> & { type: 'browser-run.retarget.result' | 'tab-affinity.unbind.result' }) | SelectionMessage | SessionResumeHintMessage | SessionActiveResultMessage | { type: 'browser-pairing'; status: BrowserPairingStatus }
+
+type PendingMessage = { kind: 'rpc' | 'respond' | 'rebind' | 'settings' | 'view'; id: string }
 
 /** Structured gateway failure retained for product-level error handling. */
 export class PanelRpcError extends Error {
@@ -166,6 +174,11 @@ export function connectPanel(): PanelApi {
   }>()
   const pendingSettings = new Map<string, {
     resolve: () => void
+    reject: (error: Error) => void
+  }>()
+  const pendingViews = new Map<string, {
+    sessionId: string | null
+    resolve: (owner: chrome.runtime.Port) => void
     reject: (error: Error) => void
   }>()
   const pendingRebinds = new Map<string, {
@@ -272,6 +285,14 @@ export function connectPanel(): PanelApi {
         if (msg.sessionId !== (viewSessionId ?? null)) break
         for (const listener of tabAffinityListeners) listener(msg.state)
         break
+      case 'session.active.result': {
+        const entry = pendingViews.get(msg.id)
+        if (entry === undefined || port === null) break
+        pendingViews.delete(msg.id)
+        if (entry.sessionId === msg.sessionId) entry.resolve(port)
+        else entry.reject(viewRegistrationError())
+        break
+      }
       case 'selection': {
         // The page owns this text; validate it again on the way into the UI.
         const selection = parsePageSelection(msg.selection)
@@ -300,7 +321,12 @@ export function connectPanel(): PanelApi {
     return cause instanceof Error ? cause : new Error(fallback)
   }
 
-  function failAll(error: Error, preserve?: { kind: 'rpc' | 'respond' | 'rebind' | 'settings'; id: string }): void {
+  function viewRegistrationError(): PanelRpcError {
+    return new PanelRpcError('view-unconfirmed', getUiLocale() === 'zh'
+      ? '后台未确认当前对话，请核对侧栏后重试。' : 'The background did not confirm this conversation. Check the panel and try again.')
+  }
+
+  function failAll(error: Error, preserve?: PendingMessage): void {
     for (const listener of pairingListeners) listener({ phase: 'failed', error: 'connection-lost' })
     for (const [id, entry] of pending) {
       if (preserve?.kind === 'rpc' && preserve.id === id) continue
@@ -322,6 +348,11 @@ export function connectPanel(): PanelApi {
       if (preserve?.kind === 'settings' && preserve.id === id) continue
       entry.reject(error)
       pendingSettings.delete(id)
+    }
+    for (const [id, entry] of pendingViews) {
+      if (preserve?.kind === 'view' && preserve.id === id) continue
+      entry.reject(error)
+      pendingViews.delete(id)
     }
   }
 
@@ -369,7 +400,7 @@ export function connectPanel(): PanelApi {
   function invalidate(
     stale: chrome.runtime.Port,
     error: Error,
-    preserve?: { kind: 'rpc' | 'respond' | 'rebind' | 'settings'; id: string },
+    preserve?: PendingMessage,
   ): void {
     if (port !== stale) return
     port = null
@@ -385,7 +416,7 @@ export function connectPanel(): PanelApi {
    */
   function send(
     message: unknown,
-    preserve?: { kind: 'rpc' | 'respond' | 'rebind' | 'settings'; id: string },
+    preserve?: PendingMessage,
   ): Promise<void> {
     const current = port
     if (current !== null) {
@@ -398,6 +429,9 @@ export function connectPanel(): PanelApi {
     }
 
     return ensurePort(150).then((next) => {
+      if (preserve?.kind === 'view' && pendingViews.get(preserve.id)?.sessionId !== (viewSessionId ?? null)) {
+        throw viewRegistrationError()
+      }
       try {
         next.postMessage(message)
       } catch (cause) {
@@ -616,11 +650,38 @@ export function connectPanel(): PanelApi {
         viewSessionId = nextSessionId
         clearPageProjection()
       }
-      return send(restore === true ? { type: 'session.active', sessionId, restore: true } : { type: 'session.active', sessionId, isNew })
+      const id = crypto.randomUUID()
+      const registered = new Promise<chrome.runtime.Port>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pendingViews.delete(id)
+          reject(viewRegistrationError())
+        }, 5000)
+        const entry = {
+          sessionId: nextSessionId ?? null,
+          resolve: (owner: chrome.runtime.Port) => { clearTimeout(timer); resolve(owner) },
+          reject: (error: Error) => { clearTimeout(timer); reject(error) },
+        }
+        pendingViews.set(id, entry)
+        void send(restore === true ? { type: 'session.active', id, sessionId, restore: true }
+          : { type: 'session.active', id, sessionId, isNew }, { kind: 'view', id }).catch((error: unknown) => {
+          if (pendingViews.get(id) !== entry) return
+          pendingViews.delete(id)
+          entry.reject(connectionError(error))
+        })
+      })
+      return registered.then(owner => {
+        if (port !== owner || viewSessionId !== nextSessionId) throw viewRegistrationError()
+      })
         .catch((error: unknown) => {
-          // A failed switch leaves the old conversation on screen. Reconnect
-          // its view, with fresh page state, only if the switch is still current.
-          if (viewChange === change && nextSessionId !== undefined) viewSessionId = previousSessionId
+          // A failed switch can have changed the worker before its reply was
+          // lost. Restore the still-displayed view without selecting a page.
+          if (viewChange === change) {
+            if (nextSessionId !== undefined) viewSessionId = previousSessionId
+            clearPageProjection()
+            if (port !== null) {
+              void send({ type: 'session.active', sessionId: viewSessionId ?? null, restore: true }).catch(() => {})
+            }
+          }
           throw error
         })
     },
