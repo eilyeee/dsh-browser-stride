@@ -288,7 +288,7 @@ const EN: PanelCopy = {
   },
   browserFeedback: {
     states: { observed: 'Page state observed; a saved business change is not verified.', dispatched: 'Operation sent; its business result still needs checking.', 'readback-unconfirmed': 'Page readback was not confirmed. Do not repeat the operation.', 'not-applied': 'This operation was not applied.', failed: 'The browser operation failed.', uncertain: 'The operation may have happened. Its result is unknown; do not repeat it.' },
-    nextSteps: { reobserve: 'Read a fresh snapshot and use current references.', focus_window: 'Bring the controlled page to the foreground.', reselect_instance: 'Select the intended browser.', request_permission: 'Return to the extension or complete the required user action; access is not restored automatically.', repair_arguments: 'Correct the tool arguments.', wait_for_page: 'Wait for the page to settle, then observe again.', release_debugger: 'Resolve the conflicting browser debugger.', upgrade_runtime: 'Update the matching Host and extension.', reconnect: 'Check the browser connection before continuing.', reconcile_business_state: 'Read the current state and report the uncertainty; ask the user before more writes.', none: 'Stop this operation and report the reason.' },
+    nextSteps: { reobserve: 'Read a fresh snapshot and use current references.', focus_window: 'Bring the controlled page to the foreground.', reselect_instance: 'Select the intended browser.', request_permission: 'Return to the extension or complete the required user action; access is not restored automatically.', enable_diagnostics: 'Open Page Diagnostics in this conversation and choose Enable diagnostics for this page.', repair_arguments: 'Correct the tool arguments.', wait_for_page: 'Wait for the page to settle, then observe again.', release_debugger: 'Resolve the conflicting browser debugger.', upgrade_runtime: 'Update the matching Host and extension.', reconnect: 'Check the browser connection before continuing.', reconcile_business_state: 'Read the current state and report the uncertainty; ask the user before more writes.', none: 'Stop this operation and report the reason.' },
   },
   turnFailure: {
     generic: 'This request failed before the turn completed. Check DSH’s service status before sending another message.',
@@ -560,7 +560,7 @@ const ZH: PanelCopy = {
   },
   browserFeedback: {
     states: { observed: '已观察页面状态，尚未确认业务保存。', dispatched: '操作已发出，业务结果仍需核对。', 'readback-unconfirmed': '页面回读未确认，结果尚不确定，请勿重复操作。', 'not-applied': '本次操作尚未执行。', failed: '浏览器操作失败。', uncertain: '操作可能已发生，结果尚不确定，请勿重复执行。' },
-    nextSteps: { reobserve: '重新读取页面并使用最新引用。', focus_window: '请将受控页面切到前台。', reselect_instance: '请选择目标浏览器。', request_permission: '请回到扩展或完成需要人工处理的步骤，授权不会自动恢复。', repair_arguments: '修正工具参数后再处理。', wait_for_page: '等待页面稳定后重新观察。', release_debugger: '请处理浏览器调试连接冲突。', upgrade_runtime: '请更新配套的 Host 和扩展。', reconnect: '请检查浏览器连接后再继续。', reconcile_business_state: '先读取当前状态并说明不确定之处，继续写入前请用户确认。', none: '停止本次操作并说明原因。' },
+    nextSteps: { reobserve: '重新读取页面并使用最新引用。', focus_window: '请将受控页面切到前台。', reselect_instance: '请选择目标浏览器。', request_permission: '请回到扩展或完成需要人工处理的步骤，授权不会自动恢复。', enable_diagnostics: '在当前对话的「页面诊断」中点击「开启此页诊断」。', repair_arguments: '修正工具参数后再处理。', wait_for_page: '等待页面稳定后重新观察。', release_debugger: '请处理浏览器调试连接冲突。', upgrade_runtime: '请更新配套的 Host 和扩展。', reconnect: '请检查浏览器连接后再继续。', reconcile_business_state: '先读取当前状态并说明不确定之处，继续写入前请用户确认。', none: '停止本次操作并说明原因。' },
   },
   turnFailure: {
     generic: '本轮请求失败，未能完成。请检查 DSH 服务状态后再发送消息继续。',

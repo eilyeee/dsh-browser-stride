@@ -17,6 +17,10 @@ const errorTypes = new Set(['Error', 'TypeError', 'ReferenceError', 'SyntaxError
 // remains owned until native cleanup or a confirmed exclusive detach.
 const START_TIMEOUT_MS = 10_000
 
+export class DiagnosticsNotEnabledError extends Error {
+  constructor() { super('diagnostics-not-enabled') }
+}
+
 export class PageDiagnostics {
   private captures = new Map<number, Capture>()
   private queues = new Map<number, Promise<unknown>>()
@@ -124,7 +128,8 @@ export class PageDiagnostics {
   async read(tabId: number, current: () => boolean, ownerScope: string, limit = 30): Promise<DiagnosticsSnapshot> {
     const capture = this.captures.get(tabId)
     if (capture !== undefined && (!capture.current() || capture.lease !== undefined && !capture.lease.current())) void this.stop(tabId, capture.id).catch(() => {})
-    if (capture === undefined || !capture.ready || capture.ownerScope !== ownerScope || !current() || !this.valid(tabId, capture)) throw Error('diagnostics-not-enabled')
+    if (!current()) throw Error('diagnostics-document-changed')
+    if (capture === undefined || !capture.ready || capture.ownerScope !== ownerScope || !this.valid(tabId, capture)) throw new DiagnosticsNotEnabledError()
     const tree = await capture.lease!.command<{ frameTree: { frame: { id: string; loaderId: string } } }>('Page.getFrameTree')
     if (`${tree.frameTree.frame.id}:${tree.frameTree.frame.loaderId}` !== capture.document || !current() || !this.valid(tabId, capture)) {
       await this.stop(tabId, capture.id); throw Error('diagnostics-document-changed')

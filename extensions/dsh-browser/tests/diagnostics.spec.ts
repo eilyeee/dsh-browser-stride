@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { PageDiagnostics } from '../src/background/diagnostics.ts'
+import { DiagnosticsNotEnabledError, PageDiagnostics } from '../src/background/diagnostics.ts'
 import type { DebuggerPages, ReadDebugLease } from '../src/background/debugger-pages.ts'
 import { diagnosticRoute, diagnosticsSchema } from '@eilyeee/dsh-browser-stride/src/diagnostics.ts'
 
@@ -31,11 +31,12 @@ describe('native-owned page diagnostics', () => {
   })
   it('cannot activate through a read, or read another native session capture', async () => {
     const h = fixture()
-    await expect(h.diagnostics.read(42, h.current, 's')).rejects.toThrow('not-enabled')
+    await expect(h.diagnostics.read(42, h.current, 's')).rejects.toBeInstanceOf(DiagnosticsNotEnabledError)
+    await expect(h.diagnostics.read(42, () => false, 's')).rejects.toThrow('diagnostics-document-changed')
     expect(h.acquireReadLease).not.toHaveBeenCalled()
     await expect(h.diagnostics.start(42, h.current, h.current, '')).rejects.toThrow('session-required')
     await h.diagnostics.start(42, h.current, h.current, 's')
-    await expect(h.diagnostics.read(42, h.current, 'another')).rejects.toThrow('not-enabled')
+    await expect(h.diagnostics.read(42, h.current, 'another')).rejects.toBeInstanceOf(DiagnosticsNotEnabledError)
     await h.diagnostics.stop(42)
   })
   it('returns only bounded main-document metadata, excluding secret messages, queries, bodies and headers', async () => {

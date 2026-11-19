@@ -56,6 +56,10 @@ package versions currently identify development builds, not supported releases.
 
 ### Fixed
 
+- Reading diagnostics for an authorized page without an active capture now
+  points to the current sidebar’s Page Diagnostics control. A stale or
+  unavailable target still reports its own failure.
+
 - The sidebar waits for the background to confirm its displayed conversation
   before submitting a new prompt or selecting a page. A lost registration reply
   leaves the prompt available to retry and does not replay a page action.

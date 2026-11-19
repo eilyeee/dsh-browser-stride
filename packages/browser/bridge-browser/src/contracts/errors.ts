@@ -30,6 +30,7 @@ export type BrowserErrorCode =
   | 'target_obscured'
   | 'navigated'
   | 'permission_denied'
+  | 'diagnostics_not_enabled'
   | 'focus_required'
   | 'debugger_unavailable'
   | 'page_busy'
@@ -49,6 +50,7 @@ export const BROWSER_ERROR_CODES: readonly BrowserErrorCode[] = [
   'target_obscured',
   'navigated',
   'permission_denied',
+  'diagnostics_not_enabled',
   'focus_required',
   'debugger_unavailable',
   'page_busy',
@@ -72,6 +74,7 @@ export type NextStep =
   | 'focus_window'
   | 'reselect_instance'
   | 'request_permission'
+  | 'enable_diagnostics'
   | 'repair_arguments'
   | 'wait_for_page'
   | 'release_debugger'
@@ -113,6 +116,7 @@ const CATALOG: Readonly<Record<BrowserErrorCode, ErrorDefault>> = {
   target_obscured: { nextStep: 'focus_window', retryable: true, blocksWrites: true },
   navigated: { nextStep: 'reobserve', retryable: true, blocksWrites: true },
   permission_denied: { nextStep: 'request_permission', retryable: false, blocksWrites: true },
+  diagnostics_not_enabled: { nextStep: 'enable_diagnostics', retryable: false, blocksWrites: false },
   focus_required: { nextStep: 'focus_window', retryable: true, blocksWrites: true },
   debugger_unavailable: { nextStep: 'release_debugger', retryable: true, blocksWrites: true },
   page_busy: { nextStep: 'wait_for_page', retryable: true, blocksWrites: false },
@@ -185,6 +189,8 @@ export function fromLegacyToolError(code: string, message: string): BrowserError
       return makeBrowserError('target_unavailable', message)
     case 'content-unavailable':
       return makeBrowserError('target_unavailable', message)
+    case 'diagnostics-not-enabled':
+      return makeBrowserError('diagnostics_not_enabled', message)
     case 'action-failed':
       return makeBrowserError('action_failed', message)
     case 'field-readonly':

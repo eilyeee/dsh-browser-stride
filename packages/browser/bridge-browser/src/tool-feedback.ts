@@ -11,7 +11,7 @@ export interface BrowserToolFeedback {
   code?: BrowserErrorCode
   nextStep?: NextStep
 }
-const NEXT_STEPS = ['reobserve', 'focus_window', 'reselect_instance', 'request_permission', 'repair_arguments', 'wait_for_page', 'release_debugger', 'upgrade_runtime', 'reconnect', 'reconcile_business_state', 'none'] as const
+const NEXT_STEPS = ['reobserve', 'focus_window', 'reselect_instance', 'request_permission', 'enable_diagnostics', 'repair_arguments', 'wait_for_page', 'release_debugger', 'upgrade_runtime', 'reconnect', 'reconcile_business_state', 'none'] as const
 export function parseToolFeedback(value: unknown): BrowserToolFeedback | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
   const v = value as Record<string, unknown>
@@ -41,6 +41,7 @@ export function failureFeedback(code: string, readOnly: boolean, notDispatched =
     case 'timeout': case 'bridge-closed': case 'action-duplicate': case 'action-conflict': case 'receipt-unavailable': case 'execution-denied':
       kind = readOnly ? 'connection_unavailable' : 'result_unknown'; state = readOnly ? 'failed' : 'uncertain'; break
     case 'content-unavailable': kind = 'target_unavailable'; state = readOnly ? 'failed' : 'uncertain'; break
+    case 'diagnostics-not-enabled': kind = readOnly ? 'diagnostics_not_enabled' : 'result_unknown'; state = readOnly ? 'failed' : 'uncertain'; break
     case 'action-failed': kind = readOnly ? 'action_failed' : 'result_unknown'; state = readOnly ? 'failed' : 'uncertain'; break
     default: kind = readOnly ? 'internal' : 'result_unknown'; state = readOnly ? 'failed' : 'uncertain'
   }
@@ -52,5 +53,8 @@ export function failureFeedback(code: string, readOnly: boolean, notDispatched =
   return { ...observationFeedback(state), code: kind, nextStep: errorDefault(kind).nextStep }
 }
 export function feedbackText(feedback: BrowserToolFeedback): string {
-  return `Browser operation feedback: ${JSON.stringify(feedback)}. This is diagnostic state, not authorization or proof of a saved business change.`
+  const guidance = feedback.code === 'diagnostics_not_enabled'
+    ? ' Ask the user to open Page Diagnostics in this conversation’s sidebar and choose Enable diagnostics for this page. Read diagnostics after capture starts.'
+    : ''
+  return `Browser operation feedback: ${JSON.stringify(feedback)}. This is diagnostic state, not authorization or proof of a saved business change.${guidance}`
 }

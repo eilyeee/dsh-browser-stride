@@ -118,6 +118,7 @@ export type ToolErrorCode =
   | 'approval-timeout'
   | 'no-active-tab'
   | 'content-unavailable'
+  | 'diagnostics-not-enabled'
   | 'design-zoom-not-selected'
   | 'action-failed'
   | 'timeout'

@@ -31,7 +31,7 @@ import type { CreatedPageAccess } from './page-access.ts'
 import { selectionAttemptSummary, type SelectionAttemptStatus } from './selection-attempts.ts'
 
 import { capturePageScreenshot, consumeVisualObservation, hasVisualObservation, type VisualAuthority } from './visual.ts'
-import { pageDiagnostics } from './diagnostics.ts'
+import { DiagnosticsNotEnabledError, pageDiagnostics } from './diagnostics.ts'
 import { contentObservationSchema, snapshotCoverageSchema, type SnapshotCoverage } from '@eilyeee/dsh-browser-stride/src/snapshot-observation.ts'
 
 /** A tool call from the bridge. */
@@ -568,7 +568,13 @@ async function dispatchOnce(
       return { ok: false, error: { code: 'bad-args', message: 'Diagnostics require the current session and a limit from 1 to 100.' } }
     }
     try { return { ok: true, result: await pageDiagnostics.read(tabId, requestCurrent, call.sessionId, Number(call.args.limit)) } }
-    catch { return unavailable('Enable page diagnostics in the extension panel for this session and document, then reproduce the problem. Captures stop after navigation, revocation or ten minutes.') }
+    catch (error) {
+      if (!requestCurrent()) return targetChanged()
+      if (error instanceof DiagnosticsNotEnabledError) {
+        return unavailable('Enable diagnostics for this page in the current side panel.', 'diagnostics-not-enabled')
+      }
+      return unavailable('Page diagnostics could not read the selected document.')
+    }
   }
   if (call.name === 'browser_click_at' && !consumeVisualObservation(tabId, call.args.screenshotRef, visualAuthority)) {
     return staleScreenshot()

@@ -29,6 +29,23 @@ describe('registerBrowserTools', () => {
     expect(JSON.stringify(result.content)).not.toContain('synthetic-secret')
     expect(JSON.stringify(result.content)).not.toContain('executor diagnostic')
   })
+  it('asks for native diagnostic capture only when the extension reports it missing', async () => {
+    const h = makeHarness(); registerBrowserTools(h.ctx, h.bridge, { toolTimeoutMs: 1000, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
+    const hook = (h.ctx.on as ReturnType<typeof vi.fn>).mock.calls.find(([name]) => name === 'tools/execute')![1]
+    const failure = (code: string) => ({
+      isError: true,
+      error: { message: 'diagnostics-not-enabled PRIVATE-ERROR', info: { name: 'BridgeToolError', code } },
+      content: [{ type: 'text', text: 'PRIVATE-RESULT' }],
+    })
+
+    const result = await hook({ name: 'browser_get_diagnostics' }, async () => failure('diagnostics-not-enabled'))
+    expect(result.meta.browserFeedback).toMatchObject({ state: 'failed', code: 'diagnostics_not_enabled', nextStep: 'enable_diagnostics' })
+    expect(JSON.stringify(result.content)).toContain('Enable diagnostics for this page')
+    expect(JSON.stringify(result.content)).not.toContain('PRIVATE-')
+    const unavailable = await hook({ name: 'browser_get_diagnostics' }, async () => failure('content-unavailable'))
+    expect(unavailable.meta.browserFeedback).toMatchObject({ state: 'failed', code: 'target_unavailable', nextStep: 'reobserve' })
+    expect(JSON.stringify(unavailable.content)).not.toContain('Enable diagnostics for this page')
+  })
   it('does not treat a rendered snapshot or an explicit baseline ID as model delivery proof', async () => {
     const h = makeHarness(); registerBrowserTools(h.ctx, h.bridge, { toolTimeoutMs: 1000, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
     const execute = h.registered.find(item => item.name === 'browser_snapshot')!.definition.execute as (a: unknown, e: unknown) => Promise<{ text: string; coverage: { complete: boolean; projection: string } }>
