@@ -3,7 +3,7 @@ export type SelectionAttemptStatus =
   | { state: 'not-observed' | 'pending' | 'selected' }
   | { state: 'failed'; code: string }
 
-const CODES = new Set(['binding-busy', 'no-active-tab', 'timeout', 'cancelled', 'page-access-required', 'stale-binding'])
+const CODES = new Set(['binding-busy', 'binding-storage', 'no-active-tab', 'timeout', 'cancelled', 'page-access-required', 'stale-binding'])
 
 export function selectionAttemptSummary(value: SelectionAttemptStatus): SelectionAttemptStatus {
   return value.state === 'failed'

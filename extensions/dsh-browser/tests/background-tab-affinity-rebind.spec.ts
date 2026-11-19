@@ -315,6 +315,52 @@ describe('background tab-affinity rebind protocol', () => {
     })
   })
 
+  it.each(['same', 'changed'] as const)('waits for session storage and rechecks the %s conversation view before acknowledging selection', async view => {
+    const h = await connectPanelForTest()
+    const sessionId = 'pending-selection'
+    h.onMessage.emit({ type: 'session.active', sessionId, restore: true })
+    const state = h.postMessage.mock.calls.map(([msg]) => msg).filter(msg => msg.type === 'tab-affinity').at(-1).state
+    let finish!: () => void
+    const pending = new Promise<void>(resolve => { finish = resolve })
+    const storage = vi.mocked(chrome.storage.session.set)
+    storage.mockImplementation(async (value = {}) => {
+      if ((value as { dshTabAffinity?: { sessionTabs?: Record<string, { tabId: number }> } })
+        .dshTabAffinity?.sessionTabs?.[sessionId]?.tabId === 2) await pending
+    })
+    h.onMessage.emit({ type: 'tab-affinity.rebind', id: 'wait-for-save', sessionId, tabId: 2, revision: state.revision })
+    const result = { type: 'tab-affinity.rebind.result', id: 'wait-for-save', ok: true }
+    try {
+      await vi.waitFor(() => expect(storage).toHaveBeenCalledWith(expect.objectContaining({
+        dshTabAffinity: expect.objectContaining({ sessionTabs: expect.objectContaining({ [sessionId]: expect.objectContaining({ tabId: 2 }) }) }),
+      })))
+      expect(h.postMessage).not.toHaveBeenCalledWith(result)
+      if (view === 'changed') h.onMessage.emit({ type: 'session.active', sessionId: 'another-view', restore: true })
+    } finally { finish() }
+    if (view === 'same') {
+      await vi.waitFor(() => expect(h.postMessage).toHaveBeenCalledWith(result))
+    } else {
+      await vi.waitFor(() => expect(h.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'tab-affinity.rebind.result', id: 'wait-for-save', ok: false, error: expect.objectContaining({ code: 'stale-binding' }),
+      })))
+      expect(h.postMessage).not.toHaveBeenCalledWith(result)
+    }
+  })
+
+  it('reports a storage refusal for an explicit group selection without acknowledging it', async () => {
+    const h = await connectPanelForTest()
+    const sessionId = 'unsaved-selection'
+    h.onMessage.emit({ type: 'session.active', sessionId, restore: true })
+    const state = h.postMessage.mock.calls.map(([msg]) => msg).filter(msg => msg.type === 'tab-affinity').at(-1).state
+    vi.mocked(chrome.storage.session.set).mockImplementation(async (value = {}) => {
+      if ('dshTabAffinity' in value) throw new Error('session storage failure')
+    })
+    h.onMessage.emit({ type: 'tab-affinity.rebind', id: 'save-refused', sessionId, tabId: 2, revision: state.revision })
+    await vi.waitFor(() => expect(h.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'tab-affinity.rebind.result', id: 'save-refused', ok: false, error: expect.objectContaining({ code: 'binding-storage' }),
+    })))
+    expect(h.postMessage).not.toHaveBeenCalledWith({ type: 'tab-affinity.rebind.result', id: 'save-refused', ok: true })
+  })
+
   it('reports an active-tab query failure and leaves the existing binding unchanged', async () => {
     const { onMessage, postMessage, query } = await connectPanelForTest()
     onMessage.emit({ type: 'session.active', sessionId: 'rebind-session', restore: true })

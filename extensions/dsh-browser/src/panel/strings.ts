@@ -39,6 +39,7 @@ export interface PanelCopy {
     fenceUnavailable: string
     current: string
     unselected: string
+    unconfirmed: string
     notReady: string
     title: string
     body: string
@@ -299,6 +300,7 @@ const EN: PanelCopy = {
     fenceUnavailable: 'Write-control state is unavailable. Keep actions stopped; reload the extension and authorize the page again.',
     current: 'Current conversation target',
     unselected: 'No authorized page selected',
+    unconfirmed: 'Selection unconfirmed',
     notReady: 'Wait for the conversation and page state to finish loading before selecting a page.',
     title: 'DSH control group',
     body: 'DSH uses authorized pages in its group. Switching your tabs does not change its target.',
@@ -570,6 +572,7 @@ const ZH: PanelCopy = {
     fenceUnavailable: '无法读取写入控制状态，页面修改保持停止。请重载扩展并重新授权。',
     current: '当前对话目标',
     unselected: '尚未选择已授权页面',
+    unconfirmed: '选页未确认',
     notReady: '请等待对话和页面状态加载完成后再选页。',
     title: 'DSH 控制分组',
     body: 'DSH 只操作分组内已授权的页面。你切换标签页时，控制目标保持不变。',

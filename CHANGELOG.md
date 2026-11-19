@@ -56,6 +56,10 @@ package versions currently identify development builds, not supported releases.
 
 ### Fixed
 
+- Native group-page selection waits for session storage before acknowledging
+  the selection. The panel distinguishes pending and unconfirmed selections,
+  and a changed conversation or page can't receive a late success reply.
+
 - Development build 0.1.36 waits for the browser to finish the new page's
   load before attaching Chrome's debugger. Setup has a deadline and late
   attachments retain their tab slot until cleanup. The readiness check uses

@@ -411,17 +411,20 @@ export function ControlGroupStatus({ state, pages, copy, onSelect, selectionAvai
 }): React.JSX.Element {
   const [selecting, setSelecting] = useState(false)
   const [selectionError, setSelectionError] = useState('')
-  const selectedPage = pages.find(page => page.tabId === state?.controlled?.tabId)
+  const selectedPage = selecting || selectionError !== '' ? undefined : pages.find(page => page.tabId === state?.controlled?.tabId)
+  const targetLabel = selecting ? copy.controlGroup.selecting
+    : selectionError !== '' ? copy.controlGroup.unconfirmed
+    : selectedPage === undefined ? copy.controlGroup.unselected : tabLabel(selectedPage, copy.controlGroup.choose)
   return <section className="tab-affinity control-group" role="status">
     <strong>{copy.controlGroup.title}</strong>
     <p>{copy.controlGroup.body}</p>
-    <p>{copy.controlGroup.current}: {selectedPage === undefined ? copy.controlGroup.unselected : tabLabel(selectedPage, copy.controlGroup.choose)}</p>
+    <p>{copy.controlGroup.current}: {targetLabel}</p>
     {state?.inputControl === 'handoff-required' && <p>{copy.controlGroup.handoffRequired}</p>}
     {state?.inputControl === 'unavailable' && <p role="alert">{copy.controlGroup.fenceUnavailable}</p>}
     {(!selectionAvailable || state === null) && <p>{copy.controlGroup.notReady}</p>}
     {pages.length === 0 ? <p>{copy.controlGroup.empty}</p> : <div className="control-group-pages" role="group" aria-label={copy.controlGroup.page}>
       {pages.map(page => <button key={page.tabId} type="button" data-tab-id={page.tabId}
-        title={page.url} aria-pressed={page.tabId === state?.controlled?.tabId} disabled={selecting || !selectionAvailable || state === null}
+        title={page.url} aria-pressed={page.tabId === selectedPage?.tabId} disabled={selecting || !selectionAvailable || state === null}
         onClick={event => {
           if (!event.nativeEvent.isTrusted) return
           setSelecting(true); setSelectionError('')
@@ -429,7 +432,6 @@ export function ControlGroupStatus({ state, pages, copy, onSelect, selectionAvai
             ? cause.message : copy.controlGroup.failed)).finally(() => setSelecting(false))
         }}>{tabLabel(page, copy.controlGroup.choose)}</button>)}
     </div>}
-    {selecting && <p>{copy.controlGroup.selecting}</p>}
     {selectionError !== '' && <p role="alert">{selectionError}</p>}
   </section>
 }
@@ -2292,7 +2294,7 @@ export function App(): React.JSX.Element {
       </section>
       <VersionStatus caps={caps} locale={locale} />
       <PageAccessDiagnostics api={api} access={pageAccess} locale={locale} />
-      <ControlGroupStatus state={tabAffinity} pages={pageAccess.pages ?? []} copy={copy} onSelect={selectGroupPage}
+      <ControlGroupStatus key={sessionRef.current} state={tabAffinity} pages={pageAccess.pages ?? []} copy={copy} onSelect={selectGroupPage}
         selectionAvailable={state === 'connected' && sessionRef.current !== null && !sessionChanging} />
       <DiagnosticsPanel api={api} sessionId={sessionRef.current} affinity={tabAffinity} available={state === 'connected' && caps?.pageDiagnostics === true && pageAccess.controlledGranted} locale={locale} />
       <RecoveryPanel api={api} sessionId={sessionRef.current} affinity={tabAffinity} available={state === 'connected' && caps?.manualRecovery === true && pageAccess.controlledGranted} working={working || sessionSwitchBlocked} locale={locale} />

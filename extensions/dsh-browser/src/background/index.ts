@@ -294,7 +294,7 @@ const selectionAttempts = new SelectionAttempts()
 const TAB_AFFINITY_REBIND_TIMEOUT_MS = 10_000
 
 class TabAffinityRebindError extends Error {
-  constructor(readonly code: 'no-active-tab' | 'timeout' | 'cancelled' | 'page-access-required' | 'stale-binding', message: string) {
+  constructor(readonly code: 'no-active-tab' | 'timeout' | 'cancelled' | 'page-access-required' | 'stale-binding' | 'binding-storage', message: string) {
     super(message)
     this.name = 'TabAffinityRebindError'
   }
@@ -875,23 +875,25 @@ function storedAffinity(): StoredTabAffinity | null {
 function persistTabAffinity(strict = false): Promise<void> {
   const record = storedAffinity()
   const serialized = JSON.stringify(record)
-  if (serialized === lastPersistedAffinity) return affinityPersistence
-  lastPersistedAffinity = serialized
-  const detached = { sessionIds: tabAffinity.detachedSessionIds(), detached: tabAffinity.snapshot().detached === true }
-  const serializedDetachment = JSON.stringify(detached)
-  const pending = affinityPersistence.catch(() => {}).then(async () => {
-    if (lastPersistedDetachment !== serializedDetachment) {
-      await chrome.storage.local.set({ [DETACHED_SESSIONS_STORAGE_KEY]: detached })
-      lastPersistedDetachment = serializedDetachment
-    }
-    if (record === null) await chrome.storage.session.remove(TAB_AFFINITY_STORAGE_KEY)
-    else await chrome.storage.session.set({ [TAB_AFFINITY_STORAGE_KEY]: record })
-  })
-  affinityPersistence = pending.catch(() => {
-    if (lastPersistedAffinity === serialized) lastPersistedAffinity = undefined
-    lastPersistedDetachment = undefined
-  })
-  return strict ? pending : affinityPersistence
+  if (serialized !== lastPersistedAffinity) {
+    lastPersistedAffinity = serialized
+    const detached = { sessionIds: tabAffinity.detachedSessionIds(), detached: tabAffinity.snapshot().detached === true }
+    const serializedDetachment = JSON.stringify(detached)
+    const pending = affinityPersistence.catch(() => {}).then(async () => {
+      if (lastPersistedDetachment !== serializedDetachment) {
+        await chrome.storage.local.set({ [DETACHED_SESSIONS_STORAGE_KEY]: detached })
+        lastPersistedDetachment = serializedDetachment
+      }
+      if (record === null) await chrome.storage.session.remove(TAB_AFFINITY_STORAGE_KEY)
+      else await chrome.storage.session.set({ [TAB_AFFINITY_STORAGE_KEY]: record })
+    })
+    affinityPersistence = pending
+    void pending.catch(() => {
+      if (affinityPersistence === pending) lastPersistedAffinity = undefined
+      lastPersistedDetachment = undefined
+    })
+  }
+  return strict ? affinityPersistence : affinityPersistence.catch(() => {})
 }
 
 function observeActiveSummary(summary: AffinityTab): void {
@@ -1282,11 +1284,12 @@ async function refreshSessionSnapshot(sessionId: string): Promise<void> {
 }
 
 /** Select an authorized group member after a fresh native check. Legacy panels may name the active authorized tab. */
-async function rebindTabAffinityToActive(signal: AbortSignal, sessionId?: string, selected?: { tabId: number; current: () => boolean; expectedUrl?: string }): Promise<void> {
+async function rebindTabAffinityToActive(signal: AbortSignal, sessionId: string | undefined, viewCurrent: () => boolean,
+  selected?: { tabId: number; current: () => boolean; expectedUrl?: string }): Promise<void> {
   await abortable(Promise.all([affinityReady, pageSessionContexts.ready]).then(() => undefined), signal)
   const tab = selected === undefined ? await syncActiveTab(undefined, signal) : await abortable(chrome.tabs.get(selected.tabId), signal)
   throwIfRebindAborted(signal)
-  if (selected !== undefined && !selected.current()) throw new TabAffinityRebindError('stale-binding', 'The selected group page changed. Choose it again.')
+  if (!viewCurrent() || selected?.current() === false) throw new TabAffinityRebindError('stale-binding', 'The selected group page changed. Choose it again.')
   if (selected?.expectedUrl !== undefined && (pageUrlKey(tab?.url) !== pageUrlKey(selected.expectedUrl)
     || (tab?.pendingUrl !== undefined && pageUrlKey(tab.pendingUrl) !== pageUrlKey(selected.expectedUrl)))) {
     throw new TabAffinityRebindError('stale-binding', getUiLocale() === 'zh'
@@ -1302,9 +1305,23 @@ async function rebindTabAffinityToActive(signal: AbortSignal, sessionId?: string
   if (tab === undefined || !pageAccess.allows(tab)) throw new TabAffinityRebindError('page-access-required', getUiLocale() === 'zh'
     ? '请先在目标页面点击工具栏上的 DSH Stride 图标授权此页' : 'Click the DSH Stride toolbar icon on the intended page first')
   commitTabAffinityRebind(summary, sessionId, 'background')
-  const recorded = await nativeTakeover.acknowledge(summary.tabId, sessionId)
+  const binding = targetLeases.capture(sessionId, summary, () => selectedTargetIdentity(sessionId))
+  const authorized = pageAccess.lease(summary.tabId)
+  const current = () => viewCurrent() && binding.current() && binding.observationCurrent() && authorized()
+  try {
+    await abortable(persistTabAffinity(true), signal)
+  } catch {
+    throwIfRebindAborted(signal)
+    throw new TabAffinityRebindError('binding-storage', getUiLocale() === 'zh'
+      ? '未能保存此对话的页面选择，请核对目标后重试。' : 'The page selection could not be saved. Check the target and try again.')
+  }
+  throwIfRebindAborted(signal)
+  if (!current()) throw new TabAffinityRebindError('stale-binding', getUiLocale() === 'zh'
+    ? '确认选页时对话或页面已变化，请重新选择。' : 'The conversation or page changed before selection was confirmed. Choose it again.')
+  const recorded = await abortable(nativeTakeover.acknowledge(summary.tabId, sessionId), signal)
+  throwIfRebindAborted(signal)
   broadcastTabAffinity()
-  if (!recorded) throw new TabAffinityRebindError('stale-binding', getUiLocale() === 'zh' ? '接管状态未确认，页面修改保持停止。请核对页面后重新选择；若仍失败，请重载扩展并重新授权。' : 'Page handoff was not confirmed. Keep writes stopped and select the intended page again; if it still fails, reload the extension and authorize the page.')
+  if (!recorded || !current()) throw new TabAffinityRebindError('stale-binding', getUiLocale() === 'zh' ? '选页或接管状态未能确认，请核对当前对话和页面后重新选择。' : 'The selection or handoff could not be confirmed. Check the conversation and page, then choose again.')
 }
 
 /** Commit one explicit tab handoff and clear stale element references. */
@@ -2388,11 +2405,12 @@ chrome.runtime.onConnect.addListener((port) => {
         const request = message as { id?: unknown; sessionId?: unknown; tabId?: unknown; revision?: unknown; expectedUrl?: unknown }
         if (typeof request.id !== 'string') break
         const requestId = request.id
-        const rebindSessionId = validSessionId(request.sessionId) ?? panelActiveSessions.get(port)
+        const originalView = panelActiveSessions.get(port)
+        const rebindSessionId = validSessionId(request.sessionId) ?? originalView
         if (tabAffinityRebinds.has(requestId)) break
         // Evidence belongs only to the native panel's own conversation.
         // Never attribute a forged foreign-session request to that session.
-        const finishSelection = rebindSessionId !== undefined && panelActiveSessions.get(port) === rebindSessionId
+        const finishSelection = rebindSessionId !== undefined && originalView === rebindSessionId
           ? selectionAttempts.begin(rebindSessionId) : undefined
         if (unbindingSessions.has(rebindSessionId ?? '')) {
           finishSelection?.('binding-busy')
@@ -2407,18 +2425,18 @@ chrome.runtime.onConnect.addListener((port) => {
             : 'Binding the current tab timed out. Try again.'))
         }, TAB_AFFINITY_REBIND_TIMEOUT_MS)
         tabAffinityRebinds.set(requestId, { controller, timer })
+        const viewCurrent = () => panelPorts.has(port) && panelActiveSessions.get(port) === originalView
         const selection = request.tabId === undefined ? undefined : {
           tabId: request.tabId as number,
           ...(typeof request.expectedUrl === 'string' ? { expectedUrl: request.expectedUrl } : {}),
-          current: () => panelPorts.has(port) && panelActiveSessions.get(port) === rebindSessionId
-            && tabAffinity.snapshot().revision === request.revision,
+          current: () => viewCurrent() && originalView === rebindSessionId && tabAffinity.snapshot().revision === request.revision,
         }
         if ((selection !== undefined && (!Number.isSafeInteger(selection.tabId) || selection.tabId < 0))
           || (request.expectedUrl !== undefined && (selection === undefined || typeof request.expectedUrl !== 'string'
             || request.expectedUrl.length > 2000 || pageUrlKey(request.expectedUrl) === undefined))) {
           controller.abort(new TabAffinityRebindError('stale-binding', 'Invalid control-group page.'))
         }
-        void rebindTabAffinityToActive(controller.signal, rebindSessionId, selection).then(
+        void rebindTabAffinityToActive(controller.signal, rebindSessionId, viewCurrent, selection).then(
           () => {
             finishSelection?.()
             try { port.postMessage({ type: 'tab-affinity.rebind.result', id: requestId, ok: true }) } catch { /* port closed */ }
