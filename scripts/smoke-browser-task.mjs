@@ -11,14 +11,17 @@ import { createServer } from 'node:net'
 import { setTimeout as delay } from 'node:timers/promises'
 import { startDshBackend } from '../benchmark/lib/dsh-process.mjs'
 import { startExtensionBrowser } from '../benchmark/lib/extension-browser.mjs'
+import { TASK_LIMITS } from '../packages/browser/bridge-browser/src/task-budget.ts'
 import { startTaskSite } from './fixtures/task-site.mjs'
 
 assert.equal(process.env.STRIDE_REAL_MODEL, '1', 'Set STRIDE_REAL_MODEL=1 to authorize real-model requests for this smoke.')
 const disconnectOnce = process.env.STRIDE_TASK_DISCONNECT === '1'
 const targetLossOnce = process.env.STRIDE_TASK_TARGET_LOSS === '1'
-assert.ok(!(disconnectOnce && targetLossOnce), 'Use one task-interruption scenario per smoke.')
+const exhaustAfterSave = process.env.STRIDE_TASK_EXHAUST_AFTER_SAVE === '1'
+assert.ok([disconnectOnce, targetLossOnce, exhaustAfterSave].filter(Boolean).length <= 1, 'Use one task-interruption scenario per smoke.')
 const newPageStart = process.env.STRIDE_TASK_NEW_PAGE === '1' || disconnectOnce || targetLossOnce
-const artifactName = targetLossOnce ? 'target-loss-real-model-result.json' : disconnectOnce ? 'disconnect-real-model-result.json' : newPageStart ? 'new-page-real-model-result.json' : 'real-model-result.json'
+const artifactName = exhaustAfterSave ? 'call-limit-readback-result.json' : targetLossOnce ? 'target-loss-real-model-result.json'
+  : disconnectOnce ? 'disconnect-real-model-result.json' : newPageStart ? 'new-page-real-model-result.json' : 'real-model-result.json'
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const require = createRequire(join(repoRoot, 'package.json'))
 const cli = join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'lib/bin.js')
@@ -86,7 +89,7 @@ try {
   const session = await host.client.rpc('session.create', { cwd: taskWorkspace })
   const verificationUrl = new URL('/state', site.url)
   verificationUrl.hostname = '127.0.0.1' // Chromium's test-domain resolver does not configure Node DNS.
-  await writeFile(trigger, JSON.stringify({ sessionId: session.sessionId, url: site.url, verificationUrl: verificationUrl.href, disconnectOnce, targetLossOnce }), { mode: 0o600 })
+  await writeFile(trigger, JSON.stringify({ sessionId: session.sessionId, url: site.url, verificationUrl: verificationUrl.href, disconnectOnce, targetLossOnce, exhaustAfterSave }), { mode: 0o600 })
   await wait(async () => { try { await readFile(`${result}.ready`); return true } catch { return false } }, 'probe registration')
   const rpcId = crypto.randomUUID()
   const response = await fetch(`${host.baseUrl}/api/commands/execute`, { method: 'POST',
@@ -197,8 +200,8 @@ try {
     const outcome = await snapshot()
     assert.equal(outcome.state, 'completed', JSON.stringify(outcome))
     assert.equal(outcome.task.outcome, 'verified')
-    assert.ok(outcome.task.modelRequests > 0 && outcome.task.modelRequests <= 10)
-    assert.ok(outcome.task.toolCalls > 0 && outcome.task.toolCalls <= 20)
+    assert.ok(outcome.task.modelRequests > 0 && outcome.task.modelRequests <= TASK_LIMITS.modelRequests)
+    assert.ok(outcome.task.toolCalls > 0 && outcome.task.toolCalls <= TASK_LIMITS.toolCalls)
     assert.equal(outcome.task.toolCalls, outcome.nestedBrowserCalls + outcome.directBrowserCalls)
     assert.equal(outcome.verified, true)
     assert.ok(outcome.scopeChecks > 0, 'trusted scope read before a managed write')
@@ -206,6 +209,15 @@ try {
     assert.equal(outcome.dispatches, outcome.returned)
     if (disconnectOnce) assert.deepEqual(outcome.dispatchRevisions, [0, 3])
     assert.deepEqual(site.state(), { enabled: true, saved: true })
+    if (exhaustAfterSave) {
+      assert.equal(outcome.task.modelRequests, TASK_LIMITS.modelRequests)
+      assert.equal(outcome.callLimitAfterSave?.savesBeforeInjection, 1)
+      const readback = JSON.parse(await readFile(`${result}.readback_fixture_1.json`, 'utf8'))
+      assert.equal(readback.version, 1)
+      const persisted = await fetch(verificationUrl, { signal: AbortSignal.timeout(2000), redirect: 'error' })
+      assert.equal(persisted.status, 200)
+      assert.equal((await persisted.json()).version, 1, 'The task must not repeat the save after the call limit')
+    }
     let nativePage
     if (newPageStart) {
       nativePage = await browser.worker.evaluate(async ({ url, sessionId, initialTabs }) => {
@@ -230,13 +242,14 @@ try {
     console.log(JSON.stringify({ passed: true, modelRequests: outcome.task.modelRequests, browserCalls: outcome.task.toolCalls,
       ptcCalls: outcome.ptcCalls, nestedBrowserCalls: outcome.nestedBrowserCalls, directBrowserCalls: outcome.directBrowserCalls,
       activeMs: outcome.task.activeMs, verifiedFacts: outcome.facts, scopeChecks: outcome.scopeChecks,
-      realBrowser: true, independentSiteState: true, syntheticStartRefused: true, newPageStart, disconnectOnce }))
+      realBrowser: true, independentSiteState: true, syntheticStartRefused: true, newPageStart, disconnectOnce,
+      callLimitAfterSave: outcome.callLimitAfterSave }))
   }
 } catch (error) {
   const artifacts = join(repoRoot, '.stride-private/validation/task-runtime')
   await mkdir(artifacts, { recursive: true })
   await writeFile(join(artifacts, artifactName), JSON.stringify({ ...(await snapshot()),
-    passed: false, newPageStart, disconnectOnce, targetLossOnce, interruption, errorName: error.name, independentState: site?.state() }, null, 2), { mode: 0o600 }).catch(() => {})
+    passed: false, newPageStart, disconnectOnce, targetLossOnce, exhaustAfterSave, interruption, errorName: error.name, independentState: site?.state() }, null, 2), { mode: 0o600 }).catch(() => {})
   throw error
 } finally {
   await browser?.close().catch(() => {})

@@ -23,7 +23,7 @@ export interface BrowserTaskVerifier {
   verify(input: VerifierInput): Promise<ActionEvidence | undefined>
 }
 interface Job {
-  runId: RunId; revision: number; agent: Agent; abort: AbortController
+  runId: RunId; revision: number; agent: Agent; abort: AbortController; readbackAbort: AbortController
   done: Promise<void>; tick: number; activeMs: number; waiting: Set<string>
   interrupted: boolean; exhausted: boolean; userStopped: boolean; frozen: boolean; writeScopeRejected: boolean
   execution?: BrowserRunExecution
@@ -150,8 +150,9 @@ export class BrowserTaskRuntime {
       this.assertJob(job)
       if (kind === 'modelRequests') this.runs.assertDispatchAuthority(job.execution, String(agent.id))
     } catch (error) {
-      if (error instanceof Error && error.message === 'task-budget-exhausted') job.exhausted = true
-      this.cancel(job)
+      const exhausted = error instanceof Error && error.message === 'task-budget-exhausted'
+      if (exhausted) job.exhausted = true
+      this.cancel(job, exhausted && job.activeMs < TASK_LIMITS.activeMs)
       throw error
     }
   }
@@ -216,18 +217,21 @@ export class BrowserTaskRuntime {
     if (job !== undefined) { job.userStopped = true; this.cancel(job) }
   }
 
-  private assertJob(job: Job): void {
+  private assertJob(job: Job, signal = job.abort.signal): void {
     const run = this.runs.get(job.runId)
-    if (this.closed || job.abort.signal.aborted || run?.state !== 'running' || run.controlRevision !== job.revision) throw new Error('task-execution-revoked')
+    if (this.closed || signal.aborted || run?.state !== 'running' || run.controlRevision !== job.revision) throw new Error('task-execution-revoked')
   }
   private tick(job: Job): void {
     const now = performance.now()
     if (job.waiting.size === 0 && !job.frozen) job.activeMs = Math.min(TASK_LIMITS.activeMs, job.activeMs + Math.max(0, now - job.tick))
     job.tick = now
   }
-  private cancel(job: Job): void {
+  private cancel(job: Job, keepReadback = false): void {
     this.tick(job)
-    job.frozen = true
+    if (!keepReadback) {
+      job.frozen = true
+      job.readbackAbort.abort()
+    }
     job.abort.abort()
     job.agent.cancel({ kind: 'hook', reason: 'browser-task-control' })
   }
@@ -274,6 +278,7 @@ export class BrowserTaskRuntime {
         return
       }
       const value: Job = { runId: run.runId, revision: run.controlRevision, agent, abort: new AbortController(),
+        readbackAbort: new AbortController(),
         done: Promise.resolve(), tick: performance.now(), activeMs: run.task.activeMs, waiting: new Set(), interrupted: false,
         exhausted: false, userStopped: false, frozen: false, writeScopeRejected: false }
       this.jobs.set(run.runId, value)
@@ -343,21 +348,27 @@ export class BrowserTaskRuntime {
     await this.runs.updateTask(job.runId, task => ({ ...task, activeMs: Math.ceil(job.activeMs) }))
     let run = await this.settleStop(job, this.runs.get(job.runId)!)
     if (run.state !== 'running' || run.controlRevision !== job.revision || this.closed) return
-    const needsReview = job.writeScopeRejected || this.runs.dispatches.list(run.sessionId).some(row => requiresDispatchReview(row)
+    const dispatches = this.runs.dispatches.list(run.sessionId)
+    const needsReview = job.writeScopeRejected || dispatches.some(row => requiresDispatchReview(row)
       || row.effect === 'write' && (row.state === 'prepared' || row.state === 'sent_unconfirmed'))
     let outcome: BrowserTask['outcome'] = needsReview ? 'needs-review' : job.exhausted ? 'budget-exhausted'
       : scopeError || job.interrupted ? 'not-completed' : 'needs-review'
     const verifier = this.verifiers.get(run.runId)
-    if (!needsReview && !job.exhausted && !job.interrupted && !scopeError && verifier !== undefined) {
+    const signal = job.readbackAbort.signal
+    // A call limit stops Agent activity. An acknowledged write can still be
+    // checked by the trusted reader within the original active time limit.
+    const returnedWrite = job.exhausted && dispatches.some(row => row.runId === run.runId
+      && row.controlRevision === job.revision && row.effect === 'write' && row.state === 'returned' && row.receipt?.ok === true)
+    if (!needsReview && (!job.exhausted || returnedWrite) && !job.interrupted && !scopeError && !signal.aborted && verifier !== undefined) {
       try {
-        const evidence = await verifier.verify({ run, url: this.targets.get(run.runId)!, signal: job.abort.signal })
-        this.assertJob(job)
+        const evidence = await verifier.verify({ run, url: this.targets.get(run.runId)!, signal })
+        this.assertJob(job, signal)
         if (evidence !== undefined) {
           run = await this.runs.recordFact(run.runId, run.version, { actionId: asActionId(`verify_${crypto.randomUUID()}`),
             requestDigest: createHash('sha256').update(JSON.stringify({ runId: run.runId, revision: job.revision, goal: run.task!.goal, evidence })).digest('hex') as RequestDigest,
             controlRevision: run.controlRevision, dispatchState: 'accepted', outcome: 'verified', verifiedCriteriaIds: ['task-goal'], evidence })
           outcome = 'verified'
-        } else outcome = 'not-completed'
+        } else if (!job.exhausted) outcome = 'not-completed'
       } catch { outcome = job.exhausted ? 'budget-exhausted' : 'needs-review' }
     }
     this.tick(job)

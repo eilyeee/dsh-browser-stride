@@ -1,5 +1,6 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import { createReadbackVerifier } from '../../packages/browser/bridge-browser/src/readback-verifier.ts'
+import { TASK_LIMITS } from '../../packages/browser/bridge-browser/src/task-budget.ts'
 import { taskSiteBaseline } from './task-site.mjs'
 
 export const name = 'stride-task-runtime-probe'
@@ -10,7 +11,30 @@ export function apply(ctx, config) {
   const registered = new Set()
   const admittedRevisions = new Set()
   let heldSnapshot = false
+  let callLimitAfterSave
   let ptcCalls = 0, nestedBrowserCalls = 0, directBrowserCalls = 0, scopeChecks = 0
+  ctx.on('agent/request', async ({ agent }, next) => {
+    if (expected?.exhaustAfterSave !== true || String(agent.id) !== expected.sessionId || callLimitAfterSave !== undefined) return next()
+    const run = ctx.browserRuns.list(expected.sessionId).find(row => row.state === 'running' && row.task !== undefined)
+    if (run === undefined) return next()
+    const rows = ctx.browserRuns.dispatches.list(expected.sessionId)
+    if (!rows.some(row => row.runId === run.runId && row.controlRevision === run.controlRevision
+      && row.effect === 'write' && row.state === 'returned' && row.receipt?.ok === true)) return next()
+    const url = new URL(expected.verificationUrl)
+    if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || url.pathname !== '/state') throw Error('Expected a local task fixture')
+    const reply = await fetch(url, { signal: AbortSignal.timeout(2000), redirect: 'error' })
+    if (!reply.ok) throw Error('Synthetic save state unavailable')
+    const state = await reply.json()
+    if (!state.enabled || !state.saved) return next()
+    if (state.version !== 1) throw Error('Expected exactly one synthetic save')
+    // Charge the remaining slots in the test process after the real model has
+    // saved. The final admission goes through the normal Host rejection path.
+    callLimitAfterSave = { admissionsBeforeInjection: run.task.modelRequests, savesBeforeInjection: state.version }
+    for (let used = run.task.modelRequests; used <= TASK_LIMITS.modelRequests; used++) {
+      await ctx.browserTasks.consume(agent, 'modelRequests')
+    }
+    throw Error('The task accepted a request beyond its model call limit')
+  })
   ctx.on('tools/execute', async (exec, next) => {
     if (String(exec.agent?.id) === expected?.sessionId) {
       if (exec.name === 'run_code') ptcCalls += 1
@@ -64,6 +88,7 @@ export function apply(ctx, config) {
     }
     const rows = ctx.browserRuns.dispatches.list(run.sessionId).filter(row => row.runId === run.runId)
     const value = { ptcCalls, nestedBrowserCalls, directBrowserCalls, scopeChecks, state: run.state, version: run.version, controlRevision: run.controlRevision, task: run.task,
+      ...(callLimitAfterSave === undefined ? {} : { callLimitAfterSave }),
       ...(run.pauseReason === undefined ? {} : { pauseReason: run.pauseReason }),
       agentIdle: ctx.agents?.get(run.sessionId)?.status === 'idle',
       facts: run.facts.length, verified: run.facts.some(fact => fact.outcome === 'verified'),

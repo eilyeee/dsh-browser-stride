@@ -492,6 +492,37 @@ describe('Host-owned browser task executor', () => {
     expect(h.current()).toMatchObject({ state: 'blocked', task: { outcome: 'budget-exhausted', [kind]: kind === 'modelRequests' ? 10 : 20 } })
     expect(h.followup).toHaveBeenCalledTimes(1)
   })
+  it.each([
+    { receipt: 'returned', provesResult: true, state: 'completed', outcome: 'verified' },
+    { receipt: 'returned', provesResult: false, state: 'blocked', outcome: 'budget-exhausted' },
+    { receipt: 'unresolved', provesResult: true, state: 'blocked', outcome: 'needs-review' },
+  ] as const)('handles write receipt $receipt at the model limit with proof=$provesResult', async ({ receipt, provesResult, state, outcome }) => {
+    const h = await setup()
+    const verify = vi.fn(async ({ signal }: { signal: AbortSignal }) => {
+      expect(signal.aborted).toBe(false)
+      expect(h.runtime.guard(execution(h.agent, 'browser_click'))).toMatch(/expired/)
+      return provesResult ? { observedText: ['saved synthetic setting'] } : undefined
+    })
+    h.runtime.registerVerifier(h.run.runId, { acceptsTarget: () => true, verify })
+    h.work(async () => {
+      const write = await h.store.dispatches.prepare({ requestId: 'last-save', connectionId: 'synthetic', sessionId: h.run.sessionId,
+        runId: h.run.runId, controlRevision: 0, name: 'browser_click', args: {}, expiresAt: Date.now() + 60000 })
+      await h.store.dispatches.markSent(write.requestId)
+      if (receipt === 'returned') await h.store.dispatches.settle(write.requestId, { state: 'returned', receipt: { ok: true } })
+      try {
+        for (let i = 0; i <= TASK_LIMITS.modelRequests; i++) await h.runtime.consume(h.agent, 'modelRequests')
+      } finally {
+        if (receipt === 'unresolved') await h.store.dispatches.settle(write.requestId, { state: 'unresolved', reason: 'expired' })
+      }
+    })
+    await h.start(); await h.settled()
+    expect(h.current()).toMatchObject({ state, task: { outcome, modelRequests: TASK_LIMITS.modelRequests } })
+    expect(h.current().facts).toHaveLength(outcome === 'verified' ? 1 : 0)
+    expect(verify).toHaveBeenCalledTimes(receipt === 'returned' ? 1 : 0)
+    expect(h.cancel).toHaveBeenCalled()
+    expect(h.followup).toHaveBeenCalledOnce()
+    expect(h.store.dispatches.list(h.run.sessionId)).toHaveLength(1)
+  })
   it('revokes execution immediately on pause and acknowledges stop only after Agent quiescence', async () => {
     const h = await setup()
     const hold = gate()
