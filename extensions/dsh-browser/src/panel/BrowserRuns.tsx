@@ -90,7 +90,11 @@ export function BrowserRuns({ api, sessionId, connected, copy, targetRevision, s
     {data !== null && <ul>
       {data.items.map(run => {
         const budgetBlocked = run.task !== undefined && ['queued', 'paused', 'blocked'].includes(run.state) && taskBudgetExhausted(run.task)
-        const outcome = budgetBlocked ? 'budget-exhausted' : run.task?.outcome
+        const reviewRequired = run.recoveryRequired || run.requiresReconciliation
+        let outcome = run.task?.outcome
+        if (budgetBlocked || outcome === 'budget-exhausted') {
+          outcome = reviewRequired || outcome === 'needs-review' ? 'needs-review' : 'budget-exhausted'
+        }
         return <li key={run.runId} data-run-id={run.runId}>
           <div className="browser-run-status">
             <span>{copy.task(run.runId.slice(-8))}</span>
@@ -106,9 +110,9 @@ export function BrowserRuns({ api, sessionId, connected, copy, targetRevision, s
               onClick={event => { void control(event, run, 'start-new-page') }}>{copy.startNewPage}</button>
           </div>}
           {outcome !== undefined && outcome !== 'pending' && <p role="status">{copy.outcomes[outcome]}</p>}
-          {(run.recoveryRequired || run.requiresReconciliation) && <p>{copy.reconcileHelp}</p>}
-          {run.state === 'paused' && !budgetBlocked && <p>{run.pauseReason === 'browser-disconnected' ? copy.disconnectedHelp
-            : run.pauseReason === 'page-unavailable' ? copy.targetLostHelp : copy.pausedHelp}</p>}
+          {reviewRequired && <p>{copy.reconcileHelp}</p>}
+          {run.state === 'paused' && !budgetBlocked && <p>{run.pauseReason === 'browser-disconnected' ? copy.disconnectedHelp(run.canRetarget === true)
+            : run.pauseReason === 'page-unavailable' ? copy.targetLostHelp(run.canRetarget === true) : copy.pausedHelp}</p>}
           {run.canRetarget && <p>{copy.retargetHelp}</p>}
           {run.state === 'stopping' && <p>{copy.stoppingHelp}</p>}
           {(run.controls.length > 0 || run.canRetarget || run.task?.canStart) && <div className="browser-run-actions">

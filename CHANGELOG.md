@@ -56,6 +56,10 @@ package versions currently identify development builds, not supported releases.
 
 ### Fixed
 
+- Browser task cards show the review instructions first when a write needs
+  review, including after reaching a call limit or stopping the task. The
+  sidebar also accepts blocked tasks that the Host permits continuing.
+
 - When a managed task reaches its model or browser call limit after a write
   returns successfully, its trusted Host reader can still verify the saved
   result within the existing time limit. Automatic browser actions stop, and

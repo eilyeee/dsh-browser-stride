@@ -220,13 +220,15 @@ const EN: PanelCopy = {
       'not-completed': 'The goal was not verified as complete', 'budget-exhausted': 'Execution limit reached; automatic actions have stopped. To continue the work, stop this task and create a new one.' },
     retargetHelp: 'Check the bound page above before continuing. The executor must pick up the updated task.',
     pausedHelp: 'Further actions are paused. This task will not continue automatically.',
-    disconnectedHelp: 'The browser connection was lost and the task was paused. Reconnect, check the page access and binding, then choose “Continue on selected page”.',
-    targetLostHelp: 'The task’s page control or binding was lost, so the task was paused. Authorize and bind the intended page, then choose “Continue on selected page”. Authorizing alone does not resume it.',
+    disconnectedHelp: showContinue => 'The browser connection was lost and the task was paused.'
+      + (showContinue ? ' Reconnect, check the page access and binding, then choose “Continue on selected page”.' : ''),
+    targetLostHelp: showContinue => 'The task paused after losing page control or its binding.'
+      + (showContinue ? ' Authorize and bind the intended page, then choose “Continue on selected page”.' : ''),
     stoppingHelp: 'Stop requested; waiting for the executor to confirm. Earlier actions may already have taken effect.',
-    reconcileHelp: 'Some results are unresolved. Check the page before continuing.',
+    reconcileHelp: 'Some results are unresolved. Check the records in the application, then enter your findings in “Review uncertain operations”.',
     truncated: (shown, total) => `Showing ${shown} of ${total} tasks, with unfinished tasks first.`,
     error: code => code === 'stale-version' ? 'Task status changed. Review the refreshed status before trying again.'
-      : code === 'budget-exhausted' ? 'Execution limit reached. Stop this task before creating another; pausing or changing pages does not reset its limits.'
+      : code === 'budget-exhausted' ? 'The task reached its execution limit. Time and calls already used still count after pausing or changing pages.'
       : code === 'task-page-busy' ? 'Another task is using this tab or has actions there that still need review. Choose another tab or resolve the earlier task first.'
       : code === 'start-uncertain' ? 'Startup is unconfirmed. The page was kept; check task status before doing anything else.'
       : code === 'start-cleanup-unconfirmed' ? 'Task did not start. Check whether the new page is still open.'
@@ -492,13 +494,15 @@ const ZH: PanelCopy = {
       'not-completed': '未核验为完成', 'budget-exhausted': '已达到执行上限，自动操作已停止。要继续处理，请停止本任务后新建。' },
     retargetHelp: '继续前请确认上方绑定的页面，任务随后等待执行器接手。',
     pausedHelp: '任务已暂停，不会自动继续。',
-    disconnectedHelp: '浏览器连接已中断，任务已暂停。重新连接后，确认页面的控制授权和绑定，再点击“在已绑定页面继续”。',
-    targetLostHelp: '页面控制或绑定已失效，任务已暂停。请重新授权并绑定目标页，再点击“在已绑定页面继续”；仅重新授权不会续跑。',
+    disconnectedHelp: showContinue => '浏览器连接已中断，任务已暂停。'
+      + (showContinue ? '重新连接后，确认页面的控制授权和绑定，再点击「在已绑定页面继续」。' : ''),
+    targetLostHelp: showContinue => '页面控制或绑定已失效，任务已暂停。'
+      + (showContinue ? '请重新授权并绑定目标页，再点击「在已绑定页面继续」。' : ''),
     stoppingHelp: '已请求停止，等待执行器确认。此前的操作可能已产生效果。',
-    reconcileHelp: '部分操作结果尚未明确，继续前需要先核对页面。',
+    reconcileHelp: '部分操作结果尚未明确。请先查看实际业务记录，再在「核对未确认操作」中记录核对结果。',
     truncated: (shown, total) => `显示 ${total} 项任务中的 ${shown} 项，未结束任务优先。`,
     error: code => code === 'stale-version' ? '任务状态已变化，请核对刷新后的状态再操作。'
-      : code === 'budget-exhausted' ? '已达到执行上限。请先停止本任务后新建；暂停或更换页面不会重置上限。'
+      : code === 'budget-exhausted' ? '任务已达到执行上限。暂停或换页后，已用时间和次数仍会计入上限。'
       : code === 'task-page-busy' ? '这个标签页已有任务，或有该任务的操作待核对。请选择其他标签页，或先处理原任务。'
       : code === 'start-uncertain' ? '尚未确认是否启动，已保留页面。请先核对任务状态。'
       : code === 'start-cleanup-unconfirmed' ? '任务未启动，请检查新建页面是否仍然打开。'

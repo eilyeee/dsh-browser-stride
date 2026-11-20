@@ -29,8 +29,8 @@ describe('browser task panel boundaries', () => {
     const rpc = vi.fn(async () => list(paused)), copy = PANEL_COPY[locale].runs
     await act(async () => { root.render(createElement(BrowserRuns, { api: { rpc: rpc as PanelApi['rpc'], retargetRun: vi.fn() },
       sessionId: 'session-a', connected: true, targetRevision: 4, copy })) })
-    expect(document.body.textContent).toContain(copy.targetLostHelp)
-    expect(document.body.textContent).not.toContain(copy.disconnectedHelp)
+    expect(document.body.textContent).toContain(copy.targetLostHelp(true))
+    expect(document.body.textContent).not.toContain(copy.disconnectedHelp(false))
     expect(parseBrowserRuns(list(paused), 'session-a').items[0]?.pauseReason).toBe('page-unavailable')
   })
 
@@ -46,7 +46,7 @@ describe('browser task panel boundaries', () => {
       expect(document.querySelector('.run-retarget')).toBeNull()
       expect(document.querySelector('.browser-run-actions')?.textContent).toContain(copy.stop)
       expect(document.body.textContent).toContain(copy.outcomes['budget-exhausted'])
-      expect(document.body.textContent).not.toContain(copy.disconnectedHelp)
+      expect(document.body.textContent).not.toContain(copy.disconnectedHelp(false))
     },
   )
 
@@ -65,6 +65,24 @@ describe('browser task panel boundaries', () => {
     expect(document.querySelector('.browser-run-actions')?.textContent).toContain(copy.stop)
   })
 
+  it.each([
+    { locale: 'zh', state: 'blocked', review: 'requiresReconciliation', outcome: 'needs-review' },
+    { locale: 'en', state: 'paused', review: 'recoveryRequired', outcome: 'pending' },
+    { locale: 'zh', state: 'stopped', review: 'requiresReconciliation', outcome: 'budget-exhausted' },
+  ] as const)('shows review before exhausted-task guidance for a $state task in $locale', async ({ locale, state, review, outcome }) => {
+    const run = { ...item('session-a', state), [review]: true,
+      controls: state === 'stopped' ? [] : ['stop' as const],
+      task: { goal: 'Synthetic limited task', activeMs: 0, modelRequests: TASK_LIMITS.modelRequests, toolCalls: 1, outcome, canStart: false } }
+    const rpc = vi.fn(async () => list(run)), copy = PANEL_COPY[locale].runs
+    await act(async () => { root.render(createElement(BrowserRuns, { api: { rpc: rpc as PanelApi['rpc'], retargetRun: vi.fn() },
+      sessionId: 'session-a', connected: true, targetRevision: 4, copy })) })
+    expect(document.body.textContent).toContain(copy.outcomes['needs-review'])
+    expect(document.body.textContent).toContain(copy.reconcileHelp)
+    expect(document.body.textContent).not.toContain(copy.outcomes['budget-exhausted'])
+    expect(document.querySelector('.run-retarget')).toBeNull()
+    if (state !== 'stopped') expect(document.querySelector('.browser-run-actions')?.textContent).toContain(copy.stop)
+  })
+
   it('explains a connection-loss pause without inventing continuation after an uncertain write', async () => {
     const paused = { ...item('session-a', 'paused'), pauseReason: 'browser-disconnected' as const, canRetarget: false, requiresReconciliation: true,
       controls: ['stop' as const], task: { goal: 'Synthetic task', activeMs: 1, modelRequests: 1, toolCalls: 1, outcome: 'pending' as const, canStart: false } }
@@ -72,6 +90,7 @@ describe('browser task panel boundaries', () => {
     await act(async () => { root.render(createElement(BrowserRuns, { api: { rpc: rpc as PanelApi['rpc'] }, sessionId: 'session-a', connected: true, copy: PANEL_COPY.zh.runs })) })
     expect(document.body.textContent).toContain('浏览器连接已中断，任务已暂停')
     expect(document.body.textContent).toContain('部分操作结果尚未明确')
+    expect(document.body.textContent).not.toContain(PANEL_COPY.zh.runs.retarget)
     expect(document.querySelector('.run-retarget')).toBeNull()
     expect(parseBrowserRuns(list(paused), 'session-a').items[0]?.pauseReason).toBe('browser-disconnected')
     expect(() => parseBrowserRuns(list({ ...paused, state: 'running' }), 'session-a')).toThrow()
@@ -98,9 +117,9 @@ describe('browser task panel boundaries', () => {
     expect(retargetRun).not.toHaveBeenCalled()
     expect(() => parseBrowserRuns(list({ ...queued, task: { ...queued.task, canStart: false } }), 'session-a')).toThrow()
   })
-  it('requires a selected native view and a real click for target handoff', async () => {
-    const paused = { ...item('session-a', 'paused'), canRetarget: true }
-    const rpc = vi.fn(async () => list(paused))
+  it.each(['paused', 'blocked'] as const)('requires a selected native view and a real click for a %s task handoff', async state => {
+    const run = { ...item('session-a', state), canRetarget: true }
+    const rpc = vi.fn(async () => list(run))
     const retargetRun = vi.fn(async () => {})
     await act(async () => { root.render(createElement(BrowserRuns, { api: { rpc: rpc as PanelApi['rpc'], retargetRun }, targetRevision: 4, sessionId: 'session-a', connected: true, copy: PANEL_COPY.en.runs })) })
     expect(document.querySelector('.run-retarget')).not.toBeNull()
@@ -133,6 +152,7 @@ describe('browser task panel boundaries', () => {
     list({ ...item(), controls: ['resume'] } as unknown as BrowserRunSummary),
     list({ ...item(), canRetarget: true }),
     list({ ...item('session-a', 'paused'), canRetarget: true, requiresReconciliation: true }),
+    list({ ...item('session-a', 'blocked'), canRetarget: true, recoveryRequired: true }),
     list({ ...item('session-a', 'completed'), controls: ['stop'] }),
     { items: [item(), item()], total: 2 },
   ])('rejects foreign, stale-shaped or unsupported metadata', value => {
