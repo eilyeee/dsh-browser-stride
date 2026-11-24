@@ -2,7 +2,7 @@ name: Runtime compatibility
 
 on:
   push:
-    branches: [main, stride/main]
+    branches: [main, stride/main, 'publish/v*']
     tags: ['v[1-9].[0-9]+.[0-9]+', 'v[1-9][0-9]+.[0-9]+.[0-9]+']
   pull_request:
 
@@ -13,8 +13,21 @@ jobs:
   clean-install:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      release-tag: ${{ steps.source.outputs.tag }}
     steps:
+      - name: Select the release tag
+        id: source
+        run: |
+          case "$GITHUB_REF" in
+            refs/tags/v*) tag="${GITHUB_REF#refs/tags/}" ;;
+            refs/heads/publish/v*) tag="${GITHUB_REF#refs/heads/publish/}" ;;
+            *) exit 0 ;;
+          esac
+          printf 'tag=%s\nref=refs/tags/%s\n' "$tag" "$tag" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.source.outputs.ref }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24.22.1
@@ -35,8 +48,10 @@ jobs:
           pnpm run release:prepare -- --out "$RUNNER_TEMP/stride-release"
           pnpm run test:smoke-release -- --dir "$RUNNER_TEMP/stride-release"
       - name: Verify the version tag and checksums
-        if: github.ref_type == 'tag'
+        if: steps.source.outputs.tag != ''
         working-directory: ${{ runner.temp }}/stride-release
+        env:
+          RELEASE_TAG: ${{ steps.source.outputs.tag }}
         run: |
           node --input-type=module <<'JS'
           import assert from 'node:assert/strict'
@@ -44,17 +59,20 @@ jobs:
           import { readFileSync } from 'node:fs'
 
           const release = JSON.parse(readFileSync('versions.json', 'utf8'))
-          const commit = execFileSync('git', ['rev-parse', 'HEAD'], {
+          const git = (...args) => execFileSync('git', args, {
             cwd: process.env.GITHUB_WORKSPACE, encoding: 'utf8',
           }).trim()
           assert.equal(release.development, false)
           assert.equal(release.dirty, false)
-          assert.equal(release.commit, commit)
-          assert.equal('v' + release.version, process.env.GITHUB_REF_NAME)
+          assert.equal('v' + release.version, process.env.RELEASE_TAG)
+          assert.equal(release.commit, git('rev-parse', 'HEAD'))
+          assert.equal(release.commit, git('rev-parse', 'refs/tags/' + process.env.RELEASE_TAG + '^{commit}'))
           JS
           sha256sum -c SHA256SUMS
+          git -C "$GITHUB_WORKSPACE" for-each-ref --format='%(contents)' "refs/tags/$RELEASE_TAG" > release-notes.md
+          test -s release-notes.md
       - name: Keep the verified installation files
-        if: github.ref_type == 'tag'
+        if: steps.source.outputs.tag != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: stride-release
@@ -64,7 +82,7 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    if: github.event_name == 'push' && github.ref_type == 'tag'
+    if: github.event_name == 'push' && needs.clean-install.outputs.release-tag != ''
     needs: clean-install
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -79,11 +97,10 @@ jobs:
         working-directory: ${{ runner.temp }}/stride-release
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.clean-install.outputs.release-tag }}
         run: |
           sha256sum -c SHA256SUMS
-          gh release create "$RELEASE_TAG" \
-            --verify-tag --notes-from-tag --title "DSH Stride ${RELEASE_TAG#v}" \
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --notes-file release-notes.md --title "DSH Stride ${RELEASE_TAG#v}" \
             dsh-browser-stride-host-*.tgz dsh-browser-stride-chrome-*.zip \
             install-host.mjs versions.json SHA256SUMS README.md
