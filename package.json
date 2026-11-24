@@ -22,6 +22,7 @@
     "test:smoke-task": "node scripts/smoke-browser-task.mjs",
     "test:smoke-task-page-ownership": "node scripts/smoke-task-page-ownership.mjs",
     "test:smoke-auto-tab-model": "node scripts/smoke-auto-tab-model.mjs",
+    "test:smoke-background-browser": "node scripts/smoke-background-browser.mjs",
     "test:smoke-page-access": "node scripts/smoke-page-access.mjs",
     "test:smoke-layout": "node scripts/smoke-layout.mjs",
     "test:smoke-materials": "node scripts/smoke-materials.mjs",

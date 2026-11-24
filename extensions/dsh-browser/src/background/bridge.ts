@@ -29,7 +29,7 @@ export interface BridgeSinks {
 }
 
 /** Resolve whether opening a WebSocket is expected to succeed. */
-type BridgeProbe = (url: string) => Promise<boolean>
+type BridgeProbe = (url: string, background?: true) => Promise<boolean>
 
 const BACKOFF_BASE_MS = 500
 const BACKOFF_MAX_MS = 10_000
@@ -55,6 +55,7 @@ export class BridgeClient {
     private readonly probe: BridgeProbe = async () => true,
     /** Whether a disconnected client still has an active user-owned lease. */
     private readonly shouldReconnect: () => boolean = () => true,
+    private readonly background: () => boolean = () => false,
   ) {}
 
   /** Current coarse state (mirrors the last emitted sink value). */
@@ -117,9 +118,11 @@ export class BridgeClient {
   private async loop(generation: number): Promise<void> {
     while (this.running && generation === this.generation) {
       if (!this.retryAllowed()) return
-      const reachable = await this.probe(this.url).catch(() => false)
+      const backgroundProbe = this.background()
+      const reachable = await (backgroundProbe ? this.probe(this.url, true) : this.probe(this.url)).catch(() => false)
       if (!this.running || generation !== this.generation) return
       if (!this.retryAllowed()) return
+      if (this.background() && !backgroundProbe) continue
       if (!reachable) {
         this.emitState('reconnecting')
         await this.waitBeforeRetry()
@@ -157,11 +160,17 @@ export class BridgeClient {
         await this.fail(socket)
         continue
       }
+      // If the panel closed before authentication, require the background
+      // discovery check before sending a credential to that Host.
+      if (this.background() && !backgroundProbe) {
+        socket.close()
+        continue
+      }
 
       // Authenticate: hello must be accepted before any other traffic.
       const presentedToken = this.token
       const extensionVersion = globalThis.chrome?.runtime?.getManifest?.().version
-      const offeredCaps: BridgeCaps = { textOnly: true, snapshotMaxChars: DEFAULT_SNAPSHOT_MAX_CHARS, maxInteractiveItems: 60, taskTargetLoss: true, taskPageOwnership: true, layoutMetrics: true, elementScroll: true, elementReadScope: true, snapshotBase: true, designViewZoom: true, taskNotes: true, ...(import.meta.env.EXT_TARGET === 'firefox' ? {} : { visualViewport: true, pageDiagnostics: true, manualRecovery: true, guidedRecovery: true }) }
+      const offeredCaps: BridgeCaps = { textOnly: true, snapshotMaxChars: DEFAULT_SNAPSHOT_MAX_CHARS, maxInteractiveItems: 60, taskTargetLoss: true, taskPageOwnership: true, layoutMetrics: true, elementScroll: true, elementReadScope: true, snapshotBase: true, designViewZoom: true, taskNotes: true, ...(import.meta.env.EXT_TARGET === 'firefox' ? {} : { taskPageCommand: true, visualViewport: true, pageDiagnostics: true, manualRecovery: true, guidedRecovery: true }) }
       socket.send(JSON.stringify({
         t: 'hello',
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
@@ -169,6 +178,7 @@ export class BridgeClient {
         ...(this.installationId === '' ? {} : { installationId: this.installationId }),
         ...(this.browserTabScope === undefined ? {} : { browserTabScope: this.browserTabScope }),
         ...(extensionVersion === undefined ? {} : { extensionVersion }),
+        ...(this.background() ? { background: true } : {}),
         caps: offeredCaps,
       } satisfies ClientFrame))
 
@@ -198,6 +208,7 @@ export class BridgeClient {
                 || (frame.caps.visualViewport === true && offeredCaps.visualViewport !== true)
                 || (frame.caps.layoutMetrics === true && offeredCaps.layoutMetrics !== true)
                 || (frame.caps.taskPageOwnership === true && offeredCaps.taskPageOwnership !== true)
+                || (frame.caps.taskPageCommand === true && (offeredCaps.taskPageCommand !== true || frame.caps.taskPageOwnership !== true))
                 || (frame.caps.elementScroll === true && offeredCaps.elementScroll !== true)
                 || (frame.caps.elementReadScope === true && offeredCaps.elementReadScope !== true)
                 || (frame.caps.snapshotBase === true && offeredCaps.snapshotBase !== true)

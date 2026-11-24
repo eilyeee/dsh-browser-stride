@@ -150,10 +150,10 @@ async function taskPageFixture() {
   const pairing = new PairingStore(join(storage.root, 'task-page-pairings.json'))
   const installationId = 'synthetic_task_installation'
   const token = await pairing.enroll(installationId)
-  const caps = { ...CAPS, taskPageOwnership: true }
+  const caps = { ...CAPS, taskPageOwnership: true, taskPageCommand: true }
   async function createHost(store: BrowserRunStore) {
-    const host = await startBridge({ pairing, runs: store, dispatches: store.dispatches,
-      tasks: { selectTarget: vi.fn(), approval: vi.fn() } })
+    const host = await startBridge({ pairing, runs: store, dispatches: store.dispatches, caps,
+      tasks: { selectTarget: vi.fn(), approval: vi.fn(), validateTarget: vi.fn() } })
     harnesses.push(host)
     return host
   }
@@ -180,6 +180,29 @@ async function taskPageFixture() {
 }
 
 describe('managed page ownership', () => {
+  it('reserves a command page once for the exact Host request and verifies its start receipt', async () => {
+    const h = await taskPageFixture()
+    const task = await h.task('command-session')
+    const url = 'http://127.0.0.1/command-page'
+    const pending = h.bridge.startCommandPage(task, url, AbortSignal.timeout(3000))
+    await waitFor(() => h.frames.some(frame => frame.t === 'task.page.request'))
+    const frame = h.frames.find(frame => frame.t === 'task.page.request')!
+    if (frame.t !== 'task.page.request') throw new Error('Missing command page frame')
+    const scope = { runId: task.runId, sessionId: task.sessionId, expectedVersion: task.version, controlRevision: task.controlRevision }
+    expect((await taskRpc(h, BRIDGE_TASK_PAGE_PREPARE_METHOD, { ...scope, url: url + '-wrong', commandId: frame.id })).ok).toBe(false)
+    const reservation = await taskRpc(h, BRIDGE_TASK_PAGE_PREPARE_METHOD, { ...scope, url, commandId: frame.id })
+    expect(reservation.ok).toBe(true)
+    expect((await taskRpc(h, BRIDGE_TASK_PAGE_PREPARE_METHOD, { ...scope, url, commandId: frame.id })).ok).toBe(false)
+    if (!reservation.ok) throw new Error('Missing reservation')
+    const { startTicket } = reservation.result as { startTicket: string }
+    const acknowledged = await taskRpc(h, BRIDGE_TASK_START_METHOD, { ...scope, startTicket, launchUrl: url,
+      targetBinding: 'command-page-binding', targetUrl: url, targetTabId: 17 })
+    expect(acknowledged.ok).toBe(true)
+    send(h.ws, { t: 'task.page.result', id: frame.id, status: 'started' })
+    await expect(pending).resolves.toBe('started')
+    expect(h.store.get(task.runId)?.state).toBe('running')
+  })
+
   it('admits only one concurrent task for the same tab and allows another tab at the same URL', async () => {
     const { store, task, start } = await taskPageFixture()
     const [first, second, independent] = await Promise.all([task('first-owner'), task('second-owner'), task('different-tab')])
@@ -1209,6 +1232,47 @@ describe('recorded tool dispatch', () => {
 })
 
 describe('BridgeServer', () => {
+  it('accepts a paired background greeting only when there is no incumbent', async () => {
+    const storage = await createRunStorage()
+    storageFixtures.push(storage)
+    const pairing = new PairingStore(join(storage.root, 'background-pairings.json'))
+    const alphaId = 'background_alpha', betaId = 'background_beta_peer'
+    const alphaToken = await pairing.enroll(alphaId), betaToken = await pairing.enroll(betaId)
+    const h = await startBridge({ pairing }); harnesses.push(h)
+    const alpha = await connect(h.url), beta = await connect(h.url)
+    const hello = { t: 'hello' as const, protocolVersion: BRIDGE_PROTOCOL_VERSION, caps: CAPS, background: true as const }
+    send(alpha.ws, { ...hello, token: alphaToken, installationId: alphaId, extensionVersion: '1.0.0' })
+    await waitFor(() => alpha.frames.some(frame => frame.t === 'hello.ok'))
+    send(beta.ws, { ...hello, token: betaToken, installationId: betaId, extensionVersion: '1.0.1' })
+    await beta.done
+    expect(h.bridge.browserConnectionStatus()).toEqual({ extensionVersion: '1.0.0' })
+    expect(alpha.ws.readyState).toBe(WebSocket.OPEN)
+  })
+
+  it('requests Chrome once for concurrent open calls and waits for authentication', async () => {
+    const storage = await createRunStorage()
+    storageFixtures.push(storage)
+    const pairing = new PairingStore(join(storage.root, 'launch-pairings.json'))
+    const installationId = 'synthetic_chrome_startup'
+    const token = await pairing.enroll(installationId)
+    let client: Awaited<ReturnType<typeof connect>> | undefined
+    const launchChrome = vi.fn(async () => {
+      client = await connect(h.url)
+      send(client.ws, { t: 'hello', token, installationId, caps: CAPS, protocolVersion: BRIDGE_PROTOCOL_VERSION, background: true })
+    })
+    const h = await startBridge({ pairing, launchChrome, toolTimeoutMs: 3000 }); harnesses.push(h)
+    expect(() => h.bridge.requestTool('browser_get_text', {}, new AbortController().signal, 3000, 'read')).toThrow(BridgeToolError)
+    expect(launchChrome).not.toHaveBeenCalled()
+    const open = (session: string) => h.bridge.requestTool('browser_open_tab', { url: 'http://127.0.0.1/fixture' }, new AbortController().signal, 3000, session)
+    const results = Promise.all([open('open-a'), open('open-b')])
+    await waitFor(() => client?.frames.filter(frame => frame.t === 'tool.call').length === 2)
+    expect(launchChrome).toHaveBeenCalledOnce()
+    for (const frame of client!.frames) if (frame.t === 'tool.call') {
+      send(client!.ws, { t: 'tool.result', id: frame.id, action: frame.action, ok: true, result: 'opened' })
+    }
+    await expect(results).resolves.toEqual(['opened', 'opened'])
+  })
+
   it('reports only the current authenticated extension version and clears it on disconnect', async () => {
     const h = await startBridge()
     harnesses.push(h)

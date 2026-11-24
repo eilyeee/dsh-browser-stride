@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { authorizedExamplePages, exampleNativePageProbe } from './page-access-fixture.ts'
+import { writeBridgeCredential } from '../src/background/credential-store.ts'
 import { PAGE_ACCESS_KEY } from '../src/background/page-access.ts'
 
 import { BRIDGE_PROTOCOL_VERSION, BRIDGE_TASK_TARGET_LOST_METHOD, BRIDGE_RUN_RETARGET_METHOD, BRIDGE_RUN_LIST_METHOD, BRIDGE_TASK_START_METHOD } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
@@ -675,7 +676,7 @@ describe('background bridge lifecycle', () => {
     finish()
     await vi.waitFor(() => { expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'status', state: 'connected' })) })
     panel.onDisconnect.emit()
-    socket.close()
+    socket.close(4000, 'replaced')
   })
 
   it('restricts stored credentials before loading settings', async () => {
@@ -689,21 +690,49 @@ describe('background bridge lifecycle', () => {
     await vi.waitFor(() => { expect(chrome.storage.local.get).toHaveBeenCalled() })
   })
 
-  it('does not probe, connect, or arm keepalive just because the extension loads', async () => {
-    const chromeMock = mockChrome()
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
-      wsUrl: 'ws://127.0.0.1:3080/ext/bridge',
-    }), { status: 200 }))
+  it('connects to the previously paired Host without a saved background setting or open panel', async () => {
+    const bridgeUrl = 'ws://127.0.0.1:39001/ext/bridge'
+    const fixture = mockChrome({ localGet: async () => ({ dshPairedBridgeUrl: bridgeUrl }) })
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ wsUrl: bridgeUrl, backgroundConnect: true })))
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await writeBridgeCredential('a'.repeat(64))
+    await import('../src/background/index.ts')
+
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const socket = FakeWebSocket.instances[0]!
+    try {
+      socket.open()
+      await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'hello', background: true })))
+      expect(socket.url).toBe(bridgeUrl)
+      expect(fixture.alarms.create).toHaveBeenCalledWith('bridge-keepalive', { periodInMinutes: 0.5 })
+    } finally { socket.close(4000, 'replaced') }
+  })
+
+  it.each([
+    { scenario: 'an unpaired installation', hasCredential: false, hasPinnedHost: true },
+    { scenario: 'a pairing without a verified Host', hasCredential: true, hasPinnedHost: false },
+    { scenario: 'a saved opt-out', hasCredential: true, hasPinnedHost: true, backgroundConnection: false },
+    { scenario: 'Firefox', hasCredential: true, hasPinnedHost: true, backgroundConnection: true, target: 'firefox' },
+  ])('keeps the bridge idle at startup for $scenario', async ({ hasCredential, hasPinnedHost, backgroundConnection, target }) => {
+    const bridgeUrl = 'ws://127.0.0.1:3080/ext/bridge'
+    const chromeMock = mockChrome({ localGet: async () => ({
+      dshSettings: { bridgeUrl, backgroundConnection },
+      ...(hasPinnedHost ? { dshPairedBridgeUrl: bridgeUrl } : {}),
+    }) })
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ wsUrl: bridgeUrl, backgroundConnect: true }), { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
     vi.stubGlobal('WebSocket', FakeWebSocket)
+    vi.stubEnv('EXT_TARGET', target ?? 'chrome')
 
-    await import('../src/background/index.ts')
-    await vi.waitFor(() => { expect(chrome.storage.local.get).toHaveBeenCalled() })
+    try {
+      if (hasCredential) await writeBridgeCredential('a'.repeat(64))
+      await import('../src/background/index.ts')
+      await vi.waitFor(() => { expect(chromeMock.alarms.clear).toHaveBeenCalledWith('bridge-keepalive') })
 
-    expect(fetchMock).not.toHaveBeenCalled()
-    expect(FakeWebSocket.instances).toHaveLength(0)
-    expect(chromeMock.alarms.create).not.toHaveBeenCalled()
-    expect(chromeMock.alarms.clear).toHaveBeenCalledWith('bridge-keepalive')
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(FakeWebSocket.instances).toHaveLength(0)
+      expect(chromeMock.alarms.create).not.toHaveBeenCalled()
+    } finally { vi.unstubAllEnvs() }
   })
 
   it('abandons an in-flight discovery when the last panel closes', async () => {

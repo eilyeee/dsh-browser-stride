@@ -18,6 +18,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto'
+import { setTimeout as delay } from 'node:timers/promises'
 import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer } from 'ws'
@@ -49,12 +50,13 @@ import {
   type BridgeFrame,
   type BridgeCaps,
   type ClientFrame,
+  type CommandPageStatus,
   type ToolErrorCode,
 } from './protocol.ts'
 import { SessionPurgeError } from './session-purge.ts'
 import { verifyToken } from './token.ts'
 import type { PairingStore } from './pairing.ts'
-import { BrowserRunStoreError, summarizeReviewedFacts, type BrowserRunStore, type BrowserRunExecution } from './run-store.ts'
+import { BrowserRunStoreError, summarizeReviewedFacts, type BrowserRunStore, type BrowserRunExecution, type BrowserRunRecord } from './run-store.ts'
 import { browserRunPanelRpc, browserRunPanelFailure, type RunPanelStore } from './run-panel.ts'
 import { TaskBriefError, taskBriefInputSchema, type TaskBriefStore } from './task-brief.ts'
 import { TASK_BRIEF_GET, TASK_BRIEF_SAVE, TASK_BRIEF_REVIEW, TASK_BRIEF_OPEN } from './task-brief-contract.ts'
@@ -124,6 +126,7 @@ export interface BridgeServerDeps {
   api: BrowserHostApi
   /** Default per-tool-call timeout in ms. */
   toolTimeoutMs: number
+  launchChrome?: () => Promise<void>
   /** Capabilities to echo in `hello.ok` (negotiated snapshot budgets). */
   caps: BridgeCaps
   /** Seed a followed-page snapshot into a live or deferred Agent session. */
@@ -182,6 +185,7 @@ interface ReadyConnection {
   /** Revocation can arrive before its matching native startup commits. */
   lostRunTargets: Set<string>
   taskTargetLoss: boolean
+  taskPageCommand: boolean
   /** Native tab IDs are scoped to this authenticated connection. */
   taskPageOwners?: Map<number, RunId>
   /** Optional browser-session scope from the authenticated paired extension. */
@@ -195,6 +199,13 @@ interface ReadyConnection {
   manualRecovery: boolean
   guidedRecovery: boolean
   designViewZoom: boolean
+}
+
+interface PendingCommandPage {
+  owner: ReadyConnection
+  request: Extract<BridgeFrame, { t: 'task.page.request' }>
+  startTicket?: string
+  finish(status: CommandPageStatus): void
 }
 
 function targetLossKey(target: BrowserTaskTargetLoss): string {
@@ -235,6 +246,8 @@ export class BridgeServer {
   private readonly wss = new WebSocketServer({ noServer: true })
   private current: ReadyConnection | null = null
   private readonly pendingTools = new Map<string, PendingTool>()
+  private readonly commandPages = new Map<string, PendingCommandPage>()
+  private chromeStartup: Promise<boolean> | undefined
   /** Kept across socket replacement; a new connection cannot borrow an old pin. */
   private readonly runTargets = new Map<string, {
     sessionId: string; controlRevision: number; connectionId: string; id: string; tabId?: number; taskPageKey?: string
@@ -249,6 +262,62 @@ export class BridgeServer {
   private readonly taskPages: TaskPageAdmissions
   constructor(private readonly deps: BridgeServerDeps) {
     this.taskPages = new TaskPageAdmissions(id => deps.runs?.get(id))
+  }
+
+  private waitForChrome(signal: AbortSignal): Promise<boolean> {
+    if (this.browserConnectionStatus() !== null) return Promise.resolve(true)
+    const launch = this.deps.launchChrome
+    if (launch === undefined || signal.aborted || this.closed) return Promise.resolve(false)
+    const deadline = Date.now() + 40_000
+    const startup = this.chromeStartup ??= Promise.resolve().then(async () => {
+      const paired = await this.deps.pairing?.list()
+      if (this.closed || !paired?.length) return false
+      if (this.browserConnectionStatus() !== null) return true
+      await launch()
+      while (!this.closed && Date.now() < deadline) {
+        if (this.browserConnectionStatus() !== null) return true
+        await delay(200, undefined, { ref: false })
+      }
+      return false
+    }).catch(() => false).finally(() => { this.chromeStartup = undefined })
+    return new Promise(resolve => {
+      const cancel = () => finish(false)
+      const finish = (connected: boolean) => {
+        signal.removeEventListener('abort', cancel)
+        resolve(connected)
+      }
+      signal.addEventListener('abort', cancel, { once: true })
+      if (signal.aborted) cancel()
+      void startup.then(finish)
+    })
+  }
+
+  /** Called by an explicit DSH `/browser` invocation, never by a model tool. */
+  async startCommandPage(run: BrowserRunRecord, url: string, signal: AbortSignal): Promise<CommandPageStatus> {
+    if (taskPageUrl(url) !== url || signal.aborted || !await this.waitForChrome(signal)) return 'not-started'
+    const owner = this.current
+    const current = this.deps.runs?.get(run.runId)
+    if (signal.aborted || owner === null || !owner.taskPageCommand || owner.abort.signal.aborted
+      || this.commandPages.size >= 64 || current?.state !== 'queued' || current.version !== run.version) return 'not-started'
+    const request = { t: 'task.page.request' as const, id: randomUUID(), runId: run.runId, sessionId: run.sessionId,
+      expectedVersion: run.version, controlRevision: run.controlRevision, url, expiresAt: Date.now() + 35_000 }
+    const lifetime = AbortSignal.any([signal, owner.abort.signal, AbortSignal.timeout(35_000)])
+    return new Promise(resolve => {
+      const interrupt = () => pending.finish(pending.startTicket === undefined ? 'not-started' : 'uncertain')
+      const pending: PendingCommandPage = { owner, request, finish: status => {
+        if (this.commandPages.get(request.id) !== pending) return
+        this.commandPages.delete(request.id)
+        lifetime.removeEventListener('abort', interrupt)
+        if (pending.startTicket !== undefined && status !== 'started') {
+          this.taskPages.cancel(run.runId, run.sessionId, pending.startTicket, owner)
+        }
+        resolve(status)
+      } }
+      this.commandPages.set(request.id, pending)
+      lifetime.addEventListener('abort', interrupt, { once: true })
+      if (lifetime.aborted) interrupt()
+      else sendFrame(owner.ws, request)
+    })
   }
 
   /**
@@ -304,6 +373,16 @@ export class BridgeServer {
     }
     const conn = this.current
     if (conn === null) {
+      if (this.deps.launchChrome !== undefined && execution === undefined && sessionId !== undefined
+        && name === 'browser_open_tab' && taskPageUrl(args.url) !== undefined) {
+        const deadline = Date.now() + timeoutMs
+        return this.waitForChrome(AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])).then(connected => {
+          if (!connected || this.current === null || signal.aborted || Date.now() >= deadline) {
+            throw new BridgeToolError('bridge-closed', 'No paired Chrome connected after requesting its startup.', true)
+          }
+          return this.requestTool(name, args, signal, Math.max(1, deadline - Date.now()), sessionId)
+        })
+      }
       throw new BridgeToolError('bridge-closed', 'no browser extension is connected to the bridge', true)
     }
     if (name === 'browser_snapshot' && args.delta === true && args.baseObservationId === undefined) args = { ...args, delta: false }
@@ -623,6 +702,10 @@ export class BridgeServer {
           ws.close(PROTOCOL_MISMATCH_CLOSE_CODE, 'incompatible protocol')
           return
         }
+        if (frame.background && (this.current !== null || this.deps.pairing === undefined || !/^[a-f0-9]{64}$/.test(frame.token))) {
+          ws.close(4000, 'background connection unavailable')
+          return
+        }
         const manualRecovery = frame.caps.manualRecovery === true && this.deps.caps.manualRecovery === true
         const caps: BridgeCaps = {
           textOnly: true,
@@ -639,6 +722,8 @@ export class BridgeServer {
           maxInteractiveItems: Math.min(this.deps.caps.maxInteractiveItems, frame.caps.maxInteractiveItems),
           ...(frame.caps.taskTargetLoss === true && this.deps.runs?.pauseLostTargetTask !== undefined ? { taskTargetLoss: true } : {}),
           ...(frame.caps.taskPageOwnership === true && this.deps.runs !== undefined && this.deps.tasks !== undefined ? { taskPageOwnership: true } : {}),
+          ...(frame.caps.taskPageCommand === true && frame.caps.taskPageOwnership === true && this.deps.caps.taskPageCommand === true
+            && this.deps.tasks?.validateTarget !== undefined && this.deps.runs !== undefined ? { taskPageCommand: true } : {}),
           ...(frame.caps.taskNotes === true && this.deps.briefs !== undefined ? { taskNotes: true } : {}),
           ...(frame.caps.taskNotes === true && this.deps.caps.taskNotesUnavailable === true ? { taskNotesUnavailable: true } : {}),
           ...(this.deps.caps.release === undefined ? {} : { release: this.deps.caps.release }),
@@ -654,6 +739,10 @@ export class BridgeServer {
             return
           }
           if (helloTimer === undefined || ws.readyState !== WebSocket.OPEN) return
+          if (frame.background && this.current !== null) {
+            ws.close(4000, 'bridge already connected')
+            return
+          }
           clearTimeout(helloTimer)
           helloTimer = undefined
           this.promote(ws, remoteAddress, caps, frame, result.credential)
@@ -698,7 +787,7 @@ export class BridgeServer {
         }
       }
     })()
-    this.current = { connectionId: randomUUID(), ws, remoteAddress, abort, pump, ping, orderedSessionRpcs: new Map(), confirmedTools: new Set(), lostRunTargets: new Set(), taskTargetLoss: caps.taskTargetLoss === true, visualViewport: caps.visualViewport === true, layoutMetrics: caps.layoutMetrics === true, elementScroll: caps.elementScroll === true, elementReadScope: caps.elementReadScope === true, snapshotBase: caps.snapshotBase === true, pageDiagnostics: caps.pageDiagnostics === true, manualRecovery: caps.manualRecovery === true, guidedRecovery: caps.guidedRecovery === true, designViewZoom: caps.designViewZoom === true,
+    this.current = { connectionId: randomUUID(), ws, remoteAddress, abort, pump, ping, orderedSessionRpcs: new Map(), confirmedTools: new Set(), lostRunTargets: new Set(), taskTargetLoss: caps.taskTargetLoss === true, taskPageCommand: caps.taskPageCommand === true && installationId !== undefined && browserTabScope !== undefined, visualViewport: caps.visualViewport === true, layoutMetrics: caps.layoutMetrics === true, elementScroll: caps.elementScroll === true, elementReadScope: caps.elementReadScope === true, snapshotBase: caps.snapshotBase === true, pageDiagnostics: caps.pageDiagnostics === true, manualRecovery: caps.manualRecovery === true, guidedRecovery: caps.guidedRecovery === true, designViewZoom: caps.designViewZoom === true,
       ...(caps.taskPageOwnership === true ? { taskPageOwners: new Map() } : {}),
       ...(caps.taskPageOwnership === true && this.deps.pairing !== undefined && browserTabScope !== undefined ? { browserTabScope } : {}),
       ...(installationId === undefined ? {} : { installationId }),
@@ -721,6 +810,15 @@ export class BridgeServer {
       case 'tool.result':
         this.settleTool(conn, frame.id, frame.action, frame.ok, frame.ok ? frame.result : frame.error)
         break
+      case 'task.page.result': {
+        const pending = this.commandPages.get(frame.id)
+        if (pending?.owner !== conn) break
+        const run = this.deps.runs?.get(asRunId(pending.request.runId))
+        const started = pending.startTicket !== undefined && run !== undefined && run.version > pending.request.expectedVersion
+          && this.runTargets.get(run.runId)?.connectionId === conn.connectionId
+        pending.finish((frame.status === 'started' && !started) || (frame.status === 'not-started' && started) ? 'uncertain' : frame.status)
+        break
+      }
       case 'pong':
       case 'hello':
       case 'hello.ok':
@@ -729,6 +827,7 @@ export class BridgeServer {
       case 'event':
       case 'tool.call':
       case 'tool.cancel':
+      case 'task.page.request':
       case 'ping':
       case 'error':
         // Protocol violations and unsolicited server-side shapes are ignored;
@@ -836,7 +935,7 @@ export class BridgeServer {
         }
         const counter = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER)
         const payload = z.strictObject({ runId: id, sessionId: id, expectedVersion: counter, controlRevision: counter,
-          url: z.string().max(8192) }).parse(frame.payload)
+          url: z.string().max(8192), commandId: id.optional() }).parse(frame.payload)
         const url = taskPageUrl(payload.url)
         const runs = this.deps.runs
         if (runs === undefined || this.deps.tasks?.validateTarget === undefined || url === undefined) throw new Error('unavailable')
@@ -844,8 +943,13 @@ export class BridgeServer {
         if (!('items' in list) || !list.items.some(run => run.runId === payload.runId && run.task?.canStart)) throw new Error('unavailable')
         const run = runs.get(asRunId(payload.runId))
         if (this.current !== conn || conn.abort.signal.aborted || run === undefined || run.sessionId !== payload.sessionId) throw new Error('unavailable')
+        const command = payload.commandId === undefined ? undefined : this.commandPages.get(payload.commandId)
+        if (payload.commandId !== undefined && (command?.owner !== conn || command.startTicket !== undefined || command.request.runId !== payload.runId
+          || command.request.sessionId !== payload.sessionId || command.request.url !== url || command.request.expiresAt <= Date.now()
+          || command.request.expectedVersion !== payload.expectedVersion || command.request.controlRevision !== payload.controlRevision)) throw new Error('unavailable command')
         this.deps.tasks.validateTarget(run.runId, url)
         const admission = this.taskPages.reserve(run, payload, conn)
+        if (command !== undefined) command.startTicket = admission.startTicket
         sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true, result: admission })
       } catch {
         sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false,

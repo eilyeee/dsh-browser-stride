@@ -67,6 +67,7 @@ describe('config', () => {
       pairingProfile: 'web',
       sessionWorkspacePath: dshHomePath('browser-sessions'),
       deferSessionCreate: true,
+      launchChromeOnRequest: false,
     })
     expect(new Config().sessionWorkspacePath).toBe(dshHomePath('browser-sessions'))
   })
@@ -81,6 +82,7 @@ describe('config', () => {
       maxInteractiveItems: 3,
       sessionWorkspacePath: '',
       deferSessionCreate: false,
+      launchChromeOnRequest: true,
     })).toEqual({
       token: 'fixed',
       allowHostManagement: true,
@@ -90,6 +92,7 @@ describe('config', () => {
       maxInteractiveItems: 3,
       sessionWorkspacePath: '',
       deferSessionCreate: false,
+      launchChromeOnRequest: true,
     })
     expect(new Config({ sessionWorkspacePath: '' }).sessionWorkspacePath).toBe('')
   })

@@ -23,12 +23,25 @@ describe('parseBridgeFrame', () => {
       expect(parseBridgeFrame(JSON.stringify({ ...hello, browserTabScope: badScope }))).toBeUndefined()
     }
   })
-  it.each(['pageDiagnostics', 'manualRecovery'])('validates optional %s capability in both handshake directions', capability => {
+  it.each(['pageDiagnostics', 'manualRecovery', 'taskPageCommand'])('validates optional %s capability in both handshake directions', capability => {
     for (const t of ['hello', 'hello.ok']) {
       const frame = { t, token: 'test', caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } }
       for (const value of [undefined, true, false]) expect(parseBridgeFrame(JSON.stringify({ ...frame, caps: { ...frame.caps, [capability]: value } }))).toBeDefined()
       for (const value of [null, 1, 'true', {}]) expect(parseBridgeFrame(JSON.stringify({ ...frame, caps: { ...frame.caps, [capability]: value } }))).toBeUndefined()
     }
+  })
+  it('validates background greetings and direction-specific command page frames', () => {
+    const hello = { t: 'hello', token: 'synthetic', caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 }, background: true }
+    expect(parseBridgeFrame(JSON.stringify(hello))).toEqual(hello)
+    expect(parseBridgeFrame(JSON.stringify({ ...hello, background: 'true' }))).toBeUndefined()
+    const request = { t: 'task.page.request', id: 'command', runId: 'run', sessionId: 'session', expectedVersion: 0, controlRevision: 0,
+      url: 'http://127.0.0.1/fixture', expiresAt: 1000 }
+    const result = { t: 'task.page.result', id: 'command', status: 'started' }
+    expect(isServerFrame(parseBridgeFrame(JSON.stringify(request))!)).toBe(true)
+    expect(isClientFrame(parseBridgeFrame(JSON.stringify(result))!)).toBe(true)
+    expect(parseBridgeFrame(JSON.stringify({ ...request, url: 'file:///fixture' }))).toBeUndefined()
+    expect(parseBridgeFrame(JSON.stringify({ ...request, controlRevision: -1 }))).toBeUndefined()
+    expect(parseBridgeFrame(JSON.stringify({ ...result, status: 'complete' }))).toBeUndefined()
   })
   it('validates explicit snapshot-base capability in both handshake directions', () => {
     for (const t of ['hello', 'hello.ok']) {

@@ -6,6 +6,8 @@ with 1.0.0 use [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Chrome connects to its paired Host in the background by default. The setting can be turned off. URL-led `/browser` commands can open a controlled page and start the task while the sidebar is closed. An optional macOS Host setting launches Chrome for page-open requests.
+
 ## [1.0.0]
 
 The first release covers ordinary chat in DSH Web and Chrome, installation

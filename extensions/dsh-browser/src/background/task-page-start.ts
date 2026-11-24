@@ -22,6 +22,7 @@ export async function cleanupOwnedTaskPage(access: CreatedPageAccess, before: ()
 
 export interface TaskPageStartRequest {
   runId: string; sessionId: string; expectedVersion: number; controlRevision: number; url: string
+  commandId?: string
 }
 export interface PreparedTaskPage {
   targetUrl: string; targetBinding: string; targetTabId?: number
@@ -38,14 +39,15 @@ interface Dependencies {
 }
 const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
 
-/** A native click creates one page. A missing commit reply never authorizes replay or closure. */
+/** A user-approved start creates one page. A missing commit reply never authorizes replay or closure. */
 export async function startTaskPage(input: TaskPageStartRequest, deps: Dependencies, signal: AbortSignal): Promise<void> {
   const url = taskPageUrl(input.url)
   const check = () => { if (signal.aborted || !deps.current()) throw new Error('Task page selection changed') }
   check()
   if (url === undefined) throw new BridgeRpcError('start-rejected', 'A complete HTTP or HTTPS URL is required')
   const scope = { runId: input.runId, sessionId: input.sessionId, expectedVersion: input.expectedVersion, controlRevision: input.controlRevision }
-  const reserved = await deps.request(BRIDGE_TASK_PAGE_PREPARE_METHOD, { ...scope, url }, { signal, timeoutMs: 5000 })
+  const reserved = await deps.request(BRIDGE_TASK_PAGE_PREPARE_METHOD, { ...scope, url,
+    ...(input.commandId === undefined ? {} : { commandId: input.commandId }) }, { signal, timeoutMs: 5000 })
   if (!record(reserved) || typeof reserved.startTicket !== 'string' || reserved.startTicket.length === 0 || reserved.startTicket.length > 200
     || reserved.launchUrl !== url || typeof reserved.expiresAt !== 'number' || !Number.isSafeInteger(reserved.expiresAt)) {
     throw new BridgeRpcError('start-rejected', 'Task page reservation was not confirmed')

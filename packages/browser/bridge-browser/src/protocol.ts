@@ -189,6 +189,8 @@ export interface BridgeCaps {
   taskTargetLoss?: boolean
   /** Native managed task starts identify the tab on this authenticated connection. */
   taskPageOwnership?: boolean
+  /** A user-issued Host command can request a new task page. */
+  taskPageCommand?: boolean
   /** Bounded image observations and single-use viewport coordinate clicks. */
   visualViewport?: boolean
   /** Read-only DOM box and computed-spacing observations. */
@@ -220,10 +222,15 @@ export function isBrowserTabScope(value: unknown): value is string {
   return typeof value === 'string' && /^[a-f0-9]{32}$/.test(value)
 }
 
+export type CommandPageStatus = 'started' | 'not-started' | 'uncertain'
+const isCommandPageStatus = (value: unknown): value is CommandPageStatus => value === 'started' || value === 'not-started' || value === 'uncertain'
+const isCommandPageId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 200 && value.trim() === value
+const isCommandPageCounter = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+
 /** Frames sent by the extension to the bridge plugin. */
 export type ClientFrame =
   /** First frame, within HELLO_TIMEOUT_MS of socket open. */
-  | { t: 'hello'; token: string; caps: BridgeCaps; installationId?: string; browserTabScope?: string; protocolVersion?: number; extensionVersion?: string }
+  | { t: 'hello'; token: string; caps: BridgeCaps; installationId?: string; browserTabScope?: string; protocolVersion?: number; extensionVersion?: string; background?: true }
   /** Unary call projected by the active dsh Host adapter. */
   | { t: 'rpc'; id: string; method: string; payload: unknown }
   /** Answer or cancel a pending Host interaction waterfall. */
@@ -231,6 +238,7 @@ export type ClientFrame =
   /** Result of a previously dispatched tool call. */
   | { t: 'tool.result'; id: string; action: ToolActionIdentity; ok: true; result: unknown }
   | { t: 'tool.result'; id: string; action: ToolActionIdentity; ok: false; error: ToolError }
+  | { t: 'task.page.result'; id: string; status: CommandPageStatus }
   /** Liveness reply. */
   | { t: 'pong' }
 
@@ -250,6 +258,7 @@ export type ServerFrame =
   | { t: 'tool.call'; id: string; action: ToolActionIdentity; execution: ToolExecutionScope; name: string; args: Record<string, unknown>; expiresAt: number; sessionId?: string; targetBinding?: string; taskBudget?: true }
   /** Withdraw a tool call that timed out or whose caller was cancelled. */
   | { t: 'tool.cancel'; id: string }
+  | { t: 'task.page.request'; id: string; runId: string; sessionId: string; expectedVersion: number; controlRevision: number; url: string; expiresAt: number }
   /** Liveness probe. */
   | { t: 'ping' }
   /** Fatal connection error; the client should re-authenticate. */
@@ -272,6 +281,7 @@ export function isServerFrame(frame: BridgeFrame): frame is ServerFrame {
     || frame.t === 'event'
     || frame.t === 'tool.call'
     || frame.t === 'tool.cancel'
+    || frame.t === 'task.page.request'
     || frame.t === 'ping'
     || frame.t === 'error'
 }
@@ -283,7 +293,7 @@ export function isServerFrame(frame: BridgeFrame): frame is ServerFrame {
  * @returns true for client-sendable frames.
  */
 export function isClientFrame(frame: BridgeFrame): frame is ClientFrame {
-  return frame.t === 'hello' || frame.t === 'rpc' || frame.t === 'respond' || frame.t === 'tool.result' || frame.t === 'pong'
+  return frame.t === 'hello' || frame.t === 'rpc' || frame.t === 'respond' || frame.t === 'tool.result' || frame.t === 'task.page.result' || frame.t === 'pong'
 }
 
 /**
@@ -309,12 +319,14 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
         && isOptionalProtocolVersion(frame.protocolVersion)
         && (frame.installationId === undefined || typeof frame.installationId === 'string')
         && (frame.browserTabScope === undefined || isBrowserTabScope(frame.browserTabScope))
+        && (frame.background === undefined || frame.background === true)
         && isCaps(frame.caps)
         ? { t: 'hello', token: frame.token, caps: frame.caps,
             ...(typeof frame.installationId === 'string' ? { installationId: frame.installationId } : {}),
             ...(typeof frame.browserTabScope === 'string' ? { browserTabScope: frame.browserTabScope } : {}),
             ...(typeof frame.protocolVersion === 'number' ? { protocolVersion: frame.protocolVersion } : {}),
-            ...(extensionVersion === undefined ? {} : { extensionVersion }) }
+            ...(extensionVersion === undefined ? {} : { extensionVersion }),
+            ...(frame.background === true ? { background: true as const } : {}) }
         : undefined
     }
     case 'rpc':
@@ -385,6 +397,15 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
         : undefined
     case 'tool.cancel':
       return typeof frame.id === 'string' ? { t: 'tool.cancel', id: frame.id } : undefined
+    case 'task.page.request': {
+      const url = taskPageUrl(frame.url)
+      if (url === undefined || !isCommandPageId(frame.id) || !isCommandPageId(frame.runId) || !isCommandPageId(frame.sessionId)
+        || !isCommandPageCounter(frame.expectedVersion) || !isCommandPageCounter(frame.controlRevision) || !isCommandPageCounter(frame.expiresAt)) return undefined
+      return { t: 'task.page.request', id: frame.id, runId: frame.runId, sessionId: frame.sessionId,
+        expectedVersion: frame.expectedVersion, controlRevision: frame.controlRevision, url, expiresAt: frame.expiresAt }
+    }
+    case 'task.page.result':
+      return isCommandPageId(frame.id) && isCommandPageStatus(frame.status) ? { t: 'task.page.result', id: frame.id, status: frame.status } : undefined
     case 'ping':
       return { t: 'ping' }
     case 'error':
@@ -412,6 +433,7 @@ function isCaps(value: unknown): value is BridgeCaps {
     && typeof caps.maxInteractiveItems === 'number' && Number.isSafeInteger(caps.maxInteractiveItems) && caps.maxInteractiveItems > 0
     && (caps.taskTargetLoss === undefined || typeof caps.taskTargetLoss === 'boolean')
     && (caps.taskPageOwnership === undefined || typeof caps.taskPageOwnership === 'boolean')
+    && (caps.taskPageCommand === undefined || typeof caps.taskPageCommand === 'boolean')
     && (caps.visualViewport === undefined || typeof caps.visualViewport === 'boolean')
     && (caps.layoutMetrics === undefined || typeof caps.layoutMetrics === 'boolean')
     && (caps.elementScroll === undefined || typeof caps.elementScroll === 'boolean')

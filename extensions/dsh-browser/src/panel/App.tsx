@@ -797,6 +797,7 @@ export function App(): React.JSX.Element {
         sharePageContent: raw?.sharePageContent ?? 'auto',
         unrestrictedBrowserAccess: raw?.unrestrictedBrowserAccess === undefined || raw.unrestrictedBrowserAccess === true,
         autoControlNewTabs: raw?.autoControlNewTabs ?? false,
+        backgroundConnection: import.meta.env.EXT_TARGET !== 'firefox' && (raw?.backgroundConnection ?? true) === true,
         trustedActionOrigins: raw?.trustedActionOrigins ?? [],
         approvalNotifications: raw?.approvalNotifications ?? true,
         autoResumeSession: raw?.autoResumeSession ?? true,
@@ -2075,6 +2076,19 @@ export function App(): React.JSX.Element {
           </label>
         </div>
         <div className="settings-panel preference-toggles">
+          {import.meta.env.EXT_TARGET !== 'firefox' && <label className="setting-toggle">
+            <span className="setting-toggle-copy">
+              <strong>{copy.settings.backgroundConnection}</strong>
+              <small>{copy.settings.backgroundConnectionHelp}</small>
+            </span>
+            <input className="setting-toggle-input" type="checkbox"
+              checked={settings?.backgroundConnection ?? true}
+              onChange={event => {
+                if (!event.nativeEvent.isTrusted) return
+                setSettings(current => current === null ? current : { ...current, backgroundConnection: event.target.checked })
+              }} />
+            <span className="setting-toggle-control" aria-hidden="true"><span /></span>
+          </label>}
           {import.meta.env.EXT_TARGET !== 'firefox' && <label className="setting-toggle">
             <span className="setting-toggle-copy">
               <strong>{copy.settings.autoControlNewTabs}</strong>

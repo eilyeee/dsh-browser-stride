@@ -2,9 +2,8 @@
  * Background service worker entry: owns the bridge connection, the gateway
  * RPC client, controlled-tab tool dispatch, and the panel port service.
  *
- * MV3 survival: after the user opens the panel, its port plus a half-minute
- * `alarms` keepalive re-arm the reconnect loop. Merely loading the extension
- * never probes or claims the single-connection bridge.
+ * The panel owns interactive reconnects. With background connection enabled,
+ * paired Chrome can also reconnect to an idle Host without a panel.
  *
  * Panel port protocol (chrome.runtime.connect, name "dsh-panel"):
  *   panel → bg: { type: 'rpc', id, method, payload }
@@ -53,6 +52,7 @@ import {
   isRunTabMutation,
   isRespondResult,
   type BridgeCaps,
+  type CommandPageStatus,
   type RespondResult,
 } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 import type { ServerFrame } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
@@ -66,7 +66,7 @@ import { PageAccess, type CreatedPageAccess } from './page-access.ts'
 import { debuggerPages, sendPageMessage } from './debugger-pages.ts'
 import { RunTargetRegistry, type RunTargetBinding } from './run-targets.ts'
 import { commitRunTarget } from './run-target-commit.ts'
-import { startTaskPage, taskPageGrant, cleanupOwnedTaskPage, type PreparedTaskPage } from './task-page-start.ts'
+import { startTaskPage, taskPageGrant, cleanupOwnedTaskPage, type PreparedTaskPage, type TaskPageStartRequest } from './task-page-start.ts'
 import { localBridgeUrl } from './bridge-address.ts'
 import { requestBrowserPairing, revokeBrowserPairing, type BrowserPairingStatus } from './pairing-client.ts'
 import { createRpc, BridgeRpcError } from './rpc.ts'
@@ -123,6 +123,7 @@ export interface Settings {
   unrestrictedBrowserAccess: boolean
   /** Chrome-only opt-in: automatically control tabs created by DSH chat. */
   autoControlNewTabs: boolean
+  backgroundConnection: boolean
   /** Origins whose state-changing actions may run without another prompt. */
   trustedActionOrigins: string[]
   /** Show an OS notification when no side panel can display an approval. */
@@ -138,6 +139,7 @@ const SETTINGS_DEFAULTS: Settings = {
   sharePageContent: 'auto',
   unrestrictedBrowserAccess: true,
   autoControlNewTabs: false,
+  backgroundConnection: true,
   trustedActionOrigins: [],
   approvalNotifications: true,
   autoResumeSession: true,
@@ -175,7 +177,8 @@ async function discoverBridge(shouldContinue: () => boolean = () => true): Promi
 }
 
 /** Avoid opening a noisy loopback WebSocket until the local bridge responds. */
-async function probeBridge(url: string): Promise<boolean> {
+async function probeBridge(url: string, background = false): Promise<boolean> {
+  if (background && url !== pairedBridgeUrl) return false
   try {
     const target = new URL(url)
     target.protocol = target.protocol === 'wss:' ? 'https:' : 'http:'
@@ -184,14 +187,16 @@ async function probeBridge(url: string): Promise<boolean> {
     target.hash = ''
     const response = await fetch(target, { signal: AbortSignal.timeout(1_500) })
     if (!response.ok) return false
-    const body = await response.json() as { wsUrl?: unknown }
-    return typeof body.wsUrl === 'string' && localBridgeUrl(body.wsUrl) === localBridgeUrl(url)
+    const body = await response.json() as { wsUrl?: unknown; backgroundConnect?: unknown }
+    return typeof body.wsUrl === 'string' && localBridgeUrl(body.wsUrl) === localBridgeUrl(url) && (!background || body.backgroundConnect === true)
   } catch {
     return false
   }
 }
 
 const STORAGE_KEY = 'dshSettings'
+const PAIRED_BRIDGE_URL_KEY = 'dshPairedBridgeUrl'
+let pairedBridgeUrl: string | undefined
 const INSTALLATION_KEY = 'dshBridgeInstallationId'
 const BROWSER_TAB_SCOPE_KEY = 'dshBrowserTabScope'
 const TAB_AFFINITY_STORAGE_KEY = 'dshTabAffinity'
@@ -346,7 +351,9 @@ async function loadSettings(): Promise<Settings> {
   if (typeof chrome.storage.local.setAccessLevel === 'function') {
     await chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }).catch(() => {})
   }
-  const stored = await chrome.storage.local.get(STORAGE_KEY)
+  const stored = await chrome.storage.local.get([STORAGE_KEY, PAIRED_BRIDGE_URL_KEY])
+  const remembered = stored[PAIRED_BRIDGE_URL_KEY]
+  pairedBridgeUrl = typeof remembered === 'string' ? localBridgeUrl(remembered) : undefined
   const previous = stored[STORAGE_KEY] as Partial<Settings> | undefined
   connectionDisconnected = await readBridgeDisconnected()
   let credential = connectionDisconnected ? undefined : await readBridgeCredential()
@@ -442,6 +449,7 @@ function normalizeSettings(candidate: Settings): Settings {
     unrestrictedBrowserAccess: candidate.unrestrictedBrowserAccess === undefined
       ? SETTINGS_DEFAULTS.unrestrictedBrowserAccess : candidate.unrestrictedBrowserAccess === true,
     autoControlNewTabs: import.meta.env.EXT_TARGET !== 'firefox' && candidate.autoControlNewTabs === true,
+    backgroundConnection: import.meta.env.EXT_TARGET !== 'firefox' && (candidate.backgroundConnection ?? SETTINGS_DEFAULTS.backgroundConnection) === true,
     trustedActionOrigins: trusted,
     approvalNotifications: candidate.approvalNotifications !== false,
     autoResumeSession: candidate.autoResumeSession !== false,
@@ -497,6 +505,15 @@ function armBridgeKeepalive(): void {
 
 function disarmBridgeKeepalive(): void {
   void Promise.resolve(chrome.alarms.clear(BRIDGE_KEEPALIVE_ALARM)).catch(() => {})
+}
+
+function backgroundConnectionAllowed(): boolean {
+  return settings.backgroundConnection && /^[a-f0-9]{64}$/.test(settings.token) && !connectionDisconnected && !unpairing
+    && pairedBridgeUrl !== undefined && (settings.bridgeUrl === '' || localBridgeUrl(settings.bridgeUrl) === pairedBridgeUrl)
+}
+
+function canConnectBridge(): boolean {
+  return !connectionDisconnected && !unpairing && (panelPorts.size > 0 || backgroundConnectionAllowed())
 }
 
 function broadcastStatus(): void {
@@ -1763,18 +1780,111 @@ function cancelAllToolCalls(): void {
   activeToolCalls.clear()
 }
 
+async function launchNewTaskPage(input: TaskPageStartRequest, windowId: number, requestId: string,
+  boundRpc: ReturnType<typeof createRpc>, signal: AbortSignal, requestCurrent: () => boolean): Promise<void> {
+  const { runId, sessionId, controlRevision } = input
+  const automaticRevision = automaticAccessRevision
+  const automaticAllowed = () => automaticAccessActive && automaticAccessRevision === automaticRevision
+  const sessionCurrent = targetLeases.captureSession(sessionId)
+  let boundTarget: ToolTargetLease | undefined
+  const current = () => !signal.aborted && requestCurrent() && rpc === boundRpc && bridge?.connected === true
+    && automaticAllowed() && !unbindingSessions.has(sessionId)
+    && (boundTarget === undefined ? sessionCurrent() : boundTarget.sameBinding())
+  await startTaskPage(input, {
+    current,
+    request: boundRpc.request,
+    enqueue: (queuedSignal, work) => writeQueue.run(queuedSignal, work),
+    create: async (url): Promise<PreparedTaskPage> => {
+      let access: CreatedPageAccess | undefined
+      let tabId: number | undefined
+      let preparedId: string | undefined
+      let boundSessionCurrent: (() => boolean) | undefined
+      const cleanup = async () => {
+        if (tabId === undefined || access === undefined) return
+        const created = tabId
+        await cleanupOwnedTaskPage(access, () => boundTarget?.sameBinding() === true, () => {
+          const selected = selectedTargetIdentity(sessionId)
+          return boundSessionCurrent?.() === true && selected?.tabId === created && selected.windowId === windowId
+        }, () => chrome.tabs.remove(created))
+      }
+      try {
+        const allowed = () => current() && access?.current() === true
+        const answer = await dispatchOpenTab({ id: `native_${requestId}`, name: 'browser_open_tab', args: { url }, sessionId },
+          windowId, 'off', undefined, async () => 'approved', signal,
+          tab => {
+            if (!bindOpenedTab(tab, sessionId, allowed)) return false
+            const target = captureToolTarget(sessionId)
+            if ('ok' in target) return false
+            boundTarget = target
+            boundSessionCurrent = targetLeases.captureSession(sessionId)
+            return true
+          }, allowed, () => { if (!allowed()) throw new Error('Task page control changed') }, false,
+          async created => {
+            tabId = created
+            const grant = taskPageGrant(automaticAllowed, current)
+            await pageAccess.grantCreated(created, grant.current, signal, lease => { access = lease })
+            grant.accept()
+          }, created => access ?? { current: () => false, release: async () => {}, canClose: () => pageAccess.unclaimed(created) })
+        if (!answer.ok || boundTarget === undefined || !current()) throw new Error('Task page could not be bound')
+        const live = await prepareToolTarget(boundTarget, sessionId, signal)
+        if ('ok' in live || !allowed() || !boundTarget.current()) throw new Error('Task page changed')
+        if (!await nativeTakeover.acknowledge(boundTarget.target.tabId, sessionId) || !current() || !boundTarget.current()) throw new Error('page handoff changed')
+        const prepared = runTargets.prepare({ kind: 'run', runId, controlRevision }, sessionId, boundTarget)
+        if (prepared === undefined) throw new Error('Task page pin unavailable')
+        preparedId = prepared.id
+        return { targetUrl: boundTarget.target.url, targetBinding: prepared.id,
+          ...(caps?.taskPageOwnership === true ? { targetTabId: boundTarget.target.tabId } : {}),
+          current: () => allowed() && prepared.current(), cleanup,
+          discard: () => runTargets.discardPrepared(prepared.id) }
+      } catch (error) {
+        if (preparedId !== undefined) runTargets.discardPrepared(preparedId)
+        try { await cleanup() } catch { throw new BridgeRpcError('start-cleanup-unconfirmed', 'New task page cleanup was not confirmed') }
+        throw error
+      }
+    },
+  }, signal)
+}
+
+let commandTaskPage: AbortController | undefined
+function startHostTaskPage(frame: Extract<ServerFrame, { t: 'task.page.request' }>): void {
+  const caller = bridge
+  const boundRpc = rpc
+  const reply = (status: CommandPageStatus): void => {
+    try { if (bridge === caller) caller?.send({ t: 'task.page.result', id: frame.id, status }) } catch { /* connection closed */ }
+  }
+  const remaining = Math.min(35_000, frame.expiresAt - Date.now())
+  if (caps?.taskPageCommand !== true || caps.taskPageOwnership !== true || !automaticAccessActive
+    || boundRpc === null || commandTaskPage !== undefined || remaining <= 0) { reply('not-started'); return }
+  const controller = new AbortController()
+  commandTaskPage = controller
+  const timer = setTimeout(() => controller.abort(), remaining)
+  const current = () => commandTaskPage === controller && bridge === caller && !controller.signal.aborted
+  void (async () => {
+    const selected = await resolveOpenTabWindow(frame.sessionId)
+    if ('ok' in selected || !current()) throw new Error('Task window unavailable')
+    const window = await chrome.windows.get(selected.windowId)
+    if (window.type !== 'normal' || window.incognito || !current()) throw new Error('A regular Chrome window is required')
+    await launchNewTaskPage({ ...frame, commandId: frame.id }, selected.windowId, frame.id, boundRpc, controller.signal, current)
+    reply('started')
+  })().catch(error => {
+    reply(error instanceof BridgeRpcError && ['start-uncertain', 'start-cleanup-unconfirmed'].includes(error.code) ? 'uncertain' : 'not-started')
+  }).finally(() => {
+    clearTimeout(timer)
+    if (commandTaskPage === controller) commandTaskPage = undefined
+  })
+}
+
 /** (Re)start the bridge with the current settings; address discovery contains no credential. */
 async function startBridge(): Promise<void> {
   const revision = ++bridgeStartRevision
   await affinityReady
-  if (panelPorts.size === 0 || connectionDisconnected || unpairing) return
-  let url = settings.bridgeUrl
+  if (!canConnectBridge()) return
+  let url = panelPorts.size === 0 ? pairedBridgeUrl ?? '' : settings.bridgeUrl
   if (url === '') {
-    url = await discoverBridge(() => revision === bridgeStartRevision && panelPorts.size > 0) ?? ''
+    url = await discoverBridge(() => revision === bridgeStartRevision && canConnectBridge()) ?? ''
   }
-  // Discovery is asynchronous. A panel may have closed or a newer settings
-  // update may have started while its fetches were in flight.
-  if (revision !== bridgeStartRevision || panelPorts.size === 0 || connectionDisconnected || unpairing) return
+  if (revision !== bridgeStartRevision || !canConnectBridge()) return
+  if (panelPorts.size === 0) url = pairedBridgeUrl ?? ''
   if (url === '') {
     bridge?.stop()
     bridge = null
@@ -1793,11 +1903,12 @@ async function startBridge(): Promise<void> {
   url = localUrl
   const [installationId, browserTabScope] = settings.token === '' ? ['', undefined] as const
     : await Promise.all([ensureInstallationId(), ensureBrowserTabScope()])
-  if (revision !== bridgeStartRevision || panelPorts.size === 0 || connectionDisconnected || unpairing) return
+  if (revision !== bridgeStartRevision || !canConnectBridge()) return
   if (bridge === null) {
     const client = new BridgeClient({
       onStateChange: (state) => {
         if (state !== 'connected') {
+          commandTaskPage?.abort()
           cancelAllToolCalls()
           interactionResponses.failAll(responseMessages().disconnected)
           transientEvents.clear()
@@ -1813,6 +1924,7 @@ async function startBridge(): Promise<void> {
         }
         else if (frame.t === 'tool.call') routeToolCall(frame)
         else if (frame.t === 'tool.cancel') cancelToolCall(frame.id)
+        else if (frame.t === 'task.page.request') startHostTaskPage(frame)
         else if (frame.t === 'respond.result') interactionResponses.route(frame)
         // rpc.result is settled by the rpc facade (wrapped below).
       },
@@ -1827,18 +1939,25 @@ async function startBridge(): Promise<void> {
           await persistSettings({ token: credential })
         }
         if (connectionDisconnected || unpairing || controlRevision !== connectionControlRevision) throw new Error('Connection was removed')
-        if (pairing.url !== undefined && presentedToken !== undefined) activePairing = { url: pairing.url, credential: credential ?? presentedToken, installationId: pairing.installationId }
+        if (pairing.url !== undefined && presentedToken !== undefined) {
+          activePairing = { url: pairing.url, credential: credential ?? presentedToken, installationId: pairing.installationId }
+          if (/^[a-f0-9]{64}$/.test(activePairing.credential) && pairing.url !== pairedBridgeUrl) {
+            pairedBridgeUrl = pairing.url
+            void chrome.storage.local.set({ [PAIRED_BRIDGE_URL_KEY]: pairing.url }).catch(() => {})
+          }
+        }
         caps = negotiated
         broadcastStatus()
         void pushBudgetToControlledTab(negotiated)
       },
-    }, probeBridge, () => panelPorts.size > 0 && !connectionDisconnected && !unpairing)
+    }, probeBridge, canConnectBridge, () => panelPorts.size === 0)
     bridge = client
     rpc = createRpc(client)
   }
   activeBridgeUrl = url
   activeInstallationId = installationId
   bridge.start(url, settings.token, installationId, browserTabScope)
+  if (backgroundConnectionAllowed()) armBridgeKeepalive()
 }
 
 /** Gateway RPC with a helpful error when the bridge is down. */
@@ -1912,7 +2031,7 @@ async function unpairBrowser(): Promise<{ remoteRevoked: boolean }> {
     await settingsReady.catch(() => {})
     const captured = bridge?.connected ? activePairing : undefined
     const credential = captured?.credential ?? settings.token
-    let address = captured?.url ?? (settings.bridgeUrl || activeBridgeUrl)
+    let address = captured?.url ?? (settings.bridgeUrl || pairedBridgeUrl || activeBridgeUrl)
     connectionControlRevision += 1
     bridgeStartRevision += 1
     connectionDisconnected = true
@@ -1925,12 +2044,14 @@ async function unpairBrowser(): Promise<{ remoteRevoked: boolean }> {
     void pageAccess.clear().catch(() => {})
     settings = { ...settings, token: '' }
     activePairing = undefined
+    pairedBridgeUrl = undefined
     caps = null
     disarmBridgeKeepalive()
     syncSelectionWatch()
     broadcastStatus()
     // Atomic credential deletion + disabled marker also wins over old handshakes.
     await writeBridgeCredential('', 'disable')
+    await chrome.storage.local.set({ [PAIRED_BRIDGE_URL_KEY]: '' }).catch(() => {})
     await settingsPersistence.catch(() => {})
     await persistSettings({})
     if (credential === '') { notify({ phase: 'unpaired', remoteRevoked: false }); return { remoteRevoked: false } }
@@ -2171,67 +2292,9 @@ chrome.runtime.onConnect.addListener((port) => {
             if (!start || import.meta.env.EXT_TARGET === 'firefox' || !automaticAccessActive || typeof request.newPageUrl !== 'string' || windowId === undefined) {
               throw new BridgeRpcError('start-rejected', 'Enable automatic control of new task pages first')
             }
-            const automaticRevision = automaticAccessRevision
-            const sessionCurrent = targetLeases.captureSession(sid)
-            let boundTarget: ToolTargetLease | undefined
-            const nativeCurrent = () => !controller.signal.aborted && panelPorts.has(port) && panelActiveSessions.get(port) === sid
-              && tabAffinity.focusedSession() === sid && rpc === boundRpc && bridge?.connected === true
-              && automaticAccessActive && automaticAccessRevision === automaticRevision && !unbindingSessions.has(sid)
-              && (boundTarget === undefined ? sessionCurrent() : boundTarget.sameBinding())
-            await startTaskPage({ runId, sessionId: sid, expectedVersion: version, controlRevision: revision, url: request.newPageUrl }, {
-              current: nativeCurrent,
-              request: (method, payload, options) => boundRpc.request(method, payload, options),
-              enqueue: (signal, work) => writeQueue.run(signal, work),
-              create: async (url): Promise<PreparedTaskPage> => {
-                let access: CreatedPageAccess | undefined
-                let tabId: number | undefined
-                let preparedId: string | undefined
-                let boundSessionCurrent: (() => boolean) | undefined
-                const cleanup = async () => {
-                  // A newer native binding/grant owns the page after takeover.
-                  if (tabId === undefined || access === undefined) return
-                  const created = tabId
-                  await cleanupOwnedTaskPage(access, () => boundTarget?.sameBinding() === true, () => {
-                    const selected = selectedTargetIdentity(sid)
-                    return boundSessionCurrent?.() === true && selected?.tabId === created && selected.windowId === windowId
-                  }, () => chrome.tabs.remove(created))
-                }
-                try {
-                  const answer = await dispatchOpenTab({ id: `native_${id}`, name: 'browser_open_tab', args: { url }, sessionId: sid },
-                    windowId, 'off', undefined, async () => 'approved', controller.signal,
-                    tab => {
-                      if (!bindOpenedTab(tab, sid, () => nativeCurrent() && access?.current() === true)) return false
-                      const target = captureToolTarget(sid)
-                      if ('ok' in target) return false
-                      boundTarget = target
-                      boundSessionCurrent = targetLeases.captureSession(sid)
-                      return true
-                    }, () => nativeCurrent() && access?.current() === true,
-                    () => { if (!nativeCurrent() || access?.current() !== true) throw new Error('Task page control changed') }, false,
-                    async created => {
-                      tabId = created
-                      const grant = taskPageGrant(() => automaticAccessActive && automaticAccessRevision === automaticRevision, nativeCurrent)
-                      await pageAccess.grantCreated(created, grant.current, controller.signal, lease => { access = lease })
-                      grant.accept()
-                    }, created => access ?? { current: () => false, release: async () => {}, canClose: () => pageAccess.unclaimed(created) })
-                  if (!answer.ok || boundTarget === undefined || !nativeCurrent()) throw new Error('Task page could not be bound')
-                  const live = await prepareToolTarget(boundTarget, sid, controller.signal)
-                  if ('ok' in live || !nativeCurrent() || access?.current() !== true || !boundTarget.current()) throw new Error('Task page changed')
-                  if (!await nativeTakeover.acknowledge(boundTarget.target.tabId, sid) || !nativeCurrent() || !boundTarget.current()) throw new Error('page handoff changed')
-                  const prepared = runTargets.prepare({ kind: 'run', runId, controlRevision: revision }, sid, boundTarget)
-                  if (prepared === undefined) throw new Error('Task page pin unavailable')
-                  preparedId = prepared.id
-                  return { targetUrl: boundTarget.target.url, targetBinding: prepared.id,
-                    ...(caps?.taskPageOwnership === true ? { targetTabId: boundTarget.target.tabId } : {}),
-                    current: () => nativeCurrent() && access?.current() === true && prepared.current(), cleanup,
-                    discard: () => runTargets.discardPrepared(prepared.id) }
-                } catch (error) {
-                  if (preparedId !== undefined) runTargets.discardPrepared(preparedId)
-                  try { await cleanup() } catch { throw new BridgeRpcError('start-cleanup-unconfirmed', 'New task page cleanup was not confirmed') }
-                  throw error
-                }
-              },
-            }, controller.signal)
+            await launchNewTaskPage({ runId, sessionId: sid, expectedVersion: version, controlRevision: revision, url: request.newPageUrl },
+              windowId, id, boundRpc, controller.signal,
+              () => panelPorts.has(port) && panelActiveSessions.get(port) === sid && tabAffinity.focusedSession() === sid)
             reply(true)
             return
           }
@@ -2366,6 +2429,10 @@ chrome.runtime.onConnect.addListener((port) => {
               caps = null
               broadcastStatus()
               disarmBridgeKeepalive()
+            }
+            if (panelPorts.size === 0 && backgroundConnectionAllowed()) {
+              armBridgeKeepalive()
+              if (bridge === null) await startBridge()
             }
             if (requestId !== undefined) {
               try { port.postMessage({ type: 'settings.result', id: requestId, ok: true }) } catch { /* port closed */ }
@@ -2642,11 +2709,13 @@ chrome.runtime.onConnect.addListener((port) => {
     }
     syncSelectionWatch()
     if (panelPorts.size === 0) {
-      bridgeStartRevision += 1
-      bridge?.suspendReconnect()
+      if (!backgroundConnectionAllowed()) {
+        bridgeStartRevision += 1
+        bridge?.suspendReconnect()
+        if (bridge?.state !== 'connected') disarmBridgeKeepalive()
+      }
       sessionTrustedActionOrigins.clear()
       approvals.notifyPending()
-      if (bridge?.state !== 'connected') disarmBridgeKeepalive()
     }
   })
 })
@@ -2789,16 +2858,14 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== BRIDGE_KEEPALIVE_ALARM) return
-  if (panelPorts.size === 0) {
-    if (bridge === null || bridge.state !== 'connected') disarmBridgeKeepalive()
-    return
-  }
-  // `stopped` is intentionally terminal until an explicit panel reopen or
-  // settings save. In particular, code 4000 means another browser owns the
-  // single bridge slot and the keepalive must not reclaim it.
-  if (bridge === null || bridge.state === 'reconnecting') {
-    void settingsReady.then(() => startBridge())
-  }
+  void settingsReady.then(() => {
+    if (!canConnectBridge()) {
+      if (bridge === null || bridge.state !== 'connected') disarmBridgeKeepalive()
+      return
+    }
+    // A replacement or revoked credential requires an explicit panel reconnect.
+    if (bridge === null || bridge.state === 'reconnecting') return startBridge()
+  }).catch(() => {})
 })
 
 // ---- Boot ----
@@ -2837,9 +2904,15 @@ if (import.meta.env.EXT_TARGET !== 'firefox') {
 }
 void pageAccess.cleanExpiredGroups().catch(() => {})
 
-// Alarms survive some extension/service-worker restarts. Remove any stale
-// schedule left by an older eager-connection build; onConnect re-arms it.
-disarmBridgeKeepalive()
-
-// `settingsReady` intentionally has no bridge-start continuation: opening a
-// side panel is the first action allowed to claim the bridge connection.
+function connectInBackground(): void {
+  void settingsReady.then(() => {
+    if (panelPorts.size !== 0) return
+    if (!backgroundConnectionAllowed()) { disarmBridgeKeepalive(); return }
+    if (bridge === null) {
+      armBridgeKeepalive()
+      return startBridge()
+    }
+  }).catch(() => {})
+}
+chrome.runtime.onStartup?.addListener(connectInBackground)
+connectInBackground()

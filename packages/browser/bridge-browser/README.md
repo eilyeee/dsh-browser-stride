@@ -63,6 +63,7 @@ For first connection, click **Connect to local DSH** in extension settings, then
 | `maxInteractiveItems` | `60` | Maximum interactive items per snapshot. |
 | `sessionWorkspacePath` | `DSH_HOME/browser-sessions` | Workspace for extension-created sessions; an empty string disables grouping. |
 | `deferSessionCreate` | `true` | Materialize a new session when the first prompt is sent. |
+| `launchChromeOnRequest` | `false` | On macOS, page-open requests and URL-led `/browser` commands can launch regular Chrome and wait for a paired extension with background connection enabled. |
 
 `/ext/bridge-config` exposes only the local WebSocket address. Pairing administration is loopback-only, requires the separate administrator token and rejects browser Origin headers. A one-time code expires after five minutes; only a hash of the resulting installation credential is persisted by the Host. See the root README for issue/list/revoke commands. Extension credentials use extension-origin IndexedDB, including on Firefox where `storage.local` access cannot be restricted.
 
@@ -82,7 +83,7 @@ A storage-write failure disables subsequent writes until the domain is reopened.
 
 ## Explicit browser tasks
 
-When the DSH human-command service is present, `/browser <goal>` creates a queued task for the exact receiving Agent. It does not ask the model to decide whether to create a task. A waiting task starts only after a trusted extension startup action captures a native page and the Host reserves its pin before publishing `running`. **Bind and start** uses the selected authorized page. The command request signal does not own the durable task. The extension remains the place to select pages and control tasks; a separate DSH task dashboard and CLI/Desktop support are not implemented.
+In DSH Web, `/browser <goal>` creates a queued task for the current conversation. **Bind and start** uses the selected authorized page. With automatic control enabled, `/browser <HTTP(S) URL> <goal>` can create a controlled page and start the task. A paired Chrome can connect with its panel closed when background connection is enabled. Execution begins after the Host records the actual tab. If connection or startup confirmation is lost, check the task status. The extension provides pause, stop and verification controls.
 
 On Chrome, a queued task also offers **Open a new page and start** when the Host advertises `task.canStartNewPage`. The user enters a complete credential-free HTTP(S) URL and must have saved the automatic-page-control opt-in. Before creating a tab, the worker requests `bridge.browserTasks.preparePage` with the exact task/session/version/control revision and URL. Its single-use ticket belongs to that connection and expires after 45 seconds while unused. Creating, authorizing, grouping and binding the page shares the live write queue; the worker prepares its exact native pin before sending `bridge.browserTasks.start` with the ticket, launch URL and final target URL. Neither preparation nor page creation wakes the Agent. Generic panel RPC forwarding cannot call the preparation, cancellation or startup methods.
 

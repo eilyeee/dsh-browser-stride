@@ -170,7 +170,7 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
         } finally { await cdp.detach() }
       },
       /** Keep installation data while replacing the whole browser/worker lifetime. */
-      async restart({ connected = true, reloadExtension = false } = {}) {
+      async restart({ connected = true, reloadExtension = false, openPanel = true } = {}) {
         const targetUrl = target.url()
         await context.close()
         context = await launch()
@@ -188,15 +188,18 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
         target = await context.newPage()
         target.setDefaultTimeout(actionTimeoutMs)
         await target.goto(targetUrl, { waitUntil: 'domcontentloaded' })
-        panel = await context.newPage()
-        panel.setDefaultTimeout(actionTimeoutMs)
-        await panel.goto(`chrome-extension://${extensionId}/panel/index.html`)
-        await panel.waitForSelector('header.topbar', { timeout: 15000 })
-        if (connected) await panel.locator('.connection .dot.connected').waitFor({ state: 'visible', timeout: connectTimeoutMs })
+        panel = undefined
+        if (openPanel) {
+          panel = await context.newPage()
+          panel.setDefaultTimeout(actionTimeoutMs)
+          await panel.goto(`chrome-extension://${extensionId}/panel/index.html`)
+          await panel.waitForSelector('header.topbar', { timeout: 15000 })
+          if (connected) await panel.locator('.connection .dot.connected').waitFor({ state: 'visible', timeout: connectTimeoutMs })
+        }
         worker = context.serviceWorkers().find(value => new URL(value.url()).host === extensionId)
           ?? await context.waitForEvent('serviceworker', { timeout: 15000 })
         if (reloadExtension) await worker.evaluate(() => chrome.sidePanel.setOptions({ enabled: false }))
-        await panel.evaluate(() => { window.__dshBenchmarkPort = chrome.runtime.connect({ name: 'dsh-panel' }) })
+        await panel?.evaluate(() => { window.__dshBenchmarkPort = chrome.runtime.connect({ name: 'dsh-panel' }) })
         await target.bringToFront()
         return { context, worker, target, panel }
       },

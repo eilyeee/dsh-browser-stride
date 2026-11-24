@@ -63,6 +63,7 @@ Host 与扩展都要支持可选的 wire-v4 `layoutMetrics`：更新后重启 Ho
 | `maxInteractiveItems` | `60` | 单次快照交互元素上限。 |
 | `sessionWorkspacePath` | `DSH_HOME/browser-sessions` | 扩展会话的工作区；空字符串关闭分组。 |
 | `deferSessionCreate` | `true` | 第一条提示发送时才创建会话。 |
+| `launchChromeOnRequest` | `false` | macOS 已配对时，普通对话的开页请求或带网址的 `/browser` 可以启动常用 Chrome 并等待连接。扩展须开启「后台连接 DSH」。 |
 
 `/ext/bridge-config` 只提供本机 WebSocket 地址。配对管理接口仅限本机，要求单独的管理员令牌并拒绝浏览器 Origin 请求；一次性配对码五分钟后失效，Host 只持久化安装级凭据的哈希。签发、查看和撤销命令见仓库首页。扩展凭据保存在扩展源的 IndexedDB 中，包括无法限制 `storage.local` 访问的 Firefox。
 
@@ -82,7 +83,7 @@ Host 与扩展都要支持可选的 wire-v4 `layoutMetrics`：更新后重启 Ho
 
 ## 明确发起网页任务
 
-存在 DSH 人类命令服务时，`/browser <目标>` 会为接收命令的 Agent 创建排队任务，不由模型判断是否创建。等待任务须由扩展的真实启动操作捕获原生页面，且 Host 先登记目标后才进入运行；「绑定并开始」使用当前选中的已授权页。命令请求的取消信号不控制持久任务的生命周期。选页和任务控制仍在扩展完成；本轮没有另做 DSH 任务面板，也不包含 CLI 或桌面端支持。
+DSH Web 中，`/browser <目标>` 会为当前会话创建排队任务，侧栏里的「绑定并开始」使用选中的授权页。开启自动控制后，`/browser <HTTP(S) 网址> <目标>` 可以直接创建受控页并启动。已配对的 Chrome 开启「后台连接 DSH」后，两端可在侧栏关闭时建立连接。Host 登记原生页面后才开始执行。断线或回执不明时，先查看任务状态。任务的暂停、停止和核验仍在扩展完成。
 
 Chrome 中，Host 提供 `task.canStartNewPage` 时，排队任务还会显示「新建页面并开始」。用户须已保存自动控制设置，并输入完整、不含用户名或密码的 HTTP(S) 网址。创建标签页前，worker 通过 `bridge.browserTasks.preparePage` 提交任务、会话、记录版本、控制版本和网址。Host 返回仅属于原连接的一次性启动凭据，未使用时 45 秒过期。创建、授权、分组和绑定新页共用现有写队列；worker 固定原生页面标识后，才带启动凭据、原始网址和最终目标网址调用 `bridge.browserTasks.start`。预留和建页都不会启动 Agent。普通侧栏 RPC 转发不能调用预留、取消或启动接口。
 

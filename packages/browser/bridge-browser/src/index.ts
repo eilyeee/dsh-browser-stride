@@ -19,6 +19,8 @@
 
 import { NativeRecovery } from './native-recovery.ts'
 import { randomUUID } from 'node:crypto'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-attachment'
@@ -37,6 +39,7 @@ import {
   BRIDGE_PATH,
   DEFAULT_SNAPSHOT_MAX_CHARS,
   MIN_SNAPSHOT_MAX_CHARS,
+  taskPageUrl,
 } from './protocol.ts'
 import { withSessionDeferral } from './session-deferral.ts'
 import { withSessionWorkspace } from './session-workspace.ts'
@@ -82,6 +85,7 @@ const SESSIONS_ROOT = dshHomePath('sessions')
 
 /** Default: sessions materialize only on the first message (open-and-close leaves no trace). */
 const DEFAULT_DEFER_SESSION_CREATE = true
+const execFileAsync = promisify(execFile)
 
 /** Plugin config: deployment-varying tunables only; the wire contract stays fixed. */
 export interface Config {
@@ -101,6 +105,8 @@ export interface Config {
   sessionWorkspacePath?: string
   /** Defer real session creation until the first prompt. Defaults to true. */
   deferSessionCreate?: boolean
+  /** Permit explicit page-open requests to launch regular Chrome on macOS. */
+  launchChromeOnRequest?: boolean
 }
 
 export const Config: z<Config> = z.object({
@@ -112,6 +118,7 @@ export const Config: z<Config> = z.object({
   maxInteractiveItems: z.number().step(1).min(1).default(DEFAULT_MAX_INTERACTIVE_ITEMS),
   sessionWorkspacePath: z.string().default(DEFAULT_SESSION_WORKSPACE_PATH),
   deferSessionCreate: z.boolean().default(DEFAULT_DEFER_SESSION_CREATE),
+  launchChromeOnRequest: z.boolean().default(false),
 })
 
 /** The shape after schemastery applies its defaults to every field. */
@@ -139,6 +146,7 @@ export function resolveConfig(config: Config): ResolvedConfig {
     maxInteractiveItems: config.maxInteractiveItems ?? DEFAULT_MAX_INTERACTIVE_ITEMS,
     sessionWorkspacePath: config.sessionWorkspacePath ?? DEFAULT_SESSION_WORKSPACE_PATH,
     deferSessionCreate: config.deferSessionCreate ?? DEFAULT_DEFER_SESSION_CREATE,
+    launchChromeOnRequest: config.launchChromeOnRequest === true,
   }
   assertPositiveInteger('toolTimeoutMs', resolved.toolTimeoutMs)
   assertPositiveInteger('snapshotMaxChars', resolved.snapshotMaxChars)
@@ -228,16 +236,6 @@ function mountBridge(
     if (payload.messages.some(message => message.source.kind === 'user') && tasks.interruptForInput(payload.agent)) return { kind: 'reject' }
     return next()
   })
-  ctx.inject(['commands'], commandCtx => commandCtx.effect(() => commandCtx.commands.register({
-    name: 'browser', description: '在已绑定的浏览器页面执行任务 / Run a task on the bound browser page',
-    input: { hint: '网页任务目标 / Browser task goal' },
-    handler: async ({ agent, rawInput }) => {
-      try {
-        await tasks.create(String(agent.id), rawInput.trim())
-        return { kind: 'success', text: `网页任务已创建。请在扩展选择此会话的页面，然后点击“绑定并开始”，并在扩展查看任务的核验状态。执行上限：${TASK_LIMITS.activeMs / 60000} 分钟、${TASK_LIMITS.modelRequests} 次模型请求、${TASK_LIMITS.toolCalls} 次浏览器调用。` }
-      } catch { return { kind: 'error', text: '无法创建网页任务：请填写目标，并先结束该会话已有的任务或模型活动。' } }
-    },
-  }), 'bridge-browser: explicit browser task command'))
   // DSH 0.1.7+ replaced `agent/session-start` with `agent/created` as the
   // startup-driving extension point (agent registered with live session and
   // completed setup); bind there so deferred sessions still receive their
@@ -317,6 +315,9 @@ function mountBridge(
     allowHostManagement: resolved.allowHostManagement,
     api,
     toolTimeoutMs: resolved.toolTimeoutMs,
+    ...(resolved.launchChromeOnRequest && process.platform === 'darwin' ? {
+      launchChrome: async () => { await execFileAsync('/usr/bin/open', ['-b', 'com.google.Chrome'], { timeout: 5000 }) },
+    } : {}),
     caps: {
       textOnly: true,
       visualViewport: true,
@@ -324,6 +325,7 @@ function mountBridge(
       elementScroll: true,
       elementReadScope: true,
       snapshotBase: true,
+      taskPageCommand: true,
       pageDiagnostics: true,
       manualRecovery: true,
       guidedRecovery: true,
@@ -341,6 +343,28 @@ function mountBridge(
     ...(briefs === undefined ? {} : { briefs }),
   })
   lifetime.server = server
+  ctx.inject(['commands'], commandCtx => commandCtx.effect(() => commandCtx.commands.register({
+    name: 'browser', description: '在受控页面执行任务，可用链接启动新页 / Run a browser task, optionally start from a URL',
+    input: { hint: '[HTTP(S) 网址] 任务目标 / [HTTP(S) URL] task goal' },
+    handler: async ({ agent, rawInput, signal }) => {
+      const input = rawInput.trim()
+      const address = input.split(/\s+/, 1)[0] ?? ''
+      const hasAddress = /^https?:/i.test(address)
+      const url = /^https?:\/\//i.test(address) ? taskPageUrl(address) : undefined
+      if (hasAddress && url === undefined) return { kind: 'error', text: '请输入完整的 HTTP 或 HTTPS 网址。' }
+      const goal = url === undefined ? input : input.slice(address.length).trim() || '打开该网页并说明当前页面状态。'
+      let run
+      try { run = await tasks.create(String(agent.id), goal) }
+      catch { return { kind: 'error', text: '无法创建网页任务。请填写目标，并先结束该会话已有的任务或模型活动。' } }
+      if (url !== undefined) {
+        const status = await server.startCommandPage(run, url, signal).catch(() => 'uncertain' as const)
+        if (status === 'started') return { kind: 'success', text: '已打开受控页面并启动网页任务。可在扩展查看任务状态。' }
+        if (status === 'uncertain') return { kind: 'success', text: '网页任务已创建，自动启动结果尚未确认。请先查看现有任务状态。' }
+        return { kind: 'success', text: '网页任务已创建，等待启动。请核对 Chrome 已连接，以及「自动控制 DSH 新建页面」已开启。也可在侧栏选页启动。' }
+      }
+      return { kind: 'success', text: `网页任务已创建。请在扩展选中此会话的页面，点击「绑定并开始」。执行上限为 ${TASK_LIMITS.activeMs / 60000} 分钟、${TASK_LIMITS.modelRequests} 次模型请求和 ${TASK_LIMITS.toolCalls} 次浏览器调用。` }
+    },
+  }), 'bridge-browser: explicit browser task command'))
 
   const route: WebUpgradeRoute = {
     path: BRIDGE_PATH,
@@ -364,7 +388,7 @@ function mountBridge(
         return
       }
       res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ wsUrl: `ws://127.0.0.1:${ctx.webServer.port}${BRIDGE_PATH}` }))
+      res.end(JSON.stringify({ wsUrl: `ws://127.0.0.1:${ctx.webServer.port}${BRIDGE_PATH}`, backgroundConnect: true }))
     },
   }
   ctx.effect(() => ctx.webServer.register(configRoute), 'bridge-browser: /ext/bridge-config route')
