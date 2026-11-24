@@ -86,6 +86,8 @@ try {
   // Remove origin trust so this checks the default, rather than a trusted-domain exception.
   await updateSettings({ trustedActionOrigins: [] })
   phase = 'default-confirmation-bypass'
+  const initialObservation = await command(sessionId, 'browser_snapshot', {})
+  assert.equal(initialObservation.ok, true, initialObservation.text)
   const initialAction = await command(sessionId, 'browser_press', { key: 'Escape' })
   assert.equal(initialAction.ok, true, initialAction.text)
   assert.equal(await browser.target.evaluate(() => window.syntheticKeydowns), 1)
@@ -147,6 +149,8 @@ try {
   await browser.panel.locator('.connection .dot.connected').waitFor({ state: 'visible', timeout: 30000 })
   await browser.bindSession(sessionId)
   assert.equal(await browser.worker.evaluate(async () => (await chrome.storage.local.get('dshSettings')).dshSettings.unrestrictedBrowserAccess), false)
+  const restoredObservation = await command(sessionId, 'browser_snapshot', {})
+  assert.equal(restoredObservation.ok, true, restoredObservation.text)
   const [confirmed] = await Promise.all([
     command(sessionId, 'browser_press', { key: 'Escape' }),
     browser.panel.getByRole('button', { name: '仅允许这一次', exact: true }).click(),
