@@ -25,8 +25,9 @@ import WebServer from '@deepseek-ai/dsh-host-webserver'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import * as ToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import ToolRegistry from '@deepseek-ai/dsh-tools'
-import LlmService, { createUserMessage, type GenerateOptions, type UserMessage } from '@deepseek-ai/dsh-llm'
+import LlmService, { createUserMessage, type GenerateOptions, type ToolCallId, type UserMessage } from '@deepseek-ai/dsh-llm'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { createSessionFormatV3ToV4 } from '@deepseek-ai/dsh-session-format-v3-to-v4'
@@ -139,6 +140,7 @@ async function loadComposition(): Promise<{ ctx: Context; configPath: string; po
     "- name: '@deepseek-ai/dsh-agent'",
     "- name: '@deepseek-ai/dsh-system-prompt'",
     "- name: '@deepseek-ai/dsh-tools'",
+    "- name: '@deepseek-ai/dsh-tool-executor-native'",
     "- name: '@deepseek-ai/dsh-llm'",
     "- name: '@deepseek-ai/dsh-agent-loop'",
     "- name: '@deepseek-ai/dsh-storage'",
@@ -173,6 +175,7 @@ async function loadComposition(): Promise<{ ctx: Context; configPath: string; po
     ['@deepseek-ai/dsh-agent', AgentRegistry],
     ['@deepseek-ai/dsh-system-prompt', SystemPrompt],
     ['@deepseek-ai/dsh-tools', ToolRegistry],
+    ['@deepseek-ai/dsh-tool-executor-native', ToolExecutor],
     ['@deepseek-ai/dsh-llm', LlmService],
     ['@deepseek-ai/dsh-agent-loop', AgentLoop],
     ['@deepseek-ai/dsh-storage', Storage],
@@ -473,7 +476,10 @@ describe('real Loader composition', () => {
     const runs = ctx.browserRuns
     expect(runs.list()).toEqual([])
     const client = await connectReady(port)
-    const pending = tools.execute({ callId: 'synthetic-hmr-read', name: 'browser_snapshot', arguments: {}, signal: new AbortController().signal })
+    const pending = tools.execute({
+      calls: [{ type: 'tool-call', id: 'synthetic-hmr-read' as ToolCallId, name: 'browser_snapshot', arguments: '{}' }],
+      signal: new AbortController().signal,
+    })
     await waitFor(() => client.frames.some(frame => frame.t === 'tool.call'))
     const settle = runs.dispatches.settle.bind(runs.dispatches)
     vi.spyOn(runs.dispatches, 'settle').mockImplementationOnce(async (...args) => {
@@ -486,7 +492,7 @@ describe('real Loader composition', () => {
     expect(tools.get('browser_snapshot')).toBeUndefined()
     expect(tools.get('browser_click')).toBeUndefined()
     expect(() => runs.list()).toThrow(/closed/)
-    expect((await pending).isError).toBe(true)
+    expect((await pending).results).toEqual([expect.objectContaining({ result: expect.objectContaining({ isError: true }) })])
     const file = join(root!, 'storage', `browser_dispatches_${Buffer.from('web').toString('hex')}.json`)
     const journal = JSON.parse(await readFile(file, 'utf8'))
     expect(Object.values(journal.tables.dispatches)).toEqual([expect.objectContaining({ state: 'unresolved' })])

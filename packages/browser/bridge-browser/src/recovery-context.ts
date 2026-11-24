@@ -1,6 +1,7 @@
 /** Bounded review context, never action arguments, page text or a success verdict. */
 import type { DispatchRecord } from './dispatch-ledger.ts'
 
+export const RECOVERY_OFFER_LIMIT = 64
 const outcomes = ['no-reply', 'reply-error', 'readback-unconfirmed', 'review-invalidated'] as const
 export interface RecoveryWriteContext {
   operation: string

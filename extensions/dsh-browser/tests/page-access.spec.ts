@@ -86,6 +86,7 @@ describe('native page access and visible control group', () => {
   })
   it('keeps pending automatic grants private through load events and excludes them from earlier requests', async () => {
     const h = fixture(), created = h.page(42)
+    created.status = 'loading'
     let finish!: () => void
     vi.spyOn(debuggerPages, 'attachCreated').mockImplementation(() => new Promise<void>(resolve => { finish = resolve }))
     vi.spyOn(debuggerPages, 'ready').mockResolvedValue(true)

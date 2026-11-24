@@ -75,6 +75,8 @@ export async function apply(ctx, config) {
   }
   ctx.on('session/created', async (session) => {
     if (session.id !== config.sessionId) return
+    // DSH announces new sessions before making them writable.
+    await Promise.resolve()
     // A durable Session choice must survive catalog refreshes and cold reads,
     // independently of the deployment default. No model request is needed.
     session.append('model/selection', { provider: 'smoke-provider', model: 'smoke-model' })

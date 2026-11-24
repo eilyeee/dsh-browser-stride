@@ -72,7 +72,14 @@ async function toolTurn(prompt) {
     events.push(event); if (event.type === 'turn/end') finish(event.data.reason.kind)
   })
   cancelTimer = setTimeout(() => { void host.client.rpc('session.cancel', { sessionId }).catch(() => {}); finish('test-timeout') }, realModel ? 180000 : 45000)
-  try { const input = browser.panel.locator('.composer textarea'); await input.fill(prompt); await input.press('Enter'); assert.equal(await within(done, realModel ? 185000 : 50000, 'diagnostic model turn'), 'completed') }
+  try {
+    if (prompt === undefined) {
+      await browser.panel.locator('.page-diagnostics').getByRole('button', { name: /让 DSH 查看|Ask DSH to inspect/ }).click()
+    } else {
+      const input = browser.panel.locator('.composer textarea'); await input.fill(prompt); await input.press('Enter')
+    }
+    assert.equal(await within(done, realModel ? 185000 : 50000, 'diagnostic model turn'), 'completed')
+  }
   finally { clearTimeout(cancelTimer); off() }
   await writeFile(join(artifacts, phase + '-events.json'), JSON.stringify(events, null, 2), { mode: 0o600 })
 }
@@ -83,13 +90,13 @@ try {
   if (realModel) { if (!process.env.STRIDE_MODEL_CREDENTIALS || !process.env.STRIDE_MODEL_PATCH) throw Error('Private model credential/config paths required'); await copyFile(process.env.STRIDE_MODEL_CREDENTIALS, join(home, '.credentials.yaml')); await chmod(join(home, '.credentials.yaml'), 0o600) }
   const fixture = join(root, 'adapter.mjs')
   await writeFile(fixture, `import {LlmAdapter} from ${JSON.stringify(pathToFileURL(bridgeRequire.resolve('@deepseek-ai/dsh-llm')).href)};
-class Scripted extends LlmAdapter {async listModels(provider){return [{provider,id:'diagnostics',name:'Synthetic diagnostics',contextWindow:128000}]} async *stream(options){const done=options.messages.some(m=>m.role==='tool'); const block=done?{type:'text',text:'DIAGNOSTIC_DONE'}:{type:'tool-call',id:'diag',name:'run_code',arguments:JSON.stringify({code:"const value=await tools.browser_get_diagnostics({limit:30});console.log(value);console.log('DIAGNOSTIC_PROGRAM_OK');",description:'Read explicitly enabled synthetic diagnostic metadata'})};yield {type:'block-start',index:0,blockType:block.type};yield {type:'block-end',index:0,block};yield {type:'finish',reason:{kind:done?'stop':'tool-calls'}}}}
-export const inject=['llm','tools','agents'];export function apply(ctx){${realModel ? '' : "ctx.on('agent/created',({agent})=>agent.ctx.effect(()=>agent.ctx.tools.presentAs('ptc')));ctx.effect(()=>ctx.llm.registerAdapter(['stride-diagnostics'],new Scripted()));"}
+class Scripted extends LlmAdapter {async listModels(provider){return [{provider,id:'diagnostics',name:'Synthetic diagnostics',contextWindow:128000}]} async *stream(options){const recent=options.messages.slice(options.messages.findLastIndex(m=>m.role==='user')+1); const done=recent.some(m=>m.role==='tool'); const block=done?{type:'text',text:'DIAGNOSTIC_DONE'}:{type:'tool-call',id:'diag',name:'run_code',arguments:JSON.stringify({code:"const value=await tools.browser_get_diagnostics({limit:30});console.log(value);console.log('DIAGNOSTIC_PROGRAM_OK');",description:'Read explicitly enabled synthetic diagnostic metadata'})};yield {type:'block-start',index:0,blockType:block.type};yield {type:'block-end',index:0,block};yield {type:'finish',reason:{kind:done?'stop':'tool-calls'}}}}
+export const inject=['llm','tools','agents'];export function apply(ctx){${realModel ? '' : "ctx.effect(()=>ctx.llm.registerAdapter(['stride-diagnostics'],new Scripted()));"}
 let requests=0;ctx.on('agent/request',(_p,next)=>{if(++requests>12)throw Error('Synthetic request budget');return next()});ctx.effect(()=>ctx.tools.guard(exec=>!['run_code','browser_get_diagnostics'].includes(exec.name)?'Only diagnostic reads are allowed in this fixture':undefined));}`, { mode: 0o600 })
   process.env.DSH_HOME = home; for (const key of ['DSH_EXT_TOKEN', 'DSH_BRIDGE_ADMIN_TOKEN', 'DSH_BROWSER_SESSION_WORKSPACE']) delete process.env[key]
   const reservation = createServer(); await new Promise(done => reservation.listen(0, '127.0.0.1', done)); const port = reservation.address().port; await new Promise(done => reservation.close(done))
   const patch = realModel ? await readFile(process.env.STRIDE_MODEL_PATCH, 'utf8') : ''
-  host = await startDshBackend({ backend: 'extension', port, repoRoot: repo, benchmarkRoot: join(repo, 'benchmark'), runtimeRoot: join(root, 'runtime'), startUrl: origin + '/health', deferSessionCreate: true, extraPatch: patch + '\n- insert:\n    - id: diagnostic-fixture\n      name: ' + JSON.stringify(pathToFileURL(fixture).href) + '\n' })
+  host = await startDshBackend({ backend: 'extension', port, repoRoot: repo, benchmarkRoot: join(repo, 'benchmark'), runtimeRoot: join(root, 'runtime'), startUrl: origin + '/health', toolExecutor: realModel ? undefined : 'ptc', deferSessionCreate: true, extraPatch: patch + '\n- insert:\n    - id: diagnostic-fixture\n      name: ' + JSON.stringify(pathToFileURL(fixture).href) + '\n' })
   let extensionDir
   if (statusRace || traceNative) {
     extensionDir = join(root, 'status-race-extension')
@@ -120,14 +127,22 @@ let requests=0;ctx.on('agent/request',(_p,next)=>{if(++requests>12)throw Error('
     await browser.panel.waitForFunction(() => window.__strideDiagnosticRace.status().held, null, { timeout: 10000 })
   }
   phase = 'native-enable'
-  await browser.panel.locator('.page-diagnostics summary').click()
-  const enable = browser.panel.locator('.page-diagnostics button'); await enable.waitFor(); await enable.click()
+  const useShortcut = !realModel && !statusRace && !startExpiry
+  const enable = browser.panel.locator('.page-diagnostics .troubleshooting-actions button').first()
+  if (useShortcut) {
+    await toolTurn('Inspect diagnostics before capture')
+    const shortcut = browser.panel.getByRole('button', { name: /排查这个页面|Troubleshoot this page/ })
+    await shortcut.click()
+  } else {
+    await browser.panel.locator('.page-diagnostics > summary').click()
+    await enable.click()
+  }
   if (startExpiry) {
     phase = 'native-start-expiry'
     await waitWorker(() => globalThis.__strideDiagnosticStartDelay.status().held, 'The native start reply was not held')
     // This must settle before the panel's own 15-second RPC timeout.
     await browser.panel.locator('.page-diagnostics [role="status"]').waitFor({ timeout: 12500 })
-    assert.match(await browser.panel.locator('.page-diagnostics [role="status"]').innerText(), /请求未能确认|Request was not confirmed/)
+    assert.match(await browser.panel.locator('.page-diagnostics [role="status"]').innerText(), /诊断请求未确认|Check the connection/)
     assert.match(await enable.innerText(), /开启|Enable/)
     phase = 'late-native-start-cleanup'
     if (!unresponsiveStartRead) await browser.worker.evaluate(() => globalThis.__strideDiagnosticStartDelay.release())
@@ -158,7 +173,7 @@ let requests=0;ctx.on('agent/request',(_p,next)=>{if(++requests>12)throw Error('
   await browser.target.locator('#reproduce').click(); await browser.target.locator('#state').filter({ hasText: 'DONE' }).waitFor()
   assert.equal(gets, 1); assert.equal(writes, 0)
   phase = 'model-read'
-  await toolTurn(realModel ? '只调用一次 browser_get_diagnostics({limit:30})，读取已由面板开启的本地测试页诊断。不要开启诊断、点击、导航、读文件或修改网页。报告实际看到的 Console 错误类型和 HTTP 状态，明确这不能证明业务成功，然后停止。' : 'Read diagnostic metadata')
+  await toolTurn(useShortcut ? undefined : realModel ? '只调用一次 browser_get_diagnostics({limit:30})，读取已由面板开启的本地测试页诊断。不要开启诊断、点击、导航、读文件或修改网页。报告实际看到的 Console 错误类型和 HTTP 状态，明确这不能证明业务成功，然后停止。' : 'Read diagnostic metadata')
   const dispatches = events.filter(e => e.type === 'tool/ptc-dispatch' || e.type === 'tool/call' && e.data.name === 'browser_get_diagnostics').map(e => e.data)
   const observed = JSON.stringify(events.filter(e => e.type === 'tool/ptc-dispatch' || e.type === 'tool/result'))
   assert.ok(dispatches.some(value => value.name === 'browser_get_diagnostics')); assert.match(observed, /TypeError/); assert.match(observed, /500/); assert.match(observed, /complete/); assert.ok(!observed.includes('PRIVATE-'))
@@ -170,6 +185,7 @@ let requests=0;ctx.on('agent/request',(_p,next)=>{if(++requests>12)throw Error('
   assert.equal(await extensionDigest(join(repo, 'extensions/dsh-browser/dist')), sourceExtensionDigest, 'The candidate changed during acceptance')
   assert.equal(createHash('sha256').update(await readFile(join(repo, 'packages/browser/bridge-browser/lib/index.js'))).digest('hex'), sourceHostDigest, 'The Host candidate changed during acceptance')
   const result = { passed: true, version, realHost: true, isolatedChrome: true, realModel, scriptedModel: !realModel, browserVersion: browser.browserVersion, nativeEnable: true, nativeStop: true, diagnosticReadCalls: dispatches.filter(v => v.name === 'browser_get_diagnostics').length, observedConsole: 'TypeError', observedHttp: 500, sensitiveSyntheticValuesAbsent: true, serverWrites: writes, originalHostUntouched: true,
+    ...(useShortcut ? { startedFromError: true, readFromSidebarButton: true } : {}),
     ...(statusRace ? { statusRaceInjected: true, staleStatusDidNotOverwriteStart: true, extensionObserverCopy: true } : {}),
     ...(startExpiry ? { startReplyDelayed: true, expiredStartRejected: true, lateStartNeverReenabled: true, nativeSlotCleanupConfirmed: true, newNativeEnableRequired: true, extensionObserverCopy: true } : {}),
     ...(unresponsiveStartRead ? { exclusiveDetachBeforeOldReply: true, freshStartBeforeOldReply: true } : {}),

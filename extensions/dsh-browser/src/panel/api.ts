@@ -15,7 +15,7 @@ import { parsePageSelection, type PageSelection } from '../selection.ts'
 import { getUiLocale } from '../i18n.ts'
 import type { BrowserPairingStatus } from '../background/pairing-client.ts'
 import type { PageAuthorizationStatus } from '../page-authorization.ts'
-import type { RecoveryDecisions, RecoveryReply } from '@eilyeee/dsh-browser-stride/src/native-review.ts'
+import type { RecoveryDecisions, RecoveryOffer, RecoveryReply, RecoveryStatus } from '@eilyeee/dsh-browser-stride/src/native-review.ts'
 
 /** Panel-side subset of the extension settings. */
 export type PanelSettings = Settings
@@ -105,7 +105,11 @@ interface SessionResumeHintMessage {
 export interface PageAccessStatus { activeGranted: boolean; controlledGranted: boolean; controlledTabId: number | null; revocableTabId: number | null; pages?: AffinityTab[]; authorizedPageCount?: number; authorization?: PageAuthorizationStatus }
 export interface PageDiagnosticsStatus { enabled: boolean; captureId?: string; startedAt?: number; count: number; dropped: number }
 export interface PageDiagnosticsRequest { action: 'start' | 'stop' | 'status'; sessionId: string; tabId: number; revision: number; expectedUrl: string; captureId?: string }
-export type PageRecoveryRequest = Omit<PageDiagnosticsRequest, 'action' | 'captureId'> & ({ action: 'prepare' } | { action: 'confirm'; reviewId: string; decisions: RecoveryDecisions })
+export type PageRecoveryItem = RecoveryOffer['items'][number] & { page?: string; button?: string }
+export type PageRecoveryOffer = Omit<RecoveryOffer, 'items'> & { items: PageRecoveryItem[]; preview?: string }
+export type PageRecoveryReply = PageRecoveryOffer | Exclude<RecoveryReply, RecoveryOffer> | RecoveryStatus
+export type PageRecoveryRequest = { action: 'status'; sessionId: string }
+  | (Omit<PageDiagnosticsRequest, 'action' | 'captureId'> & ({ action: 'prepare' | 'inspect' } | { action: 'confirm'; reviewId: string; decisions: RecoveryDecisions }))
 
 type BackgroundMessage = ({ type: 'page-access'; sessionId: string | null } & PageAccessStatus) | RpcResultMessage | RespondResultMessage | SettingsResultMessage | (Omit<SettingsResultMessage, 'type'> & { type: 'browser-pairing.unpair.result' | 'page-access.revoke.result' | 'page-access.refresh.result' }) | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | (Omit<TabAffinityRebindResultMessage, 'type'> & { type: 'browser-run.retarget.result' | 'tab-affinity.unbind.result' }) | SelectionMessage | SessionResumeHintMessage | SessionActiveResultMessage | { type: 'browser-pairing'; status: BrowserPairingStatus }
 
@@ -134,7 +138,7 @@ function panelRpcError(failure: RpcFailurePayload | undefined, fallbackMessage: 
 /** The panel API surface. */
 export interface PanelApi {
   refreshPageAccess(): Promise<void>
-  pageRecovery(request: PageRecoveryRequest): Promise<RecoveryReply>
+  pageRecovery(request: PageRecoveryRequest): Promise<PageRecoveryReply>
   pageDiagnostics(request: PageDiagnosticsRequest): Promise<PageDiagnosticsStatus>
   startBrowserPairing(bridgeUrl: string): Promise<void>
   cancelBrowserPairing(): Promise<void>
@@ -208,7 +212,7 @@ export function connectPanel(): PanelApi {
 
   function onMessage(message: unknown): void {
     if (typeof message !== 'object' || message === null) return
-    const msg = message as BackgroundMessage | { type: 'page-diagnostics.result' | 'page-recovery.result'; id: string; ok: boolean; result?: PageDiagnosticsStatus | RecoveryReply; error?: RpcFailurePayload }
+    const msg = message as BackgroundMessage | { type: 'page-diagnostics.result' | 'page-recovery.result'; id: string; ok: boolean; result?: PageDiagnosticsStatus | PageRecoveryReply; error?: RpcFailurePayload }
     switch (msg.type) {
       case 'page-recovery.result':
       case 'page-diagnostics.result': {
@@ -451,9 +455,9 @@ export function connectPanel(): PanelApi {
   return {
     pageRecovery(request) {
       const id = crypto.randomUUID()
-      return new Promise<RecoveryReply>((resolve, reject) => {
+      return new Promise<PageRecoveryReply>((resolve, reject) => {
         const timer = setTimeout(() => { pending.delete(id); reject(new PanelRpcError('timeout', getUiLocale() === 'zh' ? '人工核对未能确认，请刷新核对状态' : 'Manual review was not confirmed; refresh its state')) }, 30000)
-        const entry = { resolve: (value: unknown) => { clearTimeout(timer); resolve(value as RecoveryReply) }, reject: (error: Error) => { clearTimeout(timer); reject(error) } }
+        const entry = { resolve: (value: unknown) => { clearTimeout(timer); resolve(value as PageRecoveryReply) }, reject: (error: Error) => { clearTimeout(timer); reject(error) } }
         pending.set(id, entry)
         void send({ ...request, type: 'page-recovery', id }, { kind: 'rpc', id }).catch((error: unknown) => {
           if (pending.get(id) !== entry) return

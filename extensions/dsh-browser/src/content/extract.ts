@@ -84,6 +84,27 @@ function elementText(el: Element): string {
   return el.textContent ?? ''
 }
 
+function controlText(el: Element): string {
+  const submenu = '[role="menu"]'
+  if (el.getAttribute('role') !== 'menuitem' || el.querySelector(submenu) === null) {
+    return el.textContent ?? ''
+  }
+
+  // A nested menu has its own items. Its text must not label the parent control.
+  const walker = el.ownerDocument.createTreeWalker(el, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      if (node.nodeType === Node.TEXT_NODE) return NodeFilter.FILTER_ACCEPT
+      if ((node as Element).matches(submenu)) return NodeFilter.FILTER_REJECT
+      return NodeFilter.FILTER_SKIP
+    },
+  })
+  const parts: string[] = []
+  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+    parts.push(node.nodeValue ?? '')
+  }
+  return parts.join('')
+}
+
 /**
  * Truncate text at a character budget, marking the cut.
  * @param text - source text.
@@ -131,8 +152,8 @@ export function accessibleName(el: Element, maxChars: number = MAX_ITEM_NAME_CHA
   }
 
   // Textarea contents and select options are data, not a control's label.
-  const ownText = labelable ? '' : el.textContent
-  if (ownText !== undefined && ownText.trim() !== '') return truncate(clean(ownText), maxChars).text
+  const ownText = labelable ? '' : controlText(el)
+  if (ownText.trim() !== '') return truncate(clean(ownText), maxChars).text
 
   if (el instanceof HTMLInputElement) {
     // Button-like inputs carry their label in `value`; other inputs never use

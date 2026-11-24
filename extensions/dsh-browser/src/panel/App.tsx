@@ -19,8 +19,9 @@ import { connectPanel, PanelRpcError, type PanelApi, type PanelSettings, type Pa
 import { renderMarkdown } from './markdown.ts'
 import { TaskBriefPanel } from './TaskBriefPanel.tsx'
 import { VersionStatus } from './VersionStatus.tsx'
-import { DiagnosticsPanel } from './DiagnosticsPanel.tsx'
+import { DiagnosticsPanel, type DiagnosticsControls } from './DiagnosticsPanel.tsx'
 import { RecoveryPanel } from './RecoveryPanel.tsx'
+import { GuidedRecoveryPanel, type RecoveryControls } from './GuidedRecoveryPanel.tsx'
 import { TASK_BRIEF_SAVE, TASK_BRIEF_OPEN, type TaskBrief } from '@eilyeee/dsh-browser-stride/src/task-brief-contract.ts'
 import { clearBriefDraft, clearBriefDrafts } from './task-brief-drafts.ts'
 import whaleUrl from '../../assets/icons/deepseek-256.png'
@@ -623,6 +624,7 @@ export function App(): React.JSX.Element {
   useEffect(() => api.onBrowserPairing(status => setPairingStatus(current =>
     current.phase === 'idle' && status.error === 'connection-lost' ? current : status)), [api])
   const [rows, setRows] = useState<Row[]>([])
+  const lastBrowserFeedback = useMemo(() => rows.filter(row => row.kind === 'feedback').at(-1), [rows])
   const [streamRow, setStreamRow] = useState<Row | null>(null)
   const [draft, setDraft] = useState<ComposerDraft<DraftImage>>(() => emptyComposerDraft())
   const input = draft.text
@@ -664,6 +666,9 @@ export function App(): React.JSX.Element {
   const stoppingRef = useRef(false)
   const addingImagesRef = useRef(false)
   const sendingRef = useRef(false)
+  const diagnosticControls = useRef<DiagnosticsControls>(null)
+  const recoveryControls = useRef<RecoveryControls>(null)
+  const [reviewRefresh, setReviewRefresh] = useState(0)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const imageProjectionRef = useRef<{
     sessionId: string | null
@@ -2308,8 +2313,14 @@ export function App(): React.JSX.Element {
       <PageAccessDiagnostics api={api} access={pageAccess} locale={locale} />
       <ControlGroupStatus key={sessionRef.current} state={tabAffinity} pages={pageAccess.pages ?? []} copy={copy} onSelect={selectGroupPage}
         selectionAvailable={state === 'connected' && sessionRef.current !== null && !sessionChanging} />
-      <DiagnosticsPanel api={api} sessionId={sessionRef.current} affinity={tabAffinity} available={state === 'connected' && caps?.pageDiagnostics === true && pageAccess.controlledGranted} locale={locale} />
-      <RecoveryPanel api={api} sessionId={sessionRef.current} affinity={tabAffinity} available={state === 'connected' && caps?.manualRecovery === true && pageAccess.controlledGranted} working={working || sessionSwitchBlocked} locale={locale} />
+      <DiagnosticsPanel api={api} sessionId={sessionRef.current} affinity={tabAffinity}
+        available={state === 'connected' && caps?.pageDiagnostics === true && pageAccess.controlledGranted} locale={locale}
+        controls={diagnosticControls} canInspect={sessionReady && !working && !sessionSwitchBlocked}
+        onInspect={() => { void send(locale === 'zh'
+          ? '请只读取当前对话所选页面已有的诊断记录，用简短的话说明可见的错误线索。保持页面现状，继续等待我的指令。'
+          : 'Read only the existing diagnostics for the selected page in this conversation. Summarize the visible clues briefly and wait for my next instruction.') }} />
+      {caps?.guidedRecovery !== true && <RecoveryPanel api={api} sessionId={sessionRef.current} affinity={tabAffinity}
+        available={state === 'connected' && caps?.manualRecovery === true && pageAccess.controlledGranted} working={working || sessionSwitchBlocked} locale={locale} />}
       <TaskBriefPanel api={api} sessionId={sessionRef.current} supported={caps?.taskNotes === true} connected={state === 'connected'} locale={locale}
         unavailable={caps?.taskNotesUnavailable === true} hostIdentity={taskBriefHost} canStartProject={!sessionSwitchBlocked} onProjectChat={brief => { void startNewSession(brief) }}
         pages={pageAccess.pages ?? []} selectedTabId={tabAffinity?.controlled?.tabId} onSelectPage={selectMaterialPage} canSelectPage={!sessionSwitchBlocked && tabAffinity !== null} />
@@ -2358,11 +2369,20 @@ export function App(): React.JSX.Element {
         </section>
       )}
       <BrowserRuns api={api} sessionId={sessionRef.current} connected={state === 'connected' && !sessionChanging} copy={copy.runs}
+        reviewRefresh={reviewRefresh}
+        {...(caps?.guidedRecovery === true ? { reviewAction: {
+          label: locale === 'zh' ? '检查操作结果' : 'Check action results',
+          inspect: (event: Event) => recoveryControls.current?.inspect(event),
+        } } : {})}
         supportsNewPages={import.meta.env.EXT_TARGET !== 'firefox'}
         {...(automaticControlSaved && tabAffinity !== null ? { newPageRevision: tabAffinity.revision } : {})}
         {...(pageAccess.controlledGranted && tabAffinity?.controlled !== undefined && tabAffinity.controlled !== null ? { startRevision: tabAffinity.revision } : {})}
         {...(pageAccess.controlledGranted && tabAffinity !== null && (tabAffinity.status === 'following' || tabAffinity.status === 'background') && tabAffinity.controlled !== null ? { targetRevision: tabAffinity.revision } : {})} />
       <div className="messages-pane">
+      {caps?.guidedRecovery === true && <GuidedRecoveryPanel api={api} sessionId={sessionRef.current} affinity={tabAffinity}
+        connected={state === 'connected' && !sessionChanging} available={state === 'connected' && pageAccess.controlledGranted}
+        working={working || sessionSwitchBlocked} locale={locale} controls={recoveryControls}
+        onRecorded={() => setReviewRefresh(value => value + 1)} />}
       <div className="messages" ref={scrollRef} onScroll={syncScrollBottom}>
         {rows.length === 0 && streamRow === null && !working && (
           <div className="empty">
@@ -2383,6 +2403,12 @@ export function App(): React.JSX.Element {
             {row.kind === 'tool'
               ? <ToolActivity row={row} copy={copy} />
               : <MessageBody row={row} sessionId={sessionRef.current ?? ''} api={api} copy={copy} />}
+            {row === lastBrowserFeedback && row.help === 'recovery' && caps?.guidedRecovery === true &&
+              <button type="button" className="secondary feedback-action"
+                onClick={event => recoveryControls.current?.inspect(event.nativeEvent)}>{locale === 'zh' ? '核对刚才的结果' : 'Check the last result'}</button>}
+            {row === lastBrowserFeedback && row.help === 'diagnostics' && caps?.pageDiagnostics === true &&
+              <button type="button" className="secondary feedback-action"
+                onClick={event => diagnosticControls.current?.start(event.nativeEvent)}>{locale === 'zh' ? '排查这个页面' : 'Troubleshoot this page'}</button>}
           </div>
         ))}
         {streamRow !== null && (

@@ -1,27 +1,22 @@
 # DSH Stride (寻行)
 
-In 0.1.21, a drained ordinary conversation with a one-use Host-owner admission can open or reuse its exact reference URL for observation while old site-write uncertainty remains. Original records and the page-write fence are preserved. Page edits, submissions, current-page navigation, tab closing and managed tab mutations remain fenced. Active writes or an unresolved open/follow refuse another target change. The admission lasts two minutes, belongs to one session and connection, disallows forced copies and cannot be issued by browser tools. Direct follow remains fenced. Existing native permission/approval checks, durable records and write ordering still apply; this neither acknowledges old operations nor resumes a task.
-
-
-Development build 0.1.19 binds observations to the native page lifetime, conversation and managed execution revision. A trusted pointer/key event in a controlled page retires old observations: the model must read again, and a managed task needs explicit continuation. This does not detect every background account or tenant change. Login and business identity still need independent checks; model-generated events never grant authority.
-
-Bounded snapshot metadata reports listed frames, native document epochs and omitted text/controls/options. `complete` is always false: closed roots, hidden canvas layers, non-DOM state and unlisted frames are outside the evidence. Recognized-value redaction does not mean all personal information is removed. Missing legacy metadata remains unknown. An observation ID cannot prove the model received a complete baseline, so explicit model delta requests currently return bounded full snapshots with `model-projection-not-attested`. Trusted lower-level protocol baseline checks remain. The 0.1.18 description below is historical.
-
-
 **English** | [中文](README.zh.md)
 
-DSH Stride is a community product branch of [dsh-browser](https://github.com/omdsh-dev/dsh-browser). It connects DeepSeek Harness to a user's existing Chrome or Firefox tabs through a local bridge and a browser side panel. It is not affiliated with or endorsed by DeepSeek.
+DSH Stride connects DeepSeek Harness to your authorized Chrome tabs. You can chat from the browser sidebar, read the selected page and ask DSH to interact with it. Stride is an independent community branch of [dsh-browser](https://github.com/omdsh-dev/dsh-browser).
 
-The project is in **M0: compatibility and baseline verification**. The upstream text-based browser tools and side-panel chat are available as a development baseline. Connection, installation pairing and target checks have been hardened. There is no supported release yet.
+**1.0.0** covers ordinary chat in Chrome and DSH Web, installation pairing, authorized tab groups, and page reading and interaction. Managed `/browser` tasks are in preview. Firefox has a separate source build, and Desktop integration remains unverified.
 
 The Host component is `@eilyeee/dsh-browser-stride`; its source remains in `packages/browser/bridge-browser/`. The extension is a separate component.
 
 ## Requirements
 
 - Node.js 24.15 or later in the supported Node 24 line; the exact supported range is in `package.json`.
-- The pnpm version specified by `packageManager` in `package.json`.
-- Chrome 116+ or Firefox 140+ for the existing text path. A browser version alone does not establish end-to-end support.
-- The local DeepSeek Harness Host and workspace DSH dependencies use `0.2.1-rc.5` together; updating only the global CLI causes a version mismatch. Desktop integration and the active profile still require verification.
+- Chrome 116+ and DeepSeek Harness `0.2.2-rc.5` using the `web` profile.
+- For source builds, use the pnpm version specified by `packageManager` in `package.json`.
+
+## Install from a release
+
+Download the matching Host tarball, Chrome ZIP, installer, version file and checksums. Follow the included README to install the Host, load the Chrome extension and check the two versions. Keep the original Host data and extension directory when updating. [GitHub Releases](https://github.com/eilyeee/dsh-browser-stride/releases)
 
 ## Run from source
 
@@ -35,6 +30,8 @@ pnpm start
 ```
 
 The installer modifies the local **web** DSH profile, builds the plugin and Chrome extension, and attempts to open Chrome's extension page. It may remove the legacy bridge package from that profile; review the script before running it. Firefox requires a separate build and temporary installation; see the [extension README](extensions/dsh-browser/README.md). Desktop may use a different profile, so installation into `web` is not proof of Desktop integration. The installer must be run from a complete Stride checkout; it does not download an upstream project.
+
+## Connect Chrome to DSH
 
 After starting the Host, click **Connect to local DSH** in the extension settings. Keep the panel open, then compare and confirm the matching verification code in the signed-in DSH web UI under **Settings → General → Browser pairing**. The extension saves its installation credential and reconnects automatically thereafter. Requests expire after five minutes; rejection, cancellation or a Host restart requires a new request. Requests grant no authority by themselves: an authenticated Host owner must confirm, and only the requesting extension can claim the credential. Credentials stay out of pages, URLs and logs. Connecting replaces the current browser connection; page actions still follow extension approval settings.
 
@@ -57,7 +54,7 @@ For the current source installation, pull into the original checkout, install lo
 
 For the package-name migration, run the installer once after pulling and building (`./scripts/install.sh`, or `.\scripts\install.ps1` on Windows). It registers `@eilyeee/dsh-browser-stride`, then removes the transitional `@eilyeee/dsh-stride-browser-bridge` and legacy `@yuxianglin/dsh-bridge-browser` and `@deepseek-ai/dsh-bridge-browser` registrations. Keep the existing DSH home and extension installation to preserve pairing and task records.
 
-DSH supports GitHub plugins, but this repository root is a development workspace, not a direct GitHub plugin package. There is no browser-store automatic-update channel. After building, run `pnpm run release:prepare` to create local development artifacts under `.stride-private/releases/<version>/`, where `<version>` is the root `package.json` version: a standalone Host tarball, Chrome ZIP, checksums, version metadata and installation instructions. Use a trusted distribution source and follow the included README; the workspace's development dependencies are not required. Installing the Host plugin does not install or update the browser extension.
+For release packages, download the new version and follow the included README to update the Host plugin and Chrome extension separately. To build those files locally, run `pnpm run release:prepare`. It writes to `.stride-private/releases/<version>/`, using the root package version.
 
 Connected settings show installed Host, DSH, extension and wire versions. Different package versions prompt a coordinated update; older Hosts may omit version metadata. A compatible wire does not establish feature parity. Wait for active work to finish, retain the original DSH home/profile, restart the Host and reload the extension. Reauthorize existing pages afterwards; pairing and task notes remain available.
 

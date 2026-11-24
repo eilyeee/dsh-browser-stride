@@ -245,7 +245,7 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
     parameters: {
       delta: { type: 'boolean', description: 'Request changes against baseObservationId; otherwise a full snapshot is returned.' },
       baseObservationId: { type: 'string', description: 'Observation ID from the last received snapshot, not an elementRef. Other frames or unavailable baselines return full snapshots.' },
-      region: { type: 'string', description: 'Unique CSS selector (max 500 characters) for main text; the control inventory still covers the frame.' },
+      region: { type: 'string', description: 'Unique CSS selector (max 500 characters) for main text. Popup controls in this region have priority in the frame inventory.' },
     },
     timeoutMs: options.toolTimeoutMs,
     output: TEXT_OUTPUT,

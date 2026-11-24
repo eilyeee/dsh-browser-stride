@@ -74,7 +74,7 @@ async *stream(options){const messages=options.messages,texts=messages.map(m=>m.c
  if(!programs[kind])throw Error('No synthetic component read case');const done=messages.slice(index+1).some(m=>m.role==='tool');
  const block=done?{type:'text',text:'COMPONENT_DONE'}:{type:'tool-call',id:'component-'+kind,name:'run_code',arguments:JSON.stringify({code:programs[kind],description:'Read the observed component tree without editing'})};
  yield {type:'block-start',index:0,blockType:block.type};yield {type:'block-end',index:0,block};yield {type:'finish',reason:{kind:done?'stop':'tool-calls'}}}}
-export const inject=['llm','tools','agents'];export function apply(ctx){${realModel?'':"ctx.on('agent/created',({agent})=>{agent.ctx.effect(()=>agent.ctx.tools.presentAs('ptc'))});ctx.effect(()=>ctx.llm.registerAdapter(['stride-component-reads'],new Scripted()));"}
+export const inject=['llm','tools','agents'];export function apply(ctx){${realModel?'':"ctx.effect(()=>ctx.llm.registerAdapter(['stride-component-reads'],new Scripted()));"}
  let requests=0,calls=0;ctx.on('session/event',(_s,e)=>{if(e.type==='turn/start'){requests=0;calls=0}});
  ctx.on('agent/request',(_p,next)=>{if(++requests>20)throw Error('Synthetic request budget');return next()});
  ctx.effect(()=>ctx.tools.guard(exec=>!${JSON.stringify(baseOnly?['run_code','browser_snapshot','browser_list_tabs']:['run_code','browser_snapshot','browser_measure_layout','browser_read_design_styles','browser_get_text','browser_wait','browser_list_tabs',...settleOnly?['browser_click']:[]])}.includes(exec.name)?'Only synthetic component fixture tools are allowed':exec.name.startsWith('browser_')&&++calls>20?'Synthetic browser budget exhausted':undefined));
@@ -82,7 +82,7 @@ export const inject=['llm','tools','agents'];export function apply(ctx){${realMo
   process.env.DSH_HOME=home;for(const key of ['DSH_EXT_TOKEN','DSH_BRIDGE_ADMIN_TOKEN','DSH_BROWSER_SESSION_WORKSPACE'])delete process.env[key]
   const net=createServer();await new Promise(done=>net.listen(0,'127.0.0.1',done));const port=net.address().port;await new Promise(done=>net.close(done))
   const patch=realModel?await readFile(process.env.STRIDE_MODEL_PATCH,'utf8'):''
-  host=await startDshBackend({backend:'extension',port,repoRoot:repo,benchmarkRoot:join(repo,'benchmark'),runtimeRoot:join(root,'runtime'),startUrl:site.url('requirements'),deferSessionCreate:true,extraPatch:patch+'\n- insert:\n    - id: component-reads-fixture\n      name: '+JSON.stringify(pathToFileURL(fixture).href)+'\n'})
+  host=await startDshBackend({backend:'extension',port,repoRoot:repo,benchmarkRoot:join(repo,'benchmark'),runtimeRoot:join(root,'runtime'),startUrl:site.url('requirements'),toolExecutor: realModel ? undefined : 'ptc', deferSessionCreate: true,extraPatch:patch+'\n- insert:\n    - id: component-reads-fixture\n      name: '+JSON.stringify(pathToFileURL(fixture).href)+'\n'})
   browser=await startExtensionBrowser({repoRoot:repo,benchmarkRoot:join(repo,'benchmark'),bridgeUrl:`ws://127.0.0.1:${port}/ext/bridge`,issuePairingCode:()=>host.issuePairingCode(),trustedOrigin:site.origin,chromiumArgs:settleOnly?['--disable-background-timer-throttling','--disable-renderer-backgrounding']:[]})
   await wait(async()=>typeof (await browser.worker.evaluate(async()=>(await chrome.storage.session.get('dshTabAffinity')).dshTabAffinity))?.focusedSessionId==='string','panel Session')
   sessionId=await browser.worker.evaluate(async()=>(await chrome.storage.session.get('dshTabAffinity')).dshTabAffinity.focusedSessionId)

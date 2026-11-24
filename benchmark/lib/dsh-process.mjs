@@ -55,6 +55,7 @@ export async function startDshBackend({
   runtimeRoot,
   startUrl,
   toolProbe,
+  toolExecutor,
   extraPatch,
   deferSessionCreate = false,
   startupTimeoutMs,
@@ -71,6 +72,10 @@ export async function startDshBackend({
   let patchText = (await readFile(patchTemplate, 'utf8'))
     .replace('__BENCHMARK_PLAYWRIGHT_PLUGIN__', pluginUrl)
     .replace('__BENCHMARK_BRIDGE_PLUGIN__', bridgePluginUrl)
+  if (toolExecutor !== undefined) {
+    patchText += `\n- id: tool-executor-native\n  disabled: ${toolExecutor !== 'native'}\n`
+    patchText += `- id: tool-executor-ptc\n  disabled: ${toolExecutor !== 'ptc'}\n`
+  }
   if (toolProbe !== undefined) {
     if (backend !== 'extension') throw new Error('the tool probe requires the extension backend')
     patchText += [

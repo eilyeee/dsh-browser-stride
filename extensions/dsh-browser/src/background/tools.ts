@@ -117,12 +117,24 @@ const snapshotDocumentsByTab = new Map<number, Map<number, string>>()
 const snapshotScopesByTab = new Map<number, Map<number, string>>()
 const snapshotEpochsByTab = new Map<number, Map<number, { key: string; id: string }>>()
 const snapshotGenerationByTab = new Map<number, object>()
+const snapshotReviewControls = new Map<number, Map<number, Map<string, string>>>()
+const reviewControls = new Set(['确定', '保存', '提交', '添加', '创建', '更新', '应用', '取消', '查询', '继续', '下一步',
+  'confirm', 'ok', 'save', 'submit', 'add', 'create', 'update', 'apply', 'cancel', 'search', 'continue', 'next'])
+
+/** Keep only common button labels from the exact scoped snapshot. */
+export function reviewControlLabel(tabId: number, scope: string, args: Record<string, unknown>): string | undefined {
+  const frameId = requestedFrame(args)
+  if (snapshotScopesByTab.get(tabId)?.get(frameId) !== scope || typeof args.elementRef !== 'string') return undefined
+  return snapshotReviewControls.get(tabId)?.get(frameId)?.get(args.elementRef)
+}
+
 export function hasScopedSnapshot(tabId: number, scope: string): boolean {
   return snapshotDocumentsByTab.get(tabId)?.has(0) === true && snapshotScopesByTab.get(tabId)?.get(0) === scope
 }
 
 /** Invalidate captured documents and any in-flight observation for a tab. */
 export function resetTabSnapshot(tabId: number): void {
+  snapshotReviewControls.delete(tabId)
   snapshotDocumentsByTab.delete(tabId)
   snapshotScopesByTab.delete(tabId)
   snapshotEpochsByTab.delete(tabId)
@@ -131,6 +143,7 @@ export function resetTabSnapshot(tabId: number): void {
 
 /** Forget a closed tab without letting an in-flight snapshot recreate its state. */
 export function forgetTabSnapshot(tabId: number): void {
+  snapshotReviewControls.delete(tabId)
   snapshotDocumentsByTab.delete(tabId)
   snapshotScopesByTab.delete(tabId)
   snapshotEpochsByTab.delete(tabId)
@@ -438,6 +451,7 @@ async function snapshotAllFrames(
   const sections: string[] = []
   const capturedDocuments = new Map<number, string>()
   const capturedEpochs = new Map<number, { key: string; id: string }>()
+  const capturedControls = new Map<number, Map<string, string>>()
   const coverageFrames: SnapshotCoverage['frames'] = []
   for (let index = 0; index < settled.length; index += 1) {
     const outcome = settled[index]!
@@ -483,6 +497,12 @@ async function snapshotAllFrames(
     }
     capturedEpochs.set(frame.frameId, epoch)
     capturedDocuments.set(frame.frameId, key)
+    const controls = new Map<string, string>()
+    for (const match of text.matchAll(/^\s*\[\d+\]\s+button\s+"([^"\n]+)"[^\n]*?\sref=(obs_[\w-]+:\d+)\s*$/gm)) {
+      const [, label, ref] = match
+      if (reviewControls.has(label!.toLowerCase())) controls.set(ref!, label!)
+    }
+    if (controls.size > 0) capturedControls.set(frame.frameId, controls)
     coverageFrames.push({ frameId: frame.frameId, documentEpoch: epoch.id, status: parsed.success ? 'captured' : 'metadata-unavailable',
       ...(parsed.success ? { observation: parsed.data } : {}) })
     if (frame.frameId === 0) sections.push(text)
@@ -494,6 +514,7 @@ async function snapshotAllFrames(
   if (selected.length < frames.length) sections.push('\n(Additional iframes omitted by the snapshot budget.)')
 
   snapshotDocumentsByTab.set(tabId, capturedDocuments)
+  snapshotReviewControls.set(tabId, capturedControls)
   snapshotEpochsByTab.set(tabId, capturedEpochs)
   if (call.observationScope === undefined) snapshotScopesByTab.delete(tabId)
   else snapshotScopesByTab.set(tabId, new Map([...capturedDocuments.keys()].map(frameId => [frameId, call.observationScope!])))

@@ -232,9 +232,9 @@ export function resolveSnapshotRegion(value: string | undefined): { region?: str
 /**
  * Build a snapshot of the current page.
  *
- * Reconciles the stable id registry, collects the inventory (dialog-first,
- * then viewport-first, capped), extracts main content (budgeted), and — in
- * delta mode — diffs against the previous snapshot.
+ * Reconciles the stable id registry and collects bounded text and controls.
+ * Scoped popups, open dialogs and visible controls receive inventory priority.
+ * Delta views compare the result with the previous snapshot.
  *
  * @param ids - the stable id registry (one per content-script lifetime).
  * @param options - delta flag, region selector, and negotiated budgets.
@@ -250,18 +250,23 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
   // first snapshot on a fresh document always adds everything.
   const reindexed = last !== null && added + removed > elements.length * 0.5
 
-  // Measure viewport and dialog membership once. Calling getBoundingClientRect
+  // Measure viewport and control membership once. Calling getBoundingClientRect
   // from a sort comparator forces repeated layout reads on large pages.
   const isOpenDialog = openDialogTest()
-  const elementViews = elements.map((element) => ({
-    element,
-    inViewport: isInViewport(element),
-    inDialog: openDialogOf(element, isOpenDialog) !== null,
+  const elementViews = elements.map((element) => {
     // Options are often portalled to body, outside their owning modal.
-    inPopup: isElementUiOption(element) || closestComposed(element, '[role="listbox"]') !== null,
-  }))
+    const inPopup = isElementUiOption(element) || closestComposed(element, '[role="listbox"]') !== null
+    return {
+      element,
+      inViewport: isInViewport(element),
+      inDialog: openDialogOf(element, isOpenDialog) !== null,
+      inPopup,
+      inScopedPopup: inPopup && regionEl?.contains(element) === true,
+    }
+  })
   const ordered = [...elementViews].sort((a, b) =>
-    Number(b.inPopup && b.inViewport) - Number(a.inPopup && a.inViewport)
+    Number(b.inScopedPopup) - Number(a.inScopedPopup)
+    || Number(b.inPopup && b.inViewport) - Number(a.inPopup && a.inViewport)
     || Number(b.inDialog) - Number(a.inDialog) || Number(b.inViewport) - Number(a.inViewport))
   const names = new Map<Element, string>()
   const nameOf = (element: Element): string => {

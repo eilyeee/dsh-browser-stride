@@ -18,8 +18,8 @@ const CONTROLLER_WORLD = 'DSH Stride controller'
 const VISUAL_CAPTURES_KEY = 'dshVisualCaptures'
 const FRAME_READ_TIMEOUT_MS = 8_000
 
-export function isLoadedHttpTab(tab: Pick<chrome.tabs.Tab, 'url' | 'status' | 'pendingUrl'>): boolean {
-  return tab.status === 'complete' && tab.pendingUrl === undefined && /^https?:\/\//i.test(tab.url ?? '')
+export function isCommittedHttpTab(tab: Pick<chrome.tabs.Tab, 'url' | 'status' | 'pendingUrl'>): boolean {
+  return tab.pendingUrl === undefined && (tab.status === 'loading' || tab.status === 'complete') && /^https?:\/\//i.test(tab.url ?? '')
 }
 
 /** Request authority is checked at the transport's actual delivery boundary. */
@@ -171,7 +171,7 @@ export class DebuggerPages {
           const tab = await chrome.tabs.get(tabId)
           bounded.throwIfAborted()
           this.allowed(tabId, session)
-          if (isLoadedHttpTab(tab)) {
+          if (isCommittedHttpTab(tab)) {
             try {
               session.attachment = chrome.debugger.attach({ tabId }, '1.3')
               await session.attachment
@@ -443,14 +443,17 @@ export class DebuggerPages {
     }
     return response.result?.value
   }
-  async ready(tabId: number, previousDocumentId: string | undefined, signal: AbortSignal, timeoutMs: number): Promise<boolean> {
+  async ready(
+    tabId: number, previousDocumentId: string | undefined, signal: AbortSignal, timeoutMs: number,
+    readiness: 'committed' | 'complete' = 'complete',
+  ): Promise<boolean> {
     return readWithin(timeoutMs, async bounded => {
       while (!bounded.aborted && this.has(tabId)) {
         try {
           const session = this.session(tabId)
           const tab = await chrome.tabs.get(tabId)
           bounded.throwIfAborted()
-          if (isLoadedHttpTab(tab)) {
+          if (isCommittedHttpTab(tab) && (readiness === 'committed' || tab.status === 'complete')) {
             const frame = await this.frame(tabId, session, bounded)
             if (`${frame.id}:${frame.loaderId}` !== previousDocumentId) return !bounded.aborted
           }

@@ -1,11 +1,38 @@
 # Changelog
 
 All notable changes to this project are documented here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The project intends to
-use [Semantic Versioning](https://semver.org/) once a public release exists;
-package versions currently identify development builds, not supported releases.
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Releases starting
+with 1.0.0 use [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+
+## [1.0.0]
+
+The first release covers ordinary chat in DSH Web and Chrome, installation
+pairing, per-conversation tab selection and authorized page interaction. The
+Host and Chrome archives are distributed together for DSH 0.2.2-rc.5 on wire v4.
+Managed `/browser` tasks remain in preview.
+
+### Changed
+
+- The Host plugin uses the DSH 0.2.2-rc.5 runtime and its Cordis dependencies.
+
+- Chrome can start page diagnostics beside a browser error. The panel shows
+  the selected page and capture status and offers a button to inspect the
+  existing records with DSH.
+- Paused tasks and uncertain actions offer a review with one read of the
+  selected page. Users can confirm one result at a time and leave the other
+  actions pending.
+
+### Fixed
+
+- Scoped snapshots prioritize the open dropdown's options on crowded pages.
+- Menu snapshots keep submenu labels separate so the model can select the
+  intended entry. Browser guidance asks it to check the view after navigation.
+- An automatically opened Chrome tab can bind and be read once its main
+  document commits, even while slow images and other resources load.
+
+## Development builds
 
 ### Added
 

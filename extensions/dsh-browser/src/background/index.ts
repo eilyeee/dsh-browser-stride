@@ -37,7 +37,7 @@
 import { PageAuthorizationAttempts, PageAuthorizationError } from '../page-authorization.ts'
 import { SelectionAttempts } from './selection-attempts.ts'
 import { pageDiagnostics } from './diagnostics.ts'
-import { NATIVE_RECOVERY_PREPARE, NATIVE_RECOVERY_CONFIRM, recoveryOfferSchema, recoveryCommitSchema, recoveryDecisionsSchema } from '@eilyeee/dsh-browser-stride/src/native-review.ts'
+import { NATIVE_RECOVERY_PREPARE, NATIVE_RECOVERY_CONFIRM, NATIVE_RECOVERY_STATUS, recoveryOfferSchema, recoveryCommitSchema, recoveryDecisionsSchema, recoveryStatusSchema } from '@eilyeee/dsh-browser-stride/src/native-review.ts'
 import {
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
   BRIDGE_CONFIRM_TOOL_METHOD,
@@ -79,7 +79,9 @@ import {
   hasScopedSnapshot,
   isNavigationCandidateTool,
   isTabManagementTool,
+  parseHttpUrl,
   resetTabSnapshot,
+  reviewControlLabel,
   type ToolAnswer,
 } from './tools.ts'
 import {
@@ -273,6 +275,14 @@ interface ActiveToolCall {
 }
 
 const activeToolCalls = new Map<string, ActiveToolCall>()
+interface RecoveryRead {
+  sessionId: string
+  current: () => boolean
+  used: boolean
+  preview?: string
+}
+const recoveryReads = new Map<string, RecoveryRead>()
+const recoveryHints = new Map<string, { sessionId: string; tabId: number; origin: string; page: string; button?: string }>()
 const writeQueue = new WriteQueue()
 /** Disconnection drops result ownership, but dispatched operations must still settle before revocation. */
 const unsettledToolCalls = new Set<ActiveToolCall>()
@@ -830,7 +840,8 @@ async function prepareToolTarget(lease: ToolTargetLease, sessionId: string | und
     return staleTarget()
   }
   if (!pageAccess.allows(tab)) return pageAccessFailure()
-  if (tab.status === 'loading' || tab.pendingUrl !== undefined) return staleTarget()
+  // Automatic control revalidates the committed document through the debugger.
+  if (tab.pendingUrl !== undefined || (tab.status === 'loading' && !debuggerPages.has(tab.id))) return staleTarget()
   // An initial, unattributed call may establish only the target it received.
   // Duplicates never reach here because execution admission happens first.
   if (tabAffinity.resolveTarget(sessionId).kind === 'initial') {
@@ -1386,6 +1397,17 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
   if (bridge === null) return
   // Transport duplicates must not replace an already-authorized operation.
   if (activeToolCalls.has(call.id)) return
+  const readId = call.args.recoveryReadId
+  const reviewRead = readId === undefined || typeof readId !== 'string' ? undefined : recoveryReads.get(readId)
+  if (readId !== undefined) {
+    if (call.name !== 'browser_snapshot' || reviewRead === undefined || reviewRead.used
+      || reviewRead.sessionId !== call.sessionId || !reviewRead.current()) {
+      bridge.send({ t: 'tool.result', id: call.id, action: call.action, ok: false,
+        error: { code: 'target-navigated', message: 'The selected page for this review changed.' } })
+      return
+    }
+    reviewRead.used = true
+  }
   const controller = new AbortController()
   const unrestrictedAccess = unrestrictedAccessEnabled()
   const automaticRevision = automaticAccessRevision
@@ -1419,12 +1441,26 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
   const admittedPages = pageAccess.snapshot()
   const pageLease = target !== undefined && !('ok' in target) ? pageAccess.lease(target.target.tabId) : () => true
   const isCurrentCall = (): boolean => activeToolCalls.get(call.id) === activeCall
-  const targetAllowed = (): boolean => writeAllowed() && (!automaticOpen || automaticAllowed()) && (reusedPageAccess?.() ?? true) && (!['browser_list_tabs', 'browser_open_tab'].includes(call.name) || admittedPages.current()) && pageLease() && !tabAffinity.isDetached(call.sessionId) && isCurrentCall() && executionFence?.current() === true && (runTarget === undefined || runTarget.current()) && (activeCall.targetLease === undefined
+  const targetAllowed = (): boolean => reviewRead?.current() !== false && writeAllowed() && (!automaticOpen || automaticAllowed()) && (reusedPageAccess?.() ?? true) && (!['browser_list_tabs', 'browser_open_tab'].includes(call.name) || admittedPages.current()) && pageLease() && !tabAffinity.isDetached(call.sessionId) && isCurrentCall() && executionFence?.current() === true && (runTarget === undefined || runTarget.current()) && (activeCall.targetLease === undefined
     || (activeCall.committed ? activeCall.targetLease.sameBinding() : activeCall.targetLease.current())
       && (!activeCall.observationBound || activeCall.targetLease.observationCurrent()))
   const commitAction = (): void => {
     if (!targetAllowed() || (automaticOpen && !(reusedPageAccess?.() ?? openedPageAccess?.current() ?? false))) throw new Error('Browser target lease expired before dispatch')
     activeCall.committed = true
+    if (caps?.guidedRecovery === true && activeCall.write && call.sessionId !== undefined && target !== undefined && !('ok' in target)) {
+      const tab = tabAffinity.getSessionTab(call.sessionId)
+      const origin = parseHttpUrl(tab?.url)?.origin
+      if (tab?.tabId === target.target.tabId && tab.url === target.target.url && origin !== undefined) {
+        const page = tab.title.replace(/[\p{Cc}\p{Cf}]/gu, '').trim().slice(0, 80)
+        const button = call.name === 'browser_click'
+          ? reviewControlLabel(tab.tabId, toolObservationScope(target, call.sessionId, call.execution, runTarget?.id ?? null), call.args) : undefined
+        if (page || button) {
+          if (recoveryHints.size >= 256) recoveryHints.delete(recoveryHints.keys().next().value!)
+          recoveryHints.set(`w:${call.id}`, { sessionId: call.sessionId, tabId: tab.tabId, origin,
+            page, ...(button === undefined ? {} : { button }) })
+        }
+      }
+    }
   }
   const rollbackActionCommit = (): void => {
     activeCall.committed = false
@@ -1643,6 +1679,9 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
         if (activeToolCalls.get(call.id) !== activeCall) return
         const socket = bridge
         if (socket === null) return
+        if (reviewRead !== undefined && reviewRead.current()) {
+          reviewRead.preview = recoveryPagePreview(answer.result)
+        }
         socket.send({ t: 'tool.result', id: call.id, action: call.action, ok: true, result: answer.result })
       } else {
         const socket = bridge
@@ -1678,6 +1717,16 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
     activeCall.settle()
     if (activeToolCalls.get(call.id) === activeCall) activeToolCalls.delete(call.id)
   })
+}
+
+/** A short local preview for the user, never a verdict or a stored action argument. */
+function recoveryPagePreview(result: unknown): string | undefined {
+  if (typeof result !== 'object' || result === null) return undefined
+  const text = (result as { text?: unknown }).text
+  if (typeof text !== 'string') return undefined
+  const match = /<UNTRUSTED_PAGE_CONTENT nonce="([^"]+)">\n([\s\S]*?)\n<\/UNTRUSTED_PAGE_CONTENT nonce="\1">/.exec(text)
+  const body = match?.[2]?.split('\n').filter(line => !/^\s*(URL:|Frame \d+)/i.test(line)).join('\n').trim()
+  return body ? body.length > 1500 ? body.slice(0, 1500) + '…' : body : undefined
 }
 
 function cancelToolCall(id: string): void {
@@ -1992,24 +2041,50 @@ chrome.runtime.onConnect.addListener((port) => {
         if (typeof request.id !== 'string') break
         const sid = validSessionId(request.sessionId), originalRpc = rpc
         let target = sid === undefined ? undefined : captureToolTarget(sid)
-        const current = () => sid !== undefined && panelPorts.has(port) && panelActiveSessions.get(port) === sid && tabAffinity.focusedSession() === sid
+        const panelCurrent = () => sid !== undefined && panelPorts.has(port) && panelActiveSessions.get(port) === sid
           && rpc === originalRpc && bridge?.connected === true && caps?.manualRecovery === true
+        const current = () => panelCurrent() && tabAffinity.focusedSession() === sid
           && tabAffinity.snapshot().revision === request.revision && target !== undefined && !('ok' in target) && target.current() && target.observationCurrent()
           && target.target.tabId === request.tabId && target.target.url === request.expectedUrl && target.target.windowId === panelWindows.get(port)
-          && pageAccess.has(target.target.tabId) && ![...unsettledToolCalls].some(call => call.sessionId === sid)
+          && pageAccess.has(target.target.tabId)
+        const settled = () => ![...unsettledToolCalls].some(call => call.sessionId === sid)
         const reply = (ok: boolean, result?: unknown, code = 'review-stale') => { try { port.postMessage({ type: 'page-recovery.result', id: request.id, ok,
           ...(ok ? { result } : { error: { code, message: getUiLocale() === 'zh' ? '核对未能确认，请停止任务、只读检查实际业务状态，再刷新核对清单' : 'Review was not confirmed. Stop the task, inspect current business state read-only, and refresh the review.' } }) }) } catch { /* panel closed */ } }
-        if (sid === undefined || originalRpc === null || !current() || !['prepare', 'confirm'].includes(String(request.action))) { reply(false); break }
+        if (sid === undefined || originalRpc === null || !panelCurrent()) { reply(false); break }
+        if (request.action === 'status' && caps?.guidedRecovery === true) {
+          void originalRpc.request(NATIVE_RECOVERY_STATUS, { sessionId: sid }, { timeoutMs: 4000 })
+            .then(value => { if (!panelCurrent()) throw Error('stale'); reply(true, recoveryStatusSchema.parse(value)) })
+            .catch(() => reply(false))
+          break
+        }
+        if (!current() || !['prepare', 'inspect', 'confirm'].includes(String(request.action))) { reply(false); break }
+        if (!settled()) { reply(false, undefined, 'review-busy'); break }
         void (async () => {
           const native = await chrome.tabs.get(target && !('ok' in target) ? target.target.tabId : -1)
-          if (!current() || native.url !== request.expectedUrl || native.status === 'loading' || native.pendingUrl !== undefined || !pageAccess.allows(native)) throw Error('stale')
-          if (request.action === 'prepare') {
+          if (!current() || !settled() || native.url !== request.expectedUrl || native.status === 'loading' || native.pendingUrl !== undefined || !pageAccess.allows(native)) throw Error('stale')
+          if (request.action === 'prepare' || request.action === 'inspect') {
             recoveryOffers.delete(sid)
-            if (target === undefined || 'ok' in target || !hasScopedSnapshot(native.id!, toolObservationScope(target, sid))) throw new BridgeRpcError('review-read-required', 'Take a current snapshot before native review')
-            const result = recoveryOfferSchema.parse(await originalRpc.request(NATIVE_RECOVERY_PREPARE, { sessionId: sid }, { timeoutMs: 10000 }))
-            if (!current()) throw Error('stale')
-            if (result.items.length > 0) recoveryOffers.set(sid, { id: result.reviewId, current })
-            reply(true, result)
+            const read = request.action === 'inspect' && caps?.guidedRecovery === true
+            if (request.action === 'inspect' && !read) throw Error('unsupported')
+            if (!read && (target === undefined || 'ok' in target || !hasScopedSnapshot(native.id!, toolObservationScope(target, sid)))) {
+              throw new BridgeRpcError('review-read-required', 'Take a current snapshot before native review')
+            }
+            const readId = read ? crypto.randomUUID() : undefined
+            const ticket: RecoveryRead | undefined = readId === undefined ? undefined : { sessionId: sid, current, used: false }
+            if (ticket !== undefined) recoveryReads.set(readId!, ticket)
+            try {
+              const result = recoveryOfferSchema.parse(await originalRpc.request(NATIVE_RECOVERY_PREPARE,
+                { sessionId: sid, ...(readId === undefined ? {} : { readId }) }, { timeoutMs: read ? 25000 : 10000 }))
+              if (!current() || !settled() || read && result.items.length > 0 && ticket?.used !== true) throw Error('stale')
+              if (result.items.length > 0) recoveryOffers.set(sid, { id: result.reviewId, current: () => current() && settled() })
+              const origin = parseHttpUrl(native.url)?.origin
+              const items = caps?.guidedRecovery === true ? result.items.map(item => {
+                const hint = recoveryHints.get(item.key)
+                return hint?.sessionId === sid && hint.tabId === native.id && hint.origin === origin
+                  ? { ...item, page: hint.page, ...(hint.button === undefined ? {} : { button: hint.button }) } : item
+              }) : result.items
+              reply(true, { ...result, items, ...(ticket?.preview === undefined ? {} : { preview: ticket.preview }) })
+            } finally { if (readId !== undefined) recoveryReads.delete(readId) }
           } else {
             const offer = recoveryOffers.get(sid)
             recoveryOffers.delete(sid)

@@ -1,18 +1,18 @@
 # 兼容性与更新
 
-当前包是开发版。版本要求、构建成功和真实浏览器验收是不同的证据，不能互相替代。
+1.0.0 的发布范围是 Chrome 扩展与 DSH Web 普通对话，包含安装配对、授权分组、选页和页面读写。托管 `/browser` 任务处于预览阶段。
 
 | 范围 | 当前证据 |
 | --- | --- |
-| DSH | 0.2.1-rc.5；Host 和扩展使用 wire v4，新增能力须双方协商 |
+| DSH | 1.0.0 使用 0.2.2-rc.5；Host 和扩展使用 wire v4，新增能力须双方协商 |
 | Node / pnpm | 本轮使用 Node 24.22.1、pnpm 12.15.0；声明范围见根 package.json |
-| Chrome | 本轮隔离环境使用 macOS x64 上的 Chrome for Testing 156.0.8078.4；不代表所有 Chrome 版本均已验收 |
-| 常用 Chrome | 需另验扩展重载、工具栏授权和真实业务页面；隔离浏览器不能替代这项证据 |
-| Firefox | 保留文本路径和独立构建；本轮没有做运行验收，不提供 Chrome 的截图、页面诊断或人工核对能力 |
-| Desktop | 未实现共享任务集成 |
+| Chrome | 扩展要求 116+。隔离回归使用 macOS x64 上的 Chrome for Testing 156.0.8078.4，涵盖安装、重载和本地合成页面 |
+| 常用 Chrome | 另行记录普通对话、已有配对和授权页面的验证结果 |
+| Firefox | 保留文本路径和独立源码构建，运行验收后续进行 |
+| Desktop | 共享任务集成待开发 |
 | 模型 | 脚本化测试与默认模型测试分别记录；合成项目通过不等于用户业务项目通过 |
 
-安装包包含 Host tarball、Chrome ZIP、校验和及安装说明。运行 `pnpm run release:prepare` 生成本地开发包；不要用仓库根目录充当独立插件包。Host 插件与浏览器扩展须分别更新，目前没有浏览器商店自动更新渠道。
+安装包包含 Host tarball、Chrome ZIP、校验和及安装说明。运行 `pnpm run release:prepare` 可以在本地生成同样的文件。使用独立安装包分别更新 Host 插件与 Chrome 扩展。
 
 更新时保留原 DSH home 和 `web` profile。先等待任务及对话结束，再安装和重启 Host。Chrome ZIP 覆盖原扩展目录后，在 `chrome://extensions` 点击重新加载；保留固定目录和扩展安装身份才能复用原配对。更新后在扩展设置核对 DSH、Host、扩展和协议版本。自 0.1.35 起，也可在 DSH 设置的「浏览器配对」查看当前连接的扩展版本。旧扩展会显示「扩展已连接，版本未上报」。
 
@@ -20,7 +20,9 @@
 
 连接失败时先检查扩展设置中的 Host 地址、版本提示及配对状态。对话能聊天不代表已授权页面；已连接也不代表有可操作的目标。不要通过删除 DSH home 修复连接。需要重新配对时，在设置中解绑与 DSH 的连接，再重新连接；停止控制某一页不会解绑 DSH。
 
-`pnpm run test:smoke-release -- --dir <开发包目录>` 在临时 home 检查独立安装；`pnpm run test:smoke-upgrade -- --from <旧包目录> --to <新包目录>` 使用同一临时 home/profile 和固定扩展目录，检查历史、配对、任务资料、排队任务及授权状态。测试不会替换常用 Host。未知写入的核对与诊断另见 [Bridge 文档](../packages/browser/bridge-browser/README.zh.md#实时观察边界)及[扩展文档](../extensions/dsh-browser/README.zh.md)。
+`pnpm run test:smoke-release -- --dir <发布包目录>` 在临时 home 检查独立安装。`pnpm run test:smoke-upgrade -- --from <旧包目录> --to <新包目录>` 使用同一临时 home/profile 和固定扩展目录，检查历史、配对、任务资料、排队任务及授权状态。未知写入的核对与诊断另见 [Bridge 文档](../packages/browser/bridge-browser/README.zh.md#实时观察边界)及[扩展文档](../extensions/dsh-browser/README.zh.md)。
+
+同时升级 DSH 时，给升级测试加 `--from-dsh-cli <旧版 DSH 的 lib/bin.js>`。旧包由旧版 CLI 启动，新包由工作区锁定的新版 CLI 启动。
 
 卸载 Host 插件不会自动清除对话和配对数据。回退前停止任务并备份原数据；新数据的降级兼容性没有保证，不能把回退当作自动恢复或业务撤销。
 

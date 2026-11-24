@@ -203,6 +203,8 @@ export interface BridgeCaps {
   pageDiagnostics?: boolean
   /** Native one-use acknowledgement of uncertainty; never business verification. */
   manualRecovery?: boolean
+  /** Per-item review and a native read-only preparation step. */
+  guidedRecovery?: boolean
   /** Bounded supported design-view zoom control and readback. */
   designViewZoom?: boolean
   /** Session task notes and per-criterion reports; not execution authority. */
@@ -417,6 +419,8 @@ function isCaps(value: unknown): value is BridgeCaps {
     && (caps.snapshotBase === undefined || typeof caps.snapshotBase === 'boolean')
     && (caps.pageDiagnostics === undefined || typeof caps.pageDiagnostics === 'boolean')
     && (caps.manualRecovery === undefined || typeof caps.manualRecovery === 'boolean')
+    && (caps.guidedRecovery === undefined || typeof caps.guidedRecovery === 'boolean')
+    && (caps.guidedRecovery !== true || caps.manualRecovery === true)
     && (caps.designViewZoom === undefined || typeof caps.designViewZoom === 'boolean')
     && (caps.taskNotes === undefined || typeof caps.taskNotes === 'boolean')
     && (caps.taskNotesUnavailable === undefined || typeof caps.taskNotesUnavailable === 'boolean')

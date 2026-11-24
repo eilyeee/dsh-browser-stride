@@ -136,28 +136,31 @@ test('project probe keeps file tools visible and returns synchronous file-guard 
   assert.equal(guard({ agent: { id: 'other' }, name: 'write', arguments: { file_path: '/tmp/other' } }), undefined)
 })
 
-test('direct visual preparation restores the scoped presentation after success or failure', async t => {
+test('direct visual preparation uses an idle Agent through a separate native executor', async t => {
   const root = await mkdtemp(join(tmpdir(), 'stride-visual-direct-'))
   const trigger = join(root, 'trigger.json'), result = join(root, 'result.json'), stops = []
-  let mode = 'ptc', restored = 0, throwDispatch = false, calls = 0
-  const agent = { id: 'synthetic-direct', status: 'idle', ctx: { tools: {
-    presentAs(value) { assert.equal(value, 'native'); mode = value; return () => { mode = 'ptc'; restored++ } },
-  } } }
+  let throwDispatch = false, calls = 0
+  const agent = { id: 'synthetic-direct', status: 'idle' }
   const ctx = {
     agents: { get: id => id === agent.id ? agent : undefined },
     tools: {
       guard() { return () => {} },
-      presentAs() { assert.fail('Global presentation must not change') },
-      async execute(exec) {
-        calls++; assert.equal(exec.agent, agent); assert.equal(exec.name, 'browser_get_text'); assert.equal(mode, 'native')
-        if (throwDispatch) throw new Error('Synthetic dispatch failed')
-        return { isError: false, value: { text: 'Synthetic inspector' }, content: [{ type: 'text', text: 'Synthetic inspector' }] }
-      },
+      setExecutor() { assert.fail('The current provider must stay registered') },
+      execute() { assert.fail('Direct preparation uses the native executor supplied by the probe') },
     },
     on() {}, effect(fn) { stops.push(fn()) },
   }
   t.after(async () => { for (const stop of stops.reverse()) await stop(); await rm(root, { recursive: true, force: true }) })
-  apply(ctx, { trigger, result })
+  apply(ctx, { trigger, result }, {
+    async execute(batch) {
+      calls++
+      assert.equal(batch.agent, agent)
+      assert.equal(batch.calls.length, 1)
+      assert.equal(batch.calls[0].name, 'browser_get_text')
+      if (throwDispatch) throw new Error('Synthetic dispatch failed')
+      return { results: [{ result: { isError: false, value: { text: 'Synthetic inspector' }, content: [{ type: 'text', text: 'Synthetic inspector' }] } }] }
+    },
+  })
   async function command(sequence) {
     await writeFile(trigger, JSON.stringify({ sequence, sessionId: agent.id, name: 'browser_get_text', args: {} }))
     for (let i = 0; i < 200; i++) {
@@ -167,11 +170,9 @@ test('direct visual preparation restores the scoped presentation after success o
     assert.fail('Direct preparation did not settle')
   }
   assert.equal((await command(1)).ok, true)
-  assert.equal(mode, 'ptc'); assert.equal(restored, 1)
   throwDispatch = true
   assert.equal((await command(2)).probeError, true)
-  assert.equal(mode, 'ptc'); assert.equal(restored, 2)
   agent.status = 'running'
   assert.equal((await command(3)).probeError, true)
-  assert.equal(calls, 2); assert.equal(restored, 2)
+  assert.equal(calls, 2)
 })

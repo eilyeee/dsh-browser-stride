@@ -37,6 +37,16 @@ describe('parseBridgeFrame', () => {
       for (const snapshotBase of [null, 1, 'true', {}]) expect(parseBridgeFrame(JSON.stringify({ ...frame, caps: { ...frame.caps, snapshotBase } }))).toBeUndefined()
     }
   })
+  it('negotiates guided recovery as an optional addition to manual recovery', () => {
+    for (const t of ['hello', 'hello.ok']) {
+      const caps = { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60, manualRecovery: true }
+      const frame = { t, token: 'test', caps }
+      expect(parseBridgeFrame(JSON.stringify(frame))).toBeDefined()
+      expect(parseBridgeFrame(JSON.stringify({ ...frame, caps: { ...caps, guidedRecovery: true } }))).toBeDefined()
+      expect(parseBridgeFrame(JSON.stringify({ ...frame, caps: { ...caps, guidedRecovery: 1 } }))).toBeUndefined()
+      expect(parseBridgeFrame(JSON.stringify({ ...frame, caps: { ...caps, manualRecovery: false, guidedRecovery: true } }))).toBeUndefined()
+    }
+  })
   it('accepts optional boolean observed-read capability and rejects malformed values', () => {
     for (const t of ['hello', 'hello.ok']) {
       const frame = { t, token: 'test', caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } }

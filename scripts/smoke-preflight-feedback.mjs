@@ -43,7 +43,7 @@ class Scripted extends LlmAdapter{
 async listModels(provider){return [{provider,id:'preflight',name:'Synthetic preflight',contextWindow:128000}]}
 async *stream(options){const done=options.messages.some(m=>m.role==='tool');const block=done?{type:'text',text:'STRIDE_PREFLIGHT_DONE'}:{type:'tool-call',id:'preflight-1',name:'run_code',arguments:JSON.stringify({code:${JSON.stringify(program)},description:'Verify an unsent refusal and an observed alternative'})};yield {type:'block-start',index:0,blockType:block.type};yield {type:'block-end',index:0,block};yield {type:'finish',reason:{kind:done?'stop':'tool-calls'}}}}
 export const inject=['llm','tools','agents'];export function apply(ctx){
-ctx.on('agent/created',({agent})=>{agent.ctx.effect(()=>agent.ctx.tools.presentAs('ptc'))});
+
 ctx.effect(()=>ctx.llm.registerAdapter(['stride-preflight'],new Scripted()));
 let calls=0;ctx.effect(()=>ctx.tools.guard(exec=>!['run_code','browser_click_at','browser_snapshot','browser_click'].includes(exec.name)?'Only synthetic preflight tools are allowed':++calls>4?'Synthetic tool budget exhausted':undefined));
 }
@@ -52,7 +52,7 @@ let calls=0;ctx.effect(()=>ctx.tools.guard(exec=>!['run_code','browser_click_at'
   for(const key of ['DSH_EXT_TOKEN','DSH_BRIDGE_ADMIN_TOKEN','DSH_BROWSER_SESSION_WORKSPACE'])delete process.env[key]
   const listener=createServer();await new Promise(done=>listener.listen(0,'127.0.0.1',done))
   const port=listener.address().port;await new Promise(done=>listener.close(done))
-  host=await startDshBackend({backend:'extension',port,repoRoot:repo,benchmarkRoot:join(repo,'benchmark'),runtimeRoot:join(root,'runtime'),startUrl:'http://127.0.0.1/',deferSessionCreate:true,extraPatch:'\n- insert:\n    - id: preflight-feedback-fixture\n      name: '+JSON.stringify(pathToFileURL(fixture).href)+'\n'})
+  host=await startDshBackend({backend:'extension',port,repoRoot:repo,benchmarkRoot:join(repo,'benchmark'),runtimeRoot:join(root,'runtime'),startUrl:'http://127.0.0.1/',toolExecutor: 'ptc', deferSessionCreate: true,extraPatch:'\n- insert:\n    - id: preflight-feedback-fixture\n      name: '+JSON.stringify(pathToFileURL(fixture).href)+'\n'})
   socket=new WebSocket(`ws://127.0.0.1:${port}/ext/bridge`)
   const ready=new Promise((done,fail)=>{
     socket.on('error',fail)

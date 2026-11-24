@@ -1,6 +1,13 @@
 // Disposable Host probe: real tool/attachment pipeline, optional bounded default-model check.
 import { readFile, writeFile, rename } from 'node:fs/promises'
+import { createRequire } from 'node:module'
+import { pathToFileURL } from 'node:url'
+import { executeFixtureTool } from './browser-tool-probe.mjs'
 import { guardMaterialProjectFile, materialProjectScope, PROJECT_FILE_TOOLS } from './material-project-scope.mjs'
+
+const bridgeRequire = createRequire(new URL('../../packages/browser/bridge-browser/package.json', import.meta.url))
+const nativeEntry = pathToFileURL(bridgeRequire.resolve('@deepseek-ai/dsh-tool-executor-native')).href
+const { NativeToolExecutor } = await import(nativeEntry)
 async function saveJson(path, value) {
   await writeFile(`${path}.tmp`, JSON.stringify(value), { mode: 0o600 })
   await rename(`${path}.tmp`, path)
@@ -61,7 +68,7 @@ const LAYOUT_MODEL_TOOLS = ['browser_snapshot', 'browser_measure_layout', 'brows
 export const WIDGET_MODEL_TOOLS = ['browser_snapshot','browser_click','browser_type','browser_press','browser_navigate','browser_wait','browser_get_text']
 const modelTools = model => model.reportKind === 'widgets' ? WIDGET_MODEL_TOOLS : model.reportKind === 'wiki' ? [...WIKI_MODEL_TOOLS, ...(model.projectFile ? PROJECT_FILE_TOOLS : [])] : model.reportKind === 'layout' ? LAYOUT_MODEL_TOOLS
   : model.autoZoom === true ? ZOOM_MODEL_TOOLS : MODEL_BROWSER_TOOLS
-export function apply(ctx, config) {
+export function apply(ctx, config, nativeExecutor = new NativeToolExecutor(ctx)) {
   let sequence = -1, pending = false, model, releaseModelTools, writes = Promise.resolve()
   const controller = new AbortController()
   const evidence = { modelRequests: 0, browserCalls: [], results: [], blocked: [], terminal: false }
@@ -172,17 +179,12 @@ export function apply(ctx, config) {
         if (agent === undefined) throw new Error('Synthetic probe agent unavailable')
         if (!/^browser_[a-z_]+$/.test(command.name)) throw new Error('Synthetic probe requires a browser tool')
         if (agent.status === 'running' || belongs(agent)) throw new Error('Direct probe calls require a separate idle test Agent')
-        // These are trusted preparatory calls outside an Agent turn. A PTC
-        // transport would append nested-dispatch events without turn/step
-        // boundaries and make the persisted test Session unreadable. Use a
-        // local native presentation, keeping the real registry/guards and the
-        // original Agent; restore its preset before any actual model turn.
-        const restorePresentation = agent.ctx.tools.presentAs('native')
-        let result
-        try {
-          result = await ctx.tools.execute({ callId: `visual-probe-${sequence}`, name: command.name,
-            arguments: command.args ?? {}, agent, signal: controller.signal })
-        } finally { restorePresentation() }
+        // A direct call has no model turn to own PTC subcall events. Use the
+        // native pipeline with this Agent's registry and guards.
+        const result = await executeFixtureTool(nativeExecutor, {
+          callId: `visual-probe-${sequence}`, name: command.name,
+          arguments: command.args ?? {}, agent, signal: controller.signal,
+        })
         const value = result.value
         const reply = { sequence, ok: !result.isError, code: result.error?.code,
           text: result.content?.filter(block => block.type === 'text').map(block => block.text).join('\n'),

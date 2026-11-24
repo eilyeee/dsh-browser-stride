@@ -16,7 +16,8 @@ const affinity = { revision: 2, status: 'background' as const, controlled: page,
 describe('diagnostics panel async state', () => {
   it('does not let an older failed status poll clear a newer enabled capture', async () => {
     vi.useFakeTimers(); Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
-    const first = pending(), second = pending(), pageDiagnostics = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise)
+    const first = pending(), second = pending(), third = pending()
+    const pageDiagnostics = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise).mockReturnValueOnce(third.promise)
     const api = { pageDiagnostics } as unknown as PanelApi, container = document.createElement('div'), root = createRoot(container)
     try {
       await act(async () => root.render(createElement(DiagnosticsPanel, { api, sessionId: 'synthetic', affinity, available: true, locale: 'zh' })))
@@ -26,6 +27,9 @@ describe('diagnostics panel async state', () => {
       expect(container.textContent).toContain('已记录 3 条')
       await act(async () => first.reject(Error('old status unavailable')))
       expect(container.textContent).toContain('已记录 3 条')
+      expect(container.querySelector('button')?.textContent).toBe('停止并清空诊断')
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000); third.reject(Error('current status unavailable')) })
+      expect(container.textContent).toContain('诊断状态待确认')
       expect(container.querySelector('button')?.textContent).toBe('停止并清空诊断')
     } finally { await act(async () => root.unmount()) }
   })

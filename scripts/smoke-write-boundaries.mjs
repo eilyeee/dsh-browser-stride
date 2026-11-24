@@ -66,7 +66,6 @@ async *stream(options){
  yield {type:'finish',reason:{kind:done?'stop':'tool-calls'}}
 }}
 export const inject=['llm','tools','agents'];export function apply(ctx){
- ctx.on('agent/created',({agent})=>{agent.ctx.effect(()=>agent.ctx.tools.presentAs(${JSON.stringify(mode)}))});
  ctx.effect(()=>ctx.llm.registerAdapter(['stride-write-boundaries'],new Scripted()));
  const counts=new WeakMap();ctx.effect(()=>ctx.tools.guard(exec=>{
   if(!exec.agent||!['run_code','browser_click','browser_snapshot'].includes(exec.name))return 'Only synthetic boundary tools are allowed';
@@ -78,7 +77,7 @@ export const inject=['llm','tools','agents'];export function apply(ctx){
     for(const key of ['DSH_EXT_TOKEN','DSH_BRIDGE_ADMIN_TOKEN','DSH_BROWSER_SESSION_WORKSPACE'])delete process.env[key]
     const listener=createServer();await new Promise(done=>listener.listen(0,'127.0.0.1',done))
     const port=listener.address().port;await new Promise(done=>listener.close(done))
-    host=await startDshBackend({backend:'extension',port,repoRoot:repo,benchmarkRoot:join(repo,'benchmark'),runtimeRoot:join(root,'runtime'),startUrl:'http://127.0.0.1/',deferSessionCreate:true,extraPatch:'\n- insert:\n    - id: write-boundaries-fixture\n      name: '+JSON.stringify(pathToFileURL(fixture).href)+'\n'})
+    host=await startDshBackend({backend:'extension',port,repoRoot:repo,benchmarkRoot:join(repo,'benchmark'),runtimeRoot:join(root,'runtime'),startUrl:'http://127.0.0.1/',toolExecutor: mode, deferSessionCreate: true,extraPatch:'\n- insert:\n    - id: write-boundaries-fixture\n      name: '+JSON.stringify(pathToFileURL(fixture).href)+'\n'})
     socket=new WebSocket(`ws://127.0.0.1:${port}/ext/bridge`)
     const ready=new Promise((done,fail)=>{
       socket.on('error',error=>{wireError=error;fail(error)})

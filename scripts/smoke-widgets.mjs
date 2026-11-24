@@ -60,6 +60,18 @@ try{
  await wait(async()=>browser.context.pages().some(page=>page!==browser.target&&page.url()===site.url),'explicit separate copy')
  assert.equal(browser.context.pages().length,pagesBeforeReuse+1)
  await browser.context.pages().findLast(page=>page!==browser.target&&page.url()===site.url).close()
+ phase='submenu-label-and-navigation'
+ let menuView=await command(sessionId,'browser_snapshot')
+ assert.equal(menuView.ok,true)
+ const parentMenu=reference(menuView,'menuitem','Browse channels')
+ assert.doesNotMatch(menuView.text,/menuitem "[^"\n]*Channel directory/)
+ assert.equal((await command(sessionId,'browser_click',{elementRef:parentMenu})).ok,true)
+ menuView=await command(sessionId,'browser_snapshot')
+ assert.equal(menuView.ok,true)
+ reference(menuView,'menuitem','Browse channels')
+ const directoryLink=reference(menuView,'menuitem','Channel directory')
+ assert.equal((await command(sessionId,'browser_click',{elementRef:directoryLink})).ok,true)
+ await wait(async()=>await browser.target.locator('#route').innerText()==='Route: /directory','rendered submenu route')
  phase='custom-options'
  let view=await command(sessionId,'browser_snapshot');assert.equal(view.ok,true)
  assert.equal(view.text.includes(`option "${site.choice}"`),false)
@@ -71,6 +83,38 @@ try{
  assert.equal((await command(sessionId,'browser_click',{elementRef:chosen})).ok,true)
  assert.equal(await browser.target.locator('#choice').inputValue(),site.choice)
  assert.equal((await command(sessionId,'browser_click',{elementRef:chosen})).ok,false,'Closed popup references cannot be replayed')
+ phase='scoped-offscreen-option'
+ await browser.target.evaluate(() => {
+  const popup = document.querySelector('.el-select-dropdown')
+  const actions = document.createElement('div')
+  actions.id = 'background-actions'
+  for (let index = 0; index < 180; index++) {
+   const button = document.createElement('button')
+   button.textContent = 'Background action ' + index
+   actions.append(button)
+  }
+  popup.before(actions)
+  popup.style.position = 'absolute'
+  popup.style.top = 'calc(100vh + 500px)'
+  for (const option of popup.querySelectorAll('li')) option.hidden = option.dataset.value !== 'skip'
+  window.scrollTo(0, 0)
+ })
+ view=await command(sessionId,'browser_snapshot')
+ assert.equal((await command(sessionId,'browser_click',{elementRef:reference(view,'input','Channel')})).ok,true)
+ assert.ok(await browser.target.locator('.el-select-dropdown').evaluate(el => el.getBoundingClientRect().top > innerHeight))
+ view=await command(sessionId,'browser_snapshot')
+ assert.doesNotMatch(view.text,/option "Other channel"/)
+ const popupView=await command(sessionId,'browser_snapshot',{region:'.el-select-dropdown'})
+ assert.equal(popupView.ok,true)
+ assert.equal((await command(sessionId,'browser_click',{elementRef:reference(popupView,'option','Other channel')})).ok,true)
+ assert.equal(await browser.target.locator('#choice').inputValue(),'Other channel')
+ await browser.target.evaluate(() => {
+  document.querySelector('#background-actions').remove()
+  const popup = document.querySelector('.el-select-dropdown')
+  popup.removeAttribute('style')
+  for (const option of popup.querySelectorAll('li')) option.hidden = false
+  window.scrollTo(0, 0)
+ })
  phase='legacy-keyboard'
  await browser.target.locator('#legacy').focus()
  assert.equal((await command(sessionId,'browser_press',{key:'ArrowDown'})).ok,true)
@@ -84,6 +128,20 @@ try{
  assert.equal(await browser.target.evaluate(()=>window.widgetRouteChanges),before.changes+1)
  assert.equal(other.url(),site.origin+'/personal')
  assert.equal((await command(sessionId,'browser_click',{elementRef:chosen})).ok,false,'Navigation invalidates old references')
+ phase='foreground-authorized-reuse'
+ const previousTab = await browser.worker.evaluate(async url => {
+  const tab = (await chrome.tabs.query({})).find(candidate => candidate.url === url)
+  return tab && { id: tab.id, active: tab.active }
+ },site.second)
+ assert.ok(previousTab?.id)
+ assert.equal(previousTab.active,false)
+ const pagesBeforeForeground = browser.context.pages().length
+ reused=await command(sessionId,'browser_open_tab',{url:site.second,active:true,newTab:false})
+ assert.equal(reused.ok,true)
+ assert.match(reused.text,/Reused already authorized tab/)
+ assert.equal(await browser.worker.evaluate(async id => (await chrome.tabs.get(id)).active,previousTab.id),true)
+ assert.equal(browser.context.pages().length,pagesBeforeForeground)
+ assert.equal(await browser.target.evaluate(()=>window.widgetRouteChanges),before.changes+1)
  phase='managed-background-hash-navigation'
  await browser.panel.reload()
  await browser.panel.locator('.connection .dot.connected').waitFor({state:'visible'})
@@ -125,6 +183,9 @@ try{
  }
  const summary={passed:true,realHost:true,isolatedChrome:true,syntheticOnly:true,realModel,
   observedOptionClick:true,disabledOptionDenied:true,closedOptionDenied:true,legacyKeyHandlerVerified:true,
+  closedSubmenuLabelIsolated:true,expandedMenuItemClickedAndRendered:true,
+  scopedOffscreenOptionClicked:true,
+  authorizedTabBroughtForwardWithoutReload:true,
   backgroundHashRendered:true,managedBackgroundHashRendered:true,otherTabUnchanged:true,navigationInvalidatesReferences:true,
   authorizedTabReused:true,existingDocumentPreserved:true,explicitCopyCreated:true,unauthorizedCopyNotReused:true,managedTabReused:true,...modelEvidence?{modelEvidence}:{}}
  await writeFile(join(artifacts,realModel?'real-model.json':'result.json'),JSON.stringify(summary,null,2)+'\n',{mode:0o600});console.log(JSON.stringify(summary))

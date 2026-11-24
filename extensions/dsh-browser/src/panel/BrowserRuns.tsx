@@ -4,8 +4,10 @@ import { PanelRpcError, type PanelApi } from './api.ts'
 import { parseBrowserRuns, type BrowserRunCopy } from './browser-runs.ts'
 import { taskBudgetExhausted } from '@eilyeee/dsh-browser-stride/src/task-budget.ts'
 
-export function BrowserRuns({ api, sessionId, connected, copy, targetRevision, startRevision, supportsNewPages = false, newPageRevision }: {
+export function BrowserRuns({ api, sessionId, connected, copy, targetRevision, startRevision, supportsNewPages = false, newPageRevision,
+  reviewRefresh, reviewAction }: {
   api: Pick<PanelApi, 'rpc'> & Partial<Pick<PanelApi, 'retargetRun'>>; targetRevision?: number; startRevision?: number; supportsNewPages?: boolean; newPageRevision?: number; sessionId: string | null; connected: boolean; copy: BrowserRunCopy
+  reviewRefresh?: number; reviewAction?: { label: string; inspect(event: Event): void }
 }) {
   const [view, setView] = useState<{ sessionId: string; data: BrowserRunList } | null>(null)
   const [loadError, setLoadError] = useState(false)
@@ -43,7 +45,7 @@ export function BrowserRuns({ api, sessionId, connected, copy, targetRevision, s
     }
     void load()
     return () => { ++generation.current; clearTimeout(timer) }
-  }, [api, sessionId, connected, refresh])
+  }, [api, sessionId, connected, refresh, reviewRefresh])
 
   async function control(event: MouseEvent<HTMLButtonElement>, run: BrowserRunSummary, action: PanelRunControl | 'retarget' | 'start' | 'start-new-page') {
     if (!event.nativeEvent.isTrusted || controlling.current || !connected || sessionId === null || run.sessionId !== sessionId) return
@@ -110,7 +112,8 @@ export function BrowserRuns({ api, sessionId, connected, copy, targetRevision, s
               onClick={event => { void control(event, run, 'start-new-page') }}>{copy.startNewPage}</button>
           </div>}
           {outcome !== undefined && outcome !== 'pending' && <p role="status">{copy.outcomes[outcome]}</p>}
-          {reviewRequired && <p>{copy.reconcileHelp}</p>}
+          {reviewRequired && (reviewAction === undefined ? <p>{copy.reconcileHelp}</p>
+            : <button type="button" className="secondary run-review" onClick={event => reviewAction.inspect(event.nativeEvent)}>{reviewAction.label}</button>)}
           {run.state === 'paused' && !budgetBlocked && <p>{run.pauseReason === 'browser-disconnected' ? copy.disconnectedHelp(run.canRetarget === true)
             : run.pauseReason === 'page-unavailable' ? copy.targetLostHelp(run.canRetarget === true) : copy.pausedHelp}</p>}
           {run.canRetarget && <p>{copy.retargetHelp}</p>}

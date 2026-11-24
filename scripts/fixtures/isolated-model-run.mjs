@@ -65,7 +65,7 @@ async *stream(options) {
   yield { type: 'block-end', index: 0, block };
   yield { type: 'finish', reason: { kind: done ? 'stop' : 'tool-calls' } };
 }}
-export const inject=['llm','tools','agents','browserRuns'];export async function apply(ctx){${realModel ? '' : "ctx.on('agent/created',({agent})=>agent.ctx.effect(()=>agent.ctx.tools.presentAs('ptc')));ctx.effect(()=>ctx.llm.registerAdapter(['stride-fixture'],new Scripted()));"}
+export const inject=['llm','tools','agents','browserRuns'];export async function apply(ctx){${realModel ? '' : "ctx.effect(()=>ctx.llm.registerAdapter(['stride-fixture'],new Scripted()));"}
 let requests=0;ctx.on('agent/request',(_p,next)=>{if(++requests>80)throw Error('Synthetic request budget');return next()});${guardSource}}
 `, { mode: 0o600 })
     process.env.DSH_HOME = home
@@ -82,14 +82,24 @@ let requests=0;ctx.on('agent/request',(_p,next)=>{if(++requests>80)throw Error('
     maxInteractiveItems: 60
 `
     host = await startDshBackend({ backend: 'extension', port, repoRoot: repo, benchmarkRoot: join(repo, 'benchmark'), runtimeRoot: join(root, 'runtime'),
-      startUrl, deferSessionCreate: true, startupTimeoutMs, extraPatch: modelPatch + '\n' + workspacePatch + '\n' + patch + '\n- insert:\n    - id: synthetic-acceptance\n      name: ' + JSON.stringify(pathToFileURL(fixture).href) + '\n' })
+      startUrl, toolExecutor: realModel ? undefined : 'ptc', deferSessionCreate: true, startupTimeoutMs, extraPatch: modelPatch + '\n' + workspacePatch + '\n' + patch + '\n- insert:\n    - id: synthetic-acceptance\n      name: ' + JSON.stringify(pathToFileURL(fixture).href) + '\n' })
     console.log(JSON.stringify({ phase: 'isolated-browser', realModel }))
     browser = await startExtensionBrowser({ repoRoot: repo, benchmarkRoot: join(repo, 'benchmark'), bridgeUrl: `ws://127.0.0.1:${port}/ext/bridge`, issuePairingCode: () => host.issuePairingCode(), trustedOrigin: origin, extensionDir })
     async function rpc(method, payload) {
       return browser.panel.evaluate(({ method, payload }) => new Promise((done, fail) => {
         const port = window.__acceptancePort ??= chrome.runtime.connect({ name: 'dsh-panel' }), id = crypto.randomUUID()
         const timer = setTimeout(() => { port.onMessage.removeListener(receive); fail(Error('Fixture RPC timeout')) }, 15000)
-        function receive(message) { if (message.type !== 'rpc.result' || message.id !== id) return; clearTimeout(timer); port.onMessage.removeListener(receive); if (!message.ok || message.result?.result?.ok === false) fail(Error('Fixture RPC rejected')); else done(message.result?.result?.value ?? message.result) }
+        function receive(message) {
+          if (message.type !== 'rpc.result' || message.id !== id) return
+          clearTimeout(timer)
+          port.onMessage.removeListener(receive)
+          if (message.ok && message.result?.result?.ok !== false) {
+            done(message.result?.result?.value ?? message.result)
+            return
+          }
+          const code = message.result?.result?.error?.code ?? message.error?.code
+          fail(Error(`Fixture RPC ${method} rejected (${typeof code === 'string' && /^[a-z0-9_-]{1,60}$/i.test(code) ? code : 'unknown'})`))
+        }
         port.onMessage.addListener(receive); port.postMessage({ type: 'rpc', id, method, payload })
       }), { method, payload })
     }

@@ -40,6 +40,7 @@ delete process.env.DSH_BRIDGE_ADMIN_TOKEN
 let site
 let host
 let browser
+let releaseAutomaticImage
 
 async function command(args) {
   const child = spawn(process.execPath, [cli, ...args], { cwd: repoRoot, env, stdio: ['ignore', 'pipe', 'pipe'] })
@@ -686,6 +687,26 @@ try {
   const automaticOrigin = `http://stride-auto.test:${new URL(site.origin).port}`
   const automaticInstance = makeTaskInstance('notification_toggle', 1, 'stride-auto-open-smoke', automaticOrigin)
   const automaticNextUrl = automaticInstance.url.replace('stride-auto.test', 'stride-auto-next.test')
+  const automaticImageUrl = `${automaticOrigin}/smoke-auto-open-image`
+  const automaticImage = Promise.withResolvers()
+  releaseAutomaticImage = automaticImage.resolve
+  let imageRequested = false
+  await browser.context.route(automaticImageUrl, async route => {
+    imageRequested = true
+    await automaticImage.promise
+    await route.fulfill({ status: 204 })
+  })
+  await browser.context.addInitScript(({ pageUrl, imageUrl }) => {
+    if (location.href !== pageUrl) return
+    document.addEventListener('DOMContentLoaded', () => {
+      const image = document.createElement('img')
+      image.width = 1
+      image.height = 1
+      image.alt = ''
+      image.src = imageUrl
+      document.body.append(image)
+    }, { once: true })
+  }, { pageUrl: automaticInstance.url, imageUrl: automaticImageUrl })
   await writeFile(`${trigger}.auto-open`, JSON.stringify({ url: automaticInstance.url, nextUrl: automaticNextUrl }), { mode: 0o600 })
   await browser.panel.getByRole('button', { name: '仅允许这一次', exact: true }).click({ timeout: 20000 }).catch(async () => {
     const outcome = await readFile(result, 'utf8').then(JSON.parse).catch(() => undefined)
@@ -716,27 +737,32 @@ try {
     return { mode: grant?.mode,
       grouped: group?.title === 'DSH 控制' && group?.color === 'blue' && group?.windowId === created.windowId
         && grant?.groupId === created.groupId && grant?.windowId === created.windowId,
-      bound: binding?.tabId === created.id, nativeInjection }
+      bound: binding?.tabId === created.id, nativeInjection, loading: created.status === 'loading' }
   }, { url: automaticInstance.url, sessionId: session.sessionId })
-  assert.deepEqual(automaticGrant, { mode: 'debugger', grouped: true, bound: true, nativeInjection: false })
+  assert.equal(imageRequested, true, 'the image request must remain pending across opening, reading and clicking the page')
+  assert.deepEqual(automaticGrant, { mode: 'debugger', grouped: true, bound: true, nativeInjection: false, loading: true })
+  releaseAutomaticImage()
+  await automaticPage.waitForLoadState('load')
   await writeFile(`${trigger}.auto-navigate`, '', { mode: 0o600 })
   await browser.panel.getByRole('button', { name: '仅允许这一次', exact: true }).click()
   await waitForPhase('auto-navigated')
   await automaticPage.waitForURL(automaticNextUrl, { waitUntil: 'domcontentloaded' })
   await browser.panel.getByRole('button', { name: '停止控制此页', exact: true }).click()
-  await browser.panel.waitForFunction(async url => {
-    const [created] = await chrome.tabs.query({ url })
-    const cached = (await chrome.storage.session.get('dshPageAccess')).dshPageAccess
-    return !cached.grants.some(grant => grant.tabId === created.id)
-  }, automaticNextUrl)
-  const stoppedAutomatic = await browser.worker.evaluate(async url => {
+  const readAutomaticStop = () => browser.worker.evaluate(async url => {
     const [created] = await chrome.tabs.query({ url })
     const cached = (await chrome.storage.session.get('dshPageAccess')).dshPageAccess
     let debuggerAttached = true
     try { await chrome.debugger.sendCommand({ tabId: created.id }, 'Page.getFrameTree') } catch { debuggerAttached = false }
     return { granted: cached.grants.some(grant => grant.tabId === created.id), grouped: created.groupId >= 0, debuggerAttached }
   }, automaticNextUrl)
+  const stopDeadline = Date.now() + 15000
+  let stoppedAutomatic = await readAutomaticStop()
+  while ((stoppedAutomatic.granted || stoppedAutomatic.grouped || stoppedAutomatic.debuggerAttached) && Date.now() < stopDeadline) {
+    await delay(100)
+    stoppedAutomatic = await readAutomaticStop()
+  }
   assert.equal(stoppedAutomatic.granted, false)
+  assert.equal(stoppedAutomatic.grouped, false)
   assert.equal(stoppedAutomatic.debuggerAttached, false)
   await writeFile(`${trigger}.auto-verified`, '', { mode: 0o600 })
   const failedOpenUrl = `${automaticOrigin}/auto-cleanup-fault`
@@ -784,7 +810,7 @@ try {
   assert.equal(outcome.cleanupFaults, 1)
   assert.equal(outcome.blocked, 2)
   assert.equal(outcome.recorded, 6)
-  console.log('Automatic tab control passed: real Host tools opened, bound, grouped, read and clicked a new page without a toolbar action; trusted stop revoked it')
+  console.log('Automatic tab control passed. Host tools opened, grouped, read and clicked the page while its image was loading. Trusted stop revoked access.')
   console.log('Failed new-tab cleanup passed: post-authorization read failure plus refused close leaves no page grant, debugger or session binding; closure is reported as unconfirmed')
   await card.getByText('已停止', { exact: true }).waitFor()
   assert.equal(await handoffPage.getByRole('checkbox', { name: '邮件通知', exact: true }).isChecked(), true)
@@ -833,6 +859,7 @@ try {
   await verifyIncompatibleHost(BRIDGE_PROTOCOL_VERSION + 1, 'update-extension')
   console.log('Browser smoke passed: owner-confirmed pairing UI, authentication fence, reconnect after reload, real DSH tools, panel pause/selected-page handoff/stop and executor acknowledgement, explicit persistent DSH unpairing, run/revision dispatch metadata, revoked old contexts, queued-target revocation without write overtaking, checkpoint owner fence, receiver execution confirmation/revocation, run target pinning across rebind, current-owner tab creation, durable v4 identities and Host execution confirmation, persistent replay/conflict rejection across worker restart, origin isolation, revocation and independent site state (no model)')
 } finally {
+  releaseAutomaticImage?.()
   await browser?.close().catch(() => {})
   await host?.close().catch(() => {})
   await site?.close().catch(() => {})

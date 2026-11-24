@@ -1,5 +1,5 @@
 import { readPageAccessEpoch, writePageAccessEpoch } from './credential-store.ts'
-import { debuggerPages, isLoadedHttpTab } from './debugger-pages.ts'
+import { debuggerPages, isCommittedHttpTab } from './debugger-pages.ts'
 import { PageAuthorizationError, type PageAuthorizationFailure } from '../page-authorization.ts'
 
 /** Native action or the opted-in newly-created-tab path grants access. Group membership never does. */
@@ -192,14 +192,14 @@ export class PageAccess {
       await this.persist()
       if (!allowed() || signal.aborted) throw new Error('Automatic page control was cancelled.')
       await debuggerPages.attachCreated(tabId, allowed, signal, Math.max(0, deadline - Date.now()))
-      if (!await debuggerPages.ready(tabId, undefined, signal, Math.max(0, deadline - Date.now()))) throw new Error('The new page did not become ready for automatic control.')
+      if (!await debuggerPages.ready(tabId, undefined, signal, Math.max(0, deadline - Date.now()), 'committed')) throw new Error('The new page did not become ready for automatic control.')
       const live = await chrome.tabs.get(tabId)
-      if (!allowed() || signal.aborted || live.id !== tabId || live.windowId !== grant.windowId || !isLoadedHttpTab(live)
+      if (!allowed() || signal.aborted || live.id !== tabId || live.windowId !== grant.windowId || !isCommittedHttpTab(live)
         || (requiresGroup() && live.pinned)) throw new Error('The new page changed before it could be controlled.')
       grant.origin = origin(live.url)!
       await this.joinGroup(grant)
       const grouped = await chrome.tabs.get(tabId)
-      if (!allowed() || signal.aborted || !isLoadedHttpTab(grouped) || grouped.url !== live.url) {
+      if (!allowed() || signal.aborted || !isCommittedHttpTab(grouped) || grouped.url !== live.url) {
         throw new Error('The new page changed while joining the control group.')
       }
       delete grant.pending

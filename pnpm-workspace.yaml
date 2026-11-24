@@ -3,7 +3,7 @@ packages:
   - extensions/*
   - packages/*/*
 
-# Keep DSH peer providers explicit and on the tested 0.2.1-rc.5 release line.
+# Keep DSH peer providers on the same release line as the CLI.
 autoInstallPeers: false
 
 # dsh 运行时与扩展构建依赖这些受信任包的安装脚本。
@@ -25,6 +25,8 @@ minimumReleaseAgeExclude:
 # Keep these within the same major and verify with Host and browser tests.
 overrides:
   zod@4.4.3: 4.6.7
+  # Keep the bridge and DSH storage domain on the same Zod schema types.
+  zod@4.6.6: 4.6.7
   undici@8.11.2: 8.12.3
   fflate@0.8.2: 0.8.3
   '@modelcontextprotocol/client@2.2.0': 2.4.0

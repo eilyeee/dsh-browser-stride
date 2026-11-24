@@ -61,6 +61,24 @@ describe('accessibleName', () => {
     expect(accessibleName(span)).toBe('span')
   })
 
+  it('keeps submenu item names out of their parent menu item label', () => {
+    document.body.innerHTML = `
+      <ul role="menu">
+        <li id="parent" role="menuitem" aria-haspopup="true">
+          <div><span>External</span> channels</div>
+          <div><ul id="submenu" role="menu" hidden>
+            <li id="leaf" role="menuitem">Channel directory</li>
+          </ul></div>
+        </li>
+      </ul>`
+    const parent = document.getElementById('parent')!
+    const submenu = document.getElementById('submenu')!
+    expect(accessibleName(parent)).toBe('External channels')
+    submenu.hidden = false
+    expect(accessibleName(parent)).toBe('External channels')
+    expect(accessibleName(document.getElementById('leaf')!)).toBe('Channel directory')
+  })
+
   it('does not use textarea contents or select options as an unlabeled control name', () => {
     const textarea = document.createElement('textarea')
     textarea.textContent = 'private draft'

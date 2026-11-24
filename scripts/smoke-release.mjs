@@ -22,12 +22,16 @@ for (const line of sums) {
 }
 const root = await mkdtemp(join(tmpdir(), 'stride-release-install-')), home = join(root, 'home')
 const require = createRequire(join(repoRoot, 'package.json'))
-const cli = join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'lib/bin.js')
+const cliIndex = process.argv.indexOf('--dsh-cli')
+const cli = cliIndex < 0
+  ? join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'lib/bin.js')
+  : resolve(process.argv[cliIndex + 1])
+const installBin = cliIndex < 0 ? join(repoRoot, 'node_modules/.bin/dsh') : cli
 let host, client, socket
 try {
   await mkdir(home)
   const install = spawn(process.execPath, [join(folder, 'install-host.mjs')], {
-    cwd: root, env: { ...process.env, DSH_BIN: join(repoRoot, 'node_modules/.bin/dsh'), DSH_HOME: home, DSH_TELEMETRY_DISABLED: '1' }, stdio: 'ignore',
+    cwd: root, env: { ...process.env, DSH_BIN: installBin, DSH_HOME: home, DSH_TELEMETRY_DISABLED: '1' }, stdio: 'ignore',
   })
   const timer = setTimeout(() => install.kill('SIGKILL'), 180000)
   try { assert.equal((await once(install, 'exit'))[0], 0, 'Standalone Host package did not install') } finally { clearTimeout(timer) }

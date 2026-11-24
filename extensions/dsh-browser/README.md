@@ -29,11 +29,16 @@ Development build 0.1.19 binds observations to the native page lifetime, convers
 Bounded snapshot metadata reports listed frames, native document epochs and omitted text/controls/options. `complete` is always false: closed roots, hidden canvas layers, non-DOM state and unlisted frames are outside the evidence. Recognized-value redaction does not mean all personal information is removed. Missing legacy metadata remains unknown. An observation ID cannot prove the model received a complete baseline, so explicit model delta requests currently return bounded full snapshots with `model-projection-not-attested`. Trusted lower-level protocol baseline checks remain. The 0.1.18 description below is historical.
 
 
-Development build 0.1.19 also adds **Review uncertain operations**. Stop the conversation/task, request a read-only page check, then inspect actual business records and decide each listed item yourself. Unknown is the default. Recording review does not replay, resume or verify the task; a late reply requires another review. Use an explicit selected-page continuation after review. Model/page text cannot submit this native decision. Offers expire after five minutes; this is manual reconciliation, not automatic recovery.
+With a matching Host, choose **Check action results** beside a paused task
+or an uncertain action in the conversation. Stride reads the selected,
+authorized page and prepares the review. Record each result you can verify
+and leave other actions pending. Use **Continue on selected page** when the
+task is ready to continue. Compatible older Hosts use the original review.
 
-Development build 0.1.19 adds opt-in **Page diagnostics** in Chrome. A real panel
-click enables error types/locations and Network status metadata for the selected
-conversation and document; `browser_get_diagnostics` only reads this capture.
+Chrome offers **Page diagnostics** under **More**. A related conversation error
+offers **Troubleshoot this page** to start recording on the selected page.
+The panel shows the page and entry count. **Ask DSH to inspect** reads the
+existing capture through `browser_get_diagnostics`.
 It stops on navigation, control changes, disconnect, panel close or ten minutes.
 No message text, original URL, query values, headers or bodies are returned.
 It is a partial troubleshooting view, not a persistence or task-success check.
@@ -198,6 +203,10 @@ If authorized group pages exist but this conversation has no selected target, th
 ## Custom dropdowns and control keys
 
 Expand a custom dropdown, take a fresh `browser_snapshot`, then use `browser_click` with the visible option's `elementRef`. Snapshots include ARIA combobox/option controls and the observed Element UI select popup/list-item structure. Visible popup options take priority over modal and background controls under the inventory cap; disabled and selected states are shown. Ordinary list items are not inferred to be controls. Hidden/disabled options and changed option labels or popup containers cannot reuse an actionable reference. `browser_select` remains limited to native HTML selects. These DOM adapters retain existing page authorization, observation and action-confirmation checks; they do not read framework internals.
+
+On pages with many controls, pass a unique selector for the open popup as `region`. The snapshot puts that popup's rendered options first within the inventory budget, including options outside the viewport. The model can use their current references to select them.
+
+When an opening popup stays collapsed in a background tab, bring that same authorized tab to the foreground and observe the popup again after it renders.
 
 `browser_press` includes `code`, `keyCode` and `which` for common named control keys so legacy page handlers can respond. Events remain synthetic: Tab does not provide native focus movement and Enter does not provide native form submission. Observe the page after each operation.
 

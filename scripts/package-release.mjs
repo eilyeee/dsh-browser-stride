@@ -1,4 +1,4 @@
-// Development distribution only: a standalone Host package plus unpacked Chrome files.
+// Package the standalone Host and the unpacked Chrome extension together.
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { crc32, deflateRawSync } from 'node:zlib'
@@ -70,10 +70,13 @@ export async function prepareRelease(repoRoot, output) {
     const hostName = `dsh-browser-stride-host-${version}.tgz`, chromeName = `dsh-browser-stride-chrome-${version}.zip`
     const packed = spawnSync('pnpm', ['pack', '--out', join(output, hostName)], { cwd: packageDir, encoding: 'utf8' })
     if (packed.status !== 0) throw new Error('Host package packing failed')
-    await writeFile(join(output, chromeName), zipFiles(await listFiles(join(repoRoot, 'extensions/dsh-browser/dist'))))
+    const chromeFiles = await listFiles(join(repoRoot, 'extensions/dsh-browser/dist'))
+    for (const path of ['LICENSE', 'NOTICE.md']) chromeFiles.push([path, await readFile(join(repoRoot, path))])
+    await writeFile(join(output, chromeName), zipFiles(chromeFiles))
     const git = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' })
     const dirty = spawnSync('git', ['status', '--porcelain'], { cwd: repoRoot, encoding: 'utf8' })
-    const metadata = { development: true, version, dshVersion: rootManifest.dependencies['@deepseek-ai/dsh'], wireProtocol: 4,
+    const development = !/^[1-9]\d*\.\d+\.\d+$/.test(version)
+    const metadata = { development, version, dshVersion: rootManifest.dependencies['@deepseek-ai/dsh'], wireProtocol: 4,
       commit: git.status === 0 ? git.stdout.trim() : undefined, dirty: dirty.stdout.trim() !== '', host: hostName, chrome: chromeName }
     await writeFile(join(output, 'versions.json'), JSON.stringify(metadata, null, 2) + '\n')
     await writeFile(join(output, 'install-host.mjs'), `import {readFileSync} from 'node:fs';
@@ -89,7 +92,27 @@ const child=spawnSync(process.env.DSH_BIN||'dsh',['plugin','--profile','web','ad
 if(child.status!==0)process.exit(child.status||1);
 console.log('Installed. Keep the original DSH home/profile. When tasks are idle, restart that Host; reload the matching browser extension.');
 `)
-    await writeFile(join(output, 'README.md'), `# DSH Stride ${version} — 开发版\n\n需 Node ${rootManifest.engines.node}、DSH ${metadata.dshVersion}。这份包未声明正式支持或浏览器商店发布。\n\n1. 先核对 SHA256SUMS。校验可发现文件变化，不能证明来源可信。\n2. 保持原 DSH_HOME 和 web profile，在本目录执行 node install-host.mjs。无需本仓库源码或全局升级 DSH；DSH_BIN 可指定现有 dsh 可执行文件。\n3. 等正在运行的任务结束后，重启原 Host。安装脚本不会替你关闭运行中的 Host。\n4. 解压 ${chromeName} 到固定目录，在 chrome://extensions 开启开发者模式，加载该目录。更新时覆盖同一目录并点击重新加载，以保留扩展安装身份和配对。\n5. 打开扩展设置，核对 Host/扩展版本均为 ${version}。已有页面重新点击工具栏图标授权；聊天和任务资料保留，未决保存须先核对实际结果。\n\nHost 插件和 Chrome 扩展分别安装。GitHub 插件入口安装仓库根目录、商店自动更新、Firefox 和 Desktop 集成均不属于此开发包验收。\n\n卸载插件使用 dsh plugin --profile web remove @eilyeee/dsh-browser-stride；不会自动删除对话和配对文件。回退前停止任务并备份原 DSH home；数据降级兼容性没有保证。\n`)
+    const title = development ? `DSH Stride ${version} 开发包` : `DSH Stride ${version}`
+    const scope = development
+      ? '本包用于验证 DSH Web 与 Chrome 的连接和页面控制。'
+      : '此版本支持 DSH Web 普通对话、Chrome 配对与分组页面控制。托管 /browser 任务仍处于预览阶段。'
+    await writeFile(join(output, 'README.md'), `# ${title}
+
+${scope}
+
+需要 Node ${rootManifest.engines.node}、DSH ${metadata.dshVersion} 和 Chrome ${chrome.minimum_chrome_version}+。
+
+1. 从可信来源取得同一版本的文件，按 SHA256SUMS 核对校验和。校验可以发现文件变化。
+2. 更新前等正在运行的对话和任务结束。保留原 DSH_HOME 和 web profile，在本目录执行 node install-host.mjs。DSH_BIN 可以指定现有 dsh 可执行文件。
+3. 启动 DSH Web。更新时重启原 Host，安装脚本会让原进程继续运行，便于你选择重启时机。
+4. 解压 ${chromeName} 到固定目录。在 chrome://extensions 开启开发者模式并加载该目录。更新时覆盖同一目录，再点击「重新加载」，即可沿用原扩展安装和配对。
+5. 打开扩展设置，核对 Host 和扩展均为 ${version}。首次安装时点击「连接本机 DSH」，再到 DSH 网页「设置 → 通用 → 浏览器配对」核对并确认校验码。
+6. 回到要控制的标签页，点击 Chrome 工具栏上的 DSH Stride 图标授权。更新后也要点一次。对话和任务资料仍可使用。若有操作结果待核对，先检查页面实际结果。
+
+下载新版后分别更新 Host 插件和 Chrome 扩展。更多用法见[项目说明](https://github.com/eilyeee/dsh-browser-stride/blob/main/README.zh.md)。
+
+卸载 Host 插件使用 dsh plugin --profile web remove @eilyeee/dsh-browser-stride。对话和配对文件仍会保留。回退前请停止任务并备份原 DSH home，方便恢复较早的数据。
+`)
     const files = await listFiles(output)
     await writeFile(join(output, 'SHA256SUMS'), files.map(([name, bytes]) => `${createHash('sha256').update(bytes).digest('hex')}  ${name}`).join('\n') + '\n')
     return metadata

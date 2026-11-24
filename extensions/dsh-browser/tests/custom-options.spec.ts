@@ -40,6 +40,26 @@ describe('observed custom dropdown options', () => {
     expect(delta.text).toMatch(/option "Current" \[not selected\]/)
   })
 
+  it('keeps an offscreen search result actionable when the snapshot targets its popup', async () => {
+    const { options, ctx } = fixture()
+    options[0]!.hidden = true
+    options[2]!.hidden = true
+    const result = options[1]!
+    result.getBoundingClientRect = () => new DOMRect(0, window.innerHeight + 100, 200, 24)
+    const select = vi.fn()
+    result.addEventListener('click', select)
+    const limited = { ...ctx, budget: { ...budget, maxItems: 1 } }
+
+    const page = await runAction('browser_snapshot', {}, limited)
+    expect(page.text).not.toContain('option "Replacement"')
+
+    const popup = await runAction('browser_snapshot', { region: '.el-select-dropdown' }, limited)
+    expect(popup.text).toContain('option "Replacement" [not selected/outside viewport]')
+    expect(popup.text).not.toContain('input "Channel"')
+    await runAction('browser_click', { elementRef: observedRef(popup, ctx.ids, result) }, limited)
+    expect(select).toHaveBeenCalledTimes(1)
+  })
+
   it('does not invent options from arbitrary list items or closed popups', () => {
     fixture()
     document.body.insertAdjacentHTML('beforeend', '<li>Ordinary text</li><li class="el-select-dropdown__item">Outside a popup</li>')

@@ -7,6 +7,16 @@ import { setTimeout as delay } from 'node:timers/promises'
 export const name = 'stride-browser-smoke-probe'
 export const inject = ['tools', 'browserRuns', 'agents']
 
+export async function executeFixtureTool(executor, { callId, name, arguments: args, signal, agent }) {
+  const batch = await executor.execute({
+    calls: [{ type: 'tool-call', id: callId, name, arguments: JSON.stringify(args) }],
+    signal,
+    ...(agent ? { agent } : {}),
+  })
+  assert.equal(batch.results.length, 1)
+  return batch.results[0].result
+}
+
 export function apply(ctx, config) {
   const controller = new AbortController()
   let started = false
@@ -14,7 +24,7 @@ export function apply(ctx, config) {
   let blocked = 0
 
   async function tool(name, args = {}, agent) {
-    const result = await ctx.tools.execute({
+    const result = await executeFixtureTool(ctx.tools, {
       callId: `stride-browser-smoke-${++callNumber}`,
       name,
       arguments: args,
@@ -52,7 +62,7 @@ export function apply(ctx, config) {
       const queued = await ctx.browserRuns.create({ sessionId, requiredCriteriaIds: ['saved'] })
       const active = await ctx.browserRuns.transition(queued.runId, queued.version, 'running')
       const denied = async () => {
-        const result = await ctx.tools.execute({ callId: `stride-blocked-${++blocked}`, name: 'browser_snapshot', arguments: {}, signal: controller.signal })
+        const result = await executeFixtureTool(ctx.tools, { callId: `stride-blocked-${++blocked}`, name: 'browser_snapshot', arguments: {}, signal: controller.signal })
         assert.equal(result.isError, true, 'old execution context must not dispatch')
       }
       await ctx.browserRuns.withExecution(active.runId, 0, async () => {
@@ -121,7 +131,7 @@ export function apply(ctx, config) {
       await waitFor(() => exists(`${config.trigger}.auto-verified`), 'new-tab control browser verification')
       await waitFor(() => exists(`${config.trigger}.cleanup-fault`), 'new-tab cleanup fault injection')
       const fault = JSON.parse(await readFile(`${config.trigger}.cleanup-fault`, 'utf8'))
-      const failed = await ctx.tools.execute({ callId: `stride-browser-smoke-${++callNumber}`,
+      const failed = await executeFixtureTool(ctx.tools, { callId: `stride-browser-smoke-${++callNumber}`,
         name: 'browser_open_tab', arguments: { url: fault.url, active: false }, agent, signal: controller.signal })
       assert.equal(failed.isError, true)
       assert.match(failed.error.message, /Tab closure is unconfirmed/)

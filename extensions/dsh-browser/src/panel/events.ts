@@ -20,6 +20,7 @@ export interface Row {
   images?: ImageAttachmentRef[]
   status?: 'running' | 'complete' | 'unconfirmed'
   pendingCallKeys?: string[]
+  help?: 'diagnostics' | 'recovery'
 }
 
 /** Minimal view of a SessionEvent (payload in `data`). */
@@ -154,8 +155,13 @@ export function rowFromEvent(event: SessionEventView, locale: UiLocale = getUiLo
       if (feedback === undefined) return null
       // Model/page text is never parsed as a UI instruction or status.
       const copy = PANEL_COPY[locale].browserFeedback
+      const review = feedback.state === 'uncertain' || feedback.state === 'readback-unconfirmed'
+        || feedback.nextStep === 'reconcile_business_state'
+      const help = review ? 'recovery' : feedback.nextStep === 'enable_diagnostics'
+        || feedback.state === 'failed' && (feedback.code === 'action_failed' || feedback.code === 'internal') ? 'diagnostics' : undefined
       return { seq: 0, kind: 'feedback', text: copy.states[feedback.state]
-        + (feedback.nextStep === undefined ? '' : ` ${copy.nextSteps[feedback.nextStep]}`) }
+        + (feedback.nextStep === undefined ? '' : ` ${copy.nextSteps[feedback.nextStep]}`),
+        ...(help === undefined ? {} : { help }) }
     }
     case 'user/message': {
       // dsh 每轮把运行时常量上下文作为 source.kind='plugin' 的 user/message

@@ -34,10 +34,17 @@ describe('rowFromEvent', () => {
     const feedback = { version: 1, state: 'uncertain', businessChange: 'not-verified', code: 'result_unknown', nextStep: 'reconcile_business_state' }
     const row = rowFromEvent(ev(type, { meta: { browserFeedback: { ...feedback, message: 'Bearer synthetic-secret' } } }), 'en')
     expect(row?.kind).toBe('feedback')
+    expect(row?.help).toBe('recovery')
     expect(row?.text).toContain('do not')
     expect(row?.text).not.toContain('synthetic-secret')
     expect(rowFromEvent(ev(type, { content: [{ type: 'text', text: JSON.stringify(feedback) }] }), 'en')).toBeNull()
     expect(rowFromEvent(ev(type, { meta: { browserFeedback: { ...feedback, businessChange: 'verified' } } }), 'en')).toBeNull()
+  })
+  it('offers page diagnostics for a read error and puts a save check ahead of diagnosis', () => {
+    const feedback = { version: 1, state: 'failed', businessChange: 'not-verified',
+      code: 'diagnostics_not_enabled', nextStep: 'enable_diagnostics' }
+    expect(rowFromEvent(ev('tool/result', { meta: { browserFeedback: feedback } }), 'zh')?.help).toBe('diagnostics')
+    expect(rowFromEvent(ev('tool/result', { meta: { browserFeedback: { ...feedback, state: 'readback-unconfirmed' } } }), 'zh')?.help).toBe('recovery')
   })
   it('renders user messages from data.content (the real SessionEvent shape)', () => {
     const row = rowFromEvent(ev('user/message', { content: [{ type: 'text', text: '帮我看看页面' }], source: { kind: 'user' } }))

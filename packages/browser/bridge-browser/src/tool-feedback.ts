@@ -54,7 +54,7 @@ export function failureFeedback(code: string, readOnly: boolean, notDispatched =
 }
 export function feedbackText(feedback: BrowserToolFeedback): string {
   const guidance = feedback.code === 'diagnostics_not_enabled'
-    ? ' Ask the user to open Page Diagnostics in this conversation’s sidebar and choose Enable diagnostics for this page. Read diagnostics after capture starts.'
+    ? ' Ask the user to choose Troubleshoot this page by the error, or choose Enable diagnostics for this page under More in the sidebar. Read diagnostics after capture starts. If a write outcome is uncertain, check the business result before any new write.'
     : ''
   return `Browser operation feedback: ${JSON.stringify(feedback)}. This is diagnostic state, not authorization or proof of a saved business change.${guidance}`
 }

@@ -1,27 +1,22 @@
 # DSH Stride（寻行）
 
-0.1.21 补充了未确认操作的观察流程：原执行器结束后，普通对话取得 Host 所有者为指定网址签发的一次性许可后，可以打开或复用该资料页用于读取，旧点击／输入记录和页面写入限制仍保留。填写、提交、原页面导航、关闭页及托管任务的标签页变更不因此放开。存在正在派发的写入，或此前打开／选页本身结果不明时，仍拒绝再次变更目标。许可绑定原会话和连接，两分钟过期，不能强制副本；浏览器工具不能自行签发，直接跟随仍受限制。原生授权、确认设置、持久记录与写入顺序均保留；不会自动核对、重发旧操作或继续任务。
-
-
-开发包 0.1.19 会把观察绑定到原生页面生命周期、当前会话和托管执行版本。你在受控页真实点击或按键后，旧观察会失效；模型须重新读取，托管任务须明确继续。它不能识别所有后台账号或租户变化，登录和业务身份仍需单独核实。模型合成事件不构成用户授权。
-
-快照附带有界范围元数据，报告已列出 frame、文档代次、正文和控件等省略数量。`complete` 始终为 false：闭合组件、画布隐藏图层、非 DOM 状态和未列出的 frame 均不在证明范围内；识别到的敏感值遮罩也不等于所有个人信息都已清除。旧端缺少元数据时标记未知。Host 不能凭一个观察编号证明模型真正收到完整基线，因此模型工具的显式增量请求目前返回有界完整快照，并说明 `model-projection-not-attested`；底层受信协议的基线检查仍保留。下文 0.1.18 描述为历史实现。
-
-
 [English](README.md) | **中文**
 
-DSH Stride 是 [dsh-browser](https://github.com/omdsh-dev/dsh-browser) 的社区产品分支，通过本机 Bridge 和浏览器侧栏，将 DeepSeek Harness 连接到用户已有的 Chrome 或 Firefox 页面。本项目与 DeepSeek 没有从属或背书关系。
+DSH Stride 把 DeepSeek Harness 接到你授权的 Chrome 标签页。你可以在浏览器侧栏聊天，让 DSH 读取和操作当前对话选中的页面。Stride 是 [dsh-browser](https://github.com/omdsh-dev/dsh-browser) 的独立社区分支。
 
-项目目前处于 **M0：兼容性与基线验证**。上游的文本浏览器工具和侧栏聊天可作为开发基线；连接、安装级配对与目标检查已有加固，目前没有正式支持的发行版。
+**1.0.0** 支持 Chrome 和 DSH Web 的普通对话、配对、授权分组及页面读写。托管 `/browser` 任务仍处于预览阶段。Firefox 提供独立源码构建，桌面端接入仍待验收。
 
 Host 组件包名为 `@eilyeee/dsh-browser-stride`，源码目录仍为 `packages/browser/bridge-browser/`；浏览器扩展是单独的组件。
 
 ## 环境要求
 
 - Node.js 24 系列中的 24.15 或更高版本；具体支持范围见 `package.json`。
-- 使用 `package.json` 的 `packageManager` 指定的 pnpm 版本。
-- 现有文本路径需要 Chrome 116+ 或 Firefox 140+；版本满足本身不代表端到端验收通过。
-- 本机 DeepSeek Harness Host 与项目 DSH 依赖统一使用 `0.2.1-rc.5`；只更新全局 CLI 会造成版本不匹配。桌面端接入及其实际 profile 仍需验证。
+- Chrome 116+，以及使用 `web` profile 的 DeepSeek Harness `0.2.2-rc.5`。
+- 从源码构建时，使用 `package.json` 的 `packageManager` 指定的 pnpm 版本。
+
+## 从发布包安装
+
+下载同一版本的 Host 安装包、Chrome ZIP、安装脚本、版本文件和校验和。按附带的 README 安装 Host、加载 Chrome 扩展并核对版本。更新时保留原 Host 数据和扩展目录。[GitHub 发布页](https://github.com/eilyeee/dsh-browser-stride/releases)
 
 ## 从源码运行
 
@@ -35,6 +30,8 @@ pnpm start
 ```
 
 安装脚本会修改本地 DSH 的 **web** profile、构建插件与 Chrome 扩展，并尝试打开 Chrome 扩展管理页；如果该 profile 中存在旧版 Bridge 包，脚本可能移除它，请先阅读脚本。Firefox 需要单独构建和临时安装，详见[扩展说明](extensions/dsh-browser/README.zh.md)。桌面端可能使用其他 profile，安装到 `web` 不等于桌面端已经接通。脚本必须从完整的 Stride 检出目录运行，不会下载上游项目代替本项目。
+
+## 将 Chrome 连接到 DSH
 
 启动 Host 后，在扩展侧栏设置中点击「连接本机 DSH」。保持侧栏打开，在已登录的 DSH 网页「设置 → 通用 → 浏览器配对」中核对相同校验码并确认，扩展会自动保存安装级凭据并连接，以后自动重连。请求五分钟后过期；拒绝、取消或 Host 重启后需要重新发起。请求本身不授予权限，只有经过 Host 登录认证的用户才能确认；凭据只交给持有本次请求证明的扩展，不放入网页、URL 或日志。连接成功会替换当前浏览器连接，页面操作仍遵循扩展审批策略。
 
@@ -54,7 +51,7 @@ Chrome 可以在扩展设置中开启「自动控制 DSH 新建页面」并保�
 
 本次包名迁移需在拉取并构建后再运行一次安装脚本（`./scripts/install.sh`，Windows 使用 `.\scripts\install.ps1`）。脚本会先注册 `@eilyeee/dsh-browser-stride`，再移除过渡名称 `@eilyeee/dsh-stride-browser-bridge` 以及旧的 `@yuxianglin/dsh-bridge-browser` 与 `@deepseek-ai/dsh-bridge-browser` 注册。保留原 DSH home 和扩展安装即可沿用配对及任务记录。
 
-DSH 能安装 GitHub 插件，但本仓库根目录目前是开发工作区，不能直接当作 GitHub 插件发布包使用，也没有浏览器商店自动更新渠道。开发包可在构建后运行 `pnpm run release:prepare` 生成，位于 `.stride-private/releases/<version>/`，其中 `<version>` 取仓库根目录 `package.json` 的版本：包含独立 Host tarball、Chrome ZIP、SHA256SUMS、版本信息和安装说明。在可信来源取得开发包后，按其中 README 安装；无需复制本仓库的开发依赖。安装 Host 插件不会替浏览器安装或更新扩展。
+使用发布包时，下载新版本，按附带的 README 分别更新 Host 插件和 Chrome 扩展。要在本地打包，运行 `pnpm run release:prepare`，文件输出到 `.stride-private/releases/<version>/`，版本号取仓库根目录 `package.json`。
 
 扩展设置会显示实际连接的 Host、DSH、扩展和线协议版本。包版本不同会提示配套更新，旧 Host 未报告的版本显示为未知；协议兼容不代表所有功能已配套。更新前先让任务结束，保留原 DSH home/profile，再重启 Host、重载扩展。重载后重新授权已有页面，配对和任务资料无需重新录入。
 

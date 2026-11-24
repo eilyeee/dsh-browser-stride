@@ -65,6 +65,35 @@ describe('native reviewed continuation', () => {
     expect(() => h.recovery.prepare(h.sessionId, 'replacement', {})).toThrow('review-read-required')
     h.advance(300001); expect(() => h.prepare()).toThrow('review-read-required')
   })
+  it('records one guided decision and keeps the other write fenced until it is reviewed', async () => {
+    const h = await setup()
+    await h.uncertain('first'); await h.uncertain('second')
+    expect(h.recovery.status(h.sessionId)).toEqual({ pending: 2 })
+    await h.read()
+    const offer = h.recovery.prepare(h.sessionId, h.connectionId, h.owner, true)
+    await h.recovery.confirm(h.sessionId, offer.reviewId, [{ key: 'w:first', decision: 'applied' }], h.connectionId, h.owner, new AbortController().signal)
+    expect(h.store.dispatches.get('first')?.nativeReview?.decision).toBe('applied')
+    expect(h.store.dispatches.get('second')?.nativeReview).toBeUndefined()
+    expect(h.recovery.status(h.sessionId)).toEqual({ pending: 1 })
+    expect(() => h.store.executionFor(h.sessionId)).toThrow('reconciliation-required')
+    const next = h.recovery.prepare(h.sessionId, h.connectionId, h.owner, true)
+    expect(next.items.map(item => item.key)).toEqual(['w:second'])
+    await h.recovery.confirm(h.sessionId, next.reviewId, [{ key: 'w:second', decision: 'not-applied' }], h.connectionId, h.owner, new AbortController().signal)
+    expect(h.recovery.status(h.sessionId)).toEqual({ pending: 0 })
+    expect(h.store.executionFor(h.sessionId)).toBeUndefined()
+  })
+  it('keeps the legacy all-item requirement and refuses injected choices on a guided offer', async () => {
+    const h = await setup()
+    await h.uncertain('first'); await h.uncertain('second'); await h.read()
+    const confirm = (reviewId: string, keys: string[]) => h.recovery.confirm(h.sessionId, reviewId,
+      keys.map(key => ({ key, decision: 'applied' })), h.connectionId, h.owner, new AbortController().signal)
+    await expect(confirm(h.prepare().reviewId, ['w:first'])).rejects.toThrow('review-stale')
+    for (const keys of [['w:first', 'w:other-session'], ['w:first', 'w:first']]) {
+      const offer = h.recovery.prepare(h.sessionId, h.connectionId, h.owner, true)
+      await expect(confirm(offer.reviewId, keys)).rejects.toThrow('review-stale')
+    }
+    expect(h.recovery.status(h.sessionId)).toEqual({ pending: 2 })
+  })
   it.each(['name', 'preparedAt', 'settledAt'] as const)('invalidates the review offer when its displayed %s changes', async field => {
     const h = await setup(); await h.uncertain(); await h.read(); const offer = h.prepare()
     const list = h.store.dispatches.list.bind(h.store.dispatches)

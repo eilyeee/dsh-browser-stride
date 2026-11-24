@@ -61,7 +61,7 @@ import { TASK_BRIEF_GET, TASK_BRIEF_SAVE, TASK_BRIEF_REVIEW, TASK_BRIEF_OPEN } f
 import { briefSessionItems, openSessionBrief, saveSessionBrief } from './task-brief-sessions.ts'
 import { parseToolFeedback } from './tool-feedback.ts'
 import { NativeRecoveryError, type NativeRecovery } from './native-recovery.ts'
-import { NATIVE_RECOVERY_PREPARE, NATIVE_RECOVERY_CONFIRM, recoveryDecisionsSchema } from './native-review.ts'
+import { NATIVE_RECOVERY_PREPARE, NATIVE_RECOVERY_CONFIRM, NATIVE_RECOVERY_STATUS, recoveryDecisionsSchema } from './native-review.ts'
 
 /**
  * Host management methods that must not be granted by browser pairing alone.
@@ -193,6 +193,7 @@ interface ReadyConnection {
   snapshotBase: boolean
   pageDiagnostics: boolean
   manualRecovery: boolean
+  guidedRecovery: boolean
   designViewZoom: boolean
 }
 
@@ -622,6 +623,7 @@ export class BridgeServer {
           ws.close(PROTOCOL_MISMATCH_CLOSE_CODE, 'incompatible protocol')
           return
         }
+        const manualRecovery = frame.caps.manualRecovery === true && this.deps.caps.manualRecovery === true
         const caps: BridgeCaps = {
           textOnly: true,
           ...(frame.caps.visualViewport === true && this.deps.caps.visualViewport === true ? { visualViewport: true } : {}),
@@ -630,7 +632,8 @@ export class BridgeServer {
           ...(frame.caps.elementReadScope === true && this.deps.caps.elementReadScope === true ? { elementReadScope: true } : {}),
           ...(frame.caps.snapshotBase === true && this.deps.caps.snapshotBase === true ? { snapshotBase: true } : {}),
           ...(frame.caps.pageDiagnostics === true && this.deps.caps.pageDiagnostics === true ? { pageDiagnostics: true } : {}),
-          ...(frame.caps.manualRecovery === true && this.deps.caps.manualRecovery === true ? { manualRecovery: true } : {}),
+          ...(manualRecovery ? { manualRecovery: true } : {}),
+          ...(manualRecovery && frame.caps.guidedRecovery === true && this.deps.caps.guidedRecovery === true ? { guidedRecovery: true } : {}),
           ...(frame.caps.designViewZoom === true && this.deps.caps.designViewZoom === true ? { designViewZoom: true } : {}),
           snapshotMaxChars: Math.min(this.deps.caps.snapshotMaxChars, frame.caps.snapshotMaxChars),
           maxInteractiveItems: Math.min(this.deps.caps.maxInteractiveItems, frame.caps.maxInteractiveItems),
@@ -695,7 +698,7 @@ export class BridgeServer {
         }
       }
     })()
-    this.current = { connectionId: randomUUID(), ws, remoteAddress, abort, pump, ping, orderedSessionRpcs: new Map(), confirmedTools: new Set(), lostRunTargets: new Set(), taskTargetLoss: caps.taskTargetLoss === true, visualViewport: caps.visualViewport === true, layoutMetrics: caps.layoutMetrics === true, elementScroll: caps.elementScroll === true, elementReadScope: caps.elementReadScope === true, snapshotBase: caps.snapshotBase === true, pageDiagnostics: caps.pageDiagnostics === true, manualRecovery: caps.manualRecovery === true, designViewZoom: caps.designViewZoom === true,
+    this.current = { connectionId: randomUUID(), ws, remoteAddress, abort, pump, ping, orderedSessionRpcs: new Map(), confirmedTools: new Set(), lostRunTargets: new Set(), taskTargetLoss: caps.taskTargetLoss === true, visualViewport: caps.visualViewport === true, layoutMetrics: caps.layoutMetrics === true, elementScroll: caps.elementScroll === true, elementReadScope: caps.elementReadScope === true, snapshotBase: caps.snapshotBase === true, pageDiagnostics: caps.pageDiagnostics === true, manualRecovery: caps.manualRecovery === true, guidedRecovery: caps.guidedRecovery === true, designViewZoom: caps.designViewZoom === true,
       ...(caps.taskPageOwnership === true ? { taskPageOwners: new Map() } : {}),
       ...(caps.taskPageOwnership === true && this.deps.pairing !== undefined && browserTabScope !== undefined ? { browserTabScope } : {}),
       ...(installationId === undefined ? {} : { installationId }),
@@ -963,9 +966,29 @@ export class BridgeServer {
         if (conn.manualRecovery !== true || this.deps.recovery === undefined) throw new NativeRecoveryError('review-unavailable')
         const id = z.string().min(1).max(200).refine(value => value.trim() === value)
         let result: unknown
-        if (frame.method === NATIVE_RECOVERY_PREPARE) {
-          const payload = z.strictObject({ sessionId: id }).parse(frame.payload)
-          result = this.deps.recovery.prepare(payload.sessionId, conn.connectionId, conn)
+        if (frame.method === NATIVE_RECOVERY_STATUS && conn.guidedRecovery) {
+          const { sessionId } = z.strictObject({ sessionId: id }).parse(frame.payload)
+          result = this.deps.recovery.status(sessionId)
+        } else if (frame.method === NATIVE_RECOVERY_PREPARE) {
+          const { sessionId, readId } = z.strictObject({ sessionId: id, readId: id.optional() }).parse(frame.payload)
+          if (readId !== undefined) {
+            if (!conn.guidedRecovery) throw new NativeRecoveryError('review-unavailable')
+            this.deps.recovery.assertCanInspect(sessionId)
+            if (this.deps.recovery.status(sessionId).pending > 0) {
+              try {
+                // A fixed read, admitted by the panel for exactly the selected
+                // document. The regular tool path records the observation.
+                await this.requestTool('browser_snapshot', { recoveryReadId: readId }, conn.abort.signal, Math.min(this.deps.toolTimeoutMs, 20000), sessionId)
+              } catch (error) {
+                if (error instanceof BridgeToolError && ['permission-required', 'approval-denied', 'approval-unavailable'].includes(error.code)) {
+                  throw new NativeRecoveryError('review-read-denied')
+                }
+                throw new NativeRecoveryError('review-read-failed')
+              }
+              if (this.current !== conn || conn.abort.signal.aborted) throw new NativeRecoveryError('review-stale')
+            }
+          }
+          result = this.deps.recovery.prepare(sessionId, conn.connectionId, conn, conn.guidedRecovery)
         } else if (frame.method === NATIVE_RECOVERY_CONFIRM) {
           const payload = z.strictObject({ sessionId: id, reviewId: id, decisions: recoveryDecisionsSchema }).parse(frame.payload)
           await this.deps.recovery.confirm(payload.sessionId, payload.reviewId, payload.decisions, conn.connectionId, conn, conn.abort.signal)

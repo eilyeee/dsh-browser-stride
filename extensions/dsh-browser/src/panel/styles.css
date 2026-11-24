@@ -796,6 +796,9 @@ textarea:focus-visible {
   font-size: calc(11.5px * var(--ui-scale));
 }
 
+.row.feedback:has(.feedback-action) { flex-direction: column; align-items: flex-start; gap: 6px; }
+.feedback-action, .run-review { margin-top: 6px; }
+
 .row.info pre {
   max-width: 92%;
   padding: 3px 8px;
@@ -2736,3 +2739,34 @@ textarea:focus-visible {
 .page-recovery label { display: flex; align-items: flex-start; gap: 6px; margin: 6px 0; line-height: 1.5; }
 .page-recovery input[type="radio"] { flex: 0 0 auto; width: auto; margin-top: 3px; }
 .page-diagnostics button, .page-recovery button { max-width: 100%; white-space: normal; }
+.troubleshooting-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.troubleshooting-heading { display: flex; flex-wrap: wrap; gap: 4px 8px; color: var(--ink-strong); }
+.troubleshooting-heading span { color: var(--muted); }
+.guided-recovery {
+  flex-shrink: 1;
+  min-height: 0;
+  max-height: min(68%, max(64px, calc(100% - 96px)), 320px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--surface);
+}
+.page-diagnostics[open] { max-height: 30dvh; overflow-y: auto; overscroll-behavior: contain; }
+.page-diagnostics button, .guided-recovery button, .feedback-action, .run-review {
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink-strong);
+  font: inherit;
+  cursor: pointer;
+}
+.feedback-action, .run-review, .guided-recovery > button { color: var(--blue-ink); background: var(--blue-wash); }
+.page-diagnostics button:hover:not(:disabled), .guided-recovery button:hover:not(:disabled),
+.feedback-action:hover:not(:disabled), .run-review:hover:not(:disabled) { border-color: var(--blue); }
+.page-diagnostics button:disabled, .guided-recovery button:disabled { opacity: .55; cursor: default; }
+.diagnostic-details, .recovery-preview { margin-top: 8px; color: var(--muted); }
+.recovery-preview pre { margin: 6px 0; padding: 8px; max-height: 100px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.guided-recovery ul { max-height: none; overflow: visible; }
+.guided-recovery-item { padding: 8px; border: 1px solid var(--line); border-radius: 8px; }
+.recovery-item-detail { display: flex; gap: 4px 8px; flex-wrap: wrap; margin: 4px 0 8px; color: var(--muted); }
+.guided-recovery .skip-review { color: var(--muted); }

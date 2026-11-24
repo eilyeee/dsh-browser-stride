@@ -78,21 +78,23 @@ describe('shared read debugger lease', () => {
 })
 
 describe('new-tab debugger transport', () => {
-  it('waits for the browser to finish loading the new document before attaching', async () => {
+  it('waits for the main document to commit before attaching while subresources load', async () => {
     vi.useFakeTimers()
     const h = fixture()
-    let loading = true
+    let pending = true
     h.get.mockImplementation(async () => ({
-      id: 42, windowId: 1, url: 'https://example.test/', status: loading ? 'loading' : 'complete',
+      id: 42, windowId: 1, url: 'https://example.test/', status: 'loading',
+      ...(pending ? { pendingUrl: 'https://example.test/new-page' } : {}),
     }))
     const started = h.pages.attachCreated(42, () => true)
     await vi.advanceTimersByTimeAsync(110)
     expect(h.attach).not.toHaveBeenCalled()
     expect(h.commands).not.toHaveBeenCalled()
-    loading = false
+    pending = false
     await vi.advanceTimersByTimeAsync(50)
     await started
     expect(h.attach).toHaveBeenCalledOnce()
+    await expect(h.pages.ready(42, undefined, new AbortController().signal, 900, 'committed')).resolves.toBe(true)
   })
 
   it('retires an unanswered native attach and cleans up its late reply without sharing the slot', async () => {

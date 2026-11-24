@@ -21,12 +21,24 @@ li{padding:8px;cursor:pointer}.is-disabled{color:#999}.selected{background:#ddee
 <label>Channel <input readonly aria-label="Channel" id="choice"></label>
 <label>Legacy picker <input readonly aria-label="Legacy picker" id="legacy"></label>
 <button id="save">Save settings</button><p id="status">Not saved</p></div></main>
+<nav aria-label="Channel navigation"><ul role="menu">
+<li id="channel-menu" role="menuitem" tabindex="0" aria-haspopup="menu" aria-expanded="false">
+<div>Browse channels</div>
+<div><ul id="channel-submenu" role="menu" hidden>
+<li role="none"><a role="menuitem" href="#/directory">Channel directory</a></li>
+</ul></div></li></ul></nav>
 <div class="el-select-dropdown" hidden><ul class="el-select-dropdown__list">
 <li class="el-select-dropdown__item" data-value="skip">Other channel</li>
 <li class="el-select-dropdown__item" data-value="target">${choice}</li>
 <li class="el-select-dropdown__item is-disabled">Unavailable channel</li></ul></div>
 <script>
 const popup=document.querySelector('.el-select-dropdown'),input=document.querySelector('#choice'),legacy=document.querySelector('#legacy');
+const menu=document.querySelector('#channel-menu'),submenu=document.querySelector('#channel-submenu');
+menu.onclick=event=>{
+ if(submenu.contains(event.target))return;
+ submenu.hidden=!submenu.hidden;
+ menu.setAttribute('aria-expanded',String(!submenu.hidden));
+};
 window.widgetKeyEvents=[];window.widgetOptionClicks=0;window.widgetRouteChanges=0;
 input.onclick=()=>{popup.hidden=!popup.hidden};
 for(const option of popup.querySelectorAll('li'))option.onclick=()=>{
