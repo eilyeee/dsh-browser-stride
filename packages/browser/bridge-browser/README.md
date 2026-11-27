@@ -64,6 +64,21 @@ For first connection, click **Connect to local DSH** in extension settings, then
 | `sessionWorkspacePath` | `DSH_HOME/browser-sessions` | Workspace for extension-created sessions; an empty string disables grouping. |
 | `deferSessionCreate` | `true` | Materialize a new session when the first prompt is sent. |
 | `launchChromeOnRequest` | `false` | On macOS, page-open requests and URL-led `/browser` commands can launch regular Chrome and wait for a paired extension with background connection enabled. |
+| `iframeScopes` | `[]` | Exact origin pairs for cross-origin direct iframes on Chrome 125 or later. |
+
+To let DSH operate an embedded app in its portal, add the portal and app origins to the Host profile.
+
+```yaml
+- id: bridge-browser
+  config:
+    iframeScopes:
+      - parentOrigin: "https://portal.example.invalid"
+        childOrigin: "https://app.example.invalid"
+```
+
+Each origin contains a scheme, hostname and optional non-default port. The pair applies to direct, committed HTTP(S) children of the authorized tab. Chrome can show its debugger indicator while Stride controls the child. Page sharing, action approvals and tab revocation apply as usual. Use `browser_snapshot` to find the iframe number and observed controls, then pass that `frame` to tools such as `browser_get_text` and `browser_click`. Take a fresh snapshot if the child navigates. The snapshot labels the iframe by origin.
+
+For `/ext/local-browser`, include both origins in `localBrowser.allowedOrigins`. Discover the child with `action: "snapshot"` and `iframe: { "origin": "https://app.example.invalid" }`. Use the portal's exact `expectedUrl` throughout. For `text`, `click`, `type` and `select`, include the observed frame number in `iframe` alongside its origin. Input uses the existing operation ID and receipt. Wiki and guarded Jenkins requests use their top-level page.
 
 `/ext/bridge-config` exposes only the local WebSocket address. Pairing administration is loopback-only, requires the separate administrator token and rejects browser Origin headers. A one-time code expires after five minutes; only a hash of the resulting installation credential is persisted by the Host. See the root README for issue/list/revoke commands. Extension credentials use extension-origin IndexedDB, including on Firefox where `storage.local` access cannot be restricted.
 

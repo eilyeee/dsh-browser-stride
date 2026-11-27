@@ -6,7 +6,14 @@ with 1.0.0 use [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Chrome 125 and later can observe and operate direct cross-origin iframes on authorized tabs when both origins are configured in the Host. Conversation tools and the local browser route use document-scoped frame IDs.
+- Added opt-in autonomous Confluence Wiki reading on Chrome with a dedicated session, exact target checks and bounded refresh.
+
 - Chrome connects to its paired Host in the background by default. The setting can be turned off. URL-led `/browser` commands can open a controlled page and start the task while the sidebar is closed. An optional macOS Host setting launches Chrome for page-open requests.
+- Ordinary DSH conversations can read the title, text and checked version of the selected Wiki tab. The tool reports a different target, a sign-in requirement or a stale version separately.
+- Added an opt-in loopback interface for reading and interacting with the page selected in one configured DSH session. Page writes use caller-supplied operation IDs and the existing durable dispatch receipts.
+- Added opt-in form preflight and one native submit activation for trusted local clients. Matching hosts and extensions support same-origin JSON readback through the authorized browser session.
+- Added guarded Jenkins branch submission for local clients. The Host can record the original queue ID, and DSH can read the original Jenkins console for a checked-out commit.
 
 ## [1.0.0]
 

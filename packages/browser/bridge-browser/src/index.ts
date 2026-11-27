@@ -47,6 +47,8 @@ import { purgeSessionFiles, SessionPurgeError, type SessionPurgeDeps } from './s
 import { resolveToken } from './token.ts'
 import { PairingStore } from './pairing.ts'
 import { createPairingRoute, createPairingRequestRoute, createPairingOwnerRoute } from './pairing-http.ts'
+import { createLocalBrowserRoute, localBrowserConfig, type LocalBrowserConfig } from './local-browser-http.ts'
+import { isIframeScopes, type IframeScope } from './iframe-scopes.ts'
 import { PairingRequests } from './pairing-requests.ts'
 import {
   createRemoteHostApi,
@@ -107,6 +109,9 @@ export interface Config {
   deferSessionCreate?: boolean
   /** Permit explicit page-open requests to launch regular Chrome on macOS. */
   launchChromeOnRequest?: boolean
+  /** Exact origin pairs for Chrome iframe tools on an already authorized top-level page. */
+  iframeScopes?: IframeScope[]
+  localBrowser?: unknown
 }
 
 export const Config: z<Config> = z.object({
@@ -119,10 +124,12 @@ export const Config: z<Config> = z.object({
   sessionWorkspacePath: z.string().default(DEFAULT_SESSION_WORKSPACE_PATH),
   deferSessionCreate: z.boolean().default(DEFAULT_DEFER_SESSION_CREATE),
   launchChromeOnRequest: z.boolean().default(false),
+  iframeScopes: z.array(z.object({ parentOrigin: z.string().required(), childOrigin: z.string().required() })).default([]),
+  localBrowser: z.any(),
 })
 
 /** The shape after schemastery applies its defaults to every field. */
-type ResolvedConfig = Required<Omit<Config, 'token'>> & Pick<Config, 'token'>
+type ResolvedConfig = Required<Omit<Config, 'token' | 'localBrowser'>> & Pick<Config, 'token'> & { localBrowser?: LocalBrowserConfig }
 
 /** Configured budgets must be positive integers. Exported for validation tests. */
 export function assertPositiveInteger(name: string, value: number): void {
@@ -137,6 +144,10 @@ export function assertPositiveInteger(name: string, value: number): void {
  * @returns a complete configuration ready for runtime use.
  */
 export function resolveConfig(config: Config): ResolvedConfig {
+  const iframeScopes = config.iframeScopes === undefined ? [] : config.iframeScopes
+  if (!isIframeScopes(iframeScopes)) {
+    throw new Error('bridge-browser: iframeScopes must contain up to 16 pairs of exact HTTP(S) origins')
+  }
   const resolved: ResolvedConfig = {
     ...(config.token === undefined ? {} : { token: config.token }),
     allowHostManagement: config.allowHostManagement ?? false,
@@ -147,6 +158,8 @@ export function resolveConfig(config: Config): ResolvedConfig {
     sessionWorkspacePath: config.sessionWorkspacePath ?? DEFAULT_SESSION_WORKSPACE_PATH,
     deferSessionCreate: config.deferSessionCreate ?? DEFAULT_DEFER_SESSION_CREATE,
     launchChromeOnRequest: config.launchChromeOnRequest === true,
+    iframeScopes: iframeScopes.map(({ parentOrigin, childOrigin }) => ({ parentOrigin, childOrigin })),
+    ...(config.localBrowser === undefined ? {} : { localBrowser: localBrowserConfig.parse(config.localBrowser) }),
   }
   assertPositiveInteger('toolTimeoutMs', resolved.toolTimeoutMs)
   assertPositiveInteger('snapshotMaxChars', resolved.snapshotMaxChars)
@@ -325,6 +338,12 @@ function mountBridge(
       elementScroll: true,
       elementReadScope: true,
       snapshotBase: true,
+      iframeScopes: resolved.iframeScopes,
+      localBrowser: true,
+      localAutonomousWiki: true,
+      localGuardedForms: true,
+      localJenkinsQueue: true,
+      versionedDocument: true,
       taskPageCommand: true,
       pageDiagnostics: true,
       manualRecovery: true,
@@ -376,6 +395,10 @@ function mountBridge(
   ctx.effect(() => ctx.webServer.register(createPairingRoute(pairing, server, tokenRes.token, requests)), 'bridge-browser: pairing administration')
   ctx.effect(() => ctx.webServer.register(createPairingRequestRoute(requests, { store: pairing, server })), 'bridge-browser: browser pairing requests')
   ctx.effect(() => ctx.connection.fetch.register(createPairingOwnerRoute(requests, server)), 'bridge-browser: authenticated pairing approval')
+  if (resolved.localBrowser !== undefined) {
+    const local = createLocalBrowserRoute(resolved.localBrowser, server, runs.dispatches, process.env[resolved.localBrowser.credentialEnv] ?? '', tokenRes.token, resolved.iframeScopes)
+    ctx.effect(() => ctx.webServer.register(local), 'bridge-browser: local browser client')
+  }
 
   // Discovery contains no secret and is only exposed to local clients.
   const configRoute: WebRoute = {

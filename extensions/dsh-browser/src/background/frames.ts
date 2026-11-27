@@ -10,7 +10,7 @@
  */
 
 import type { ContentBudget } from './tools.ts'
-import { debuggerPages } from './debugger-pages.ts'
+import { debuggerPages, type PageDispatch } from './debugger-pages.ts'
 
 /** A live document frame in one tab. Main frame id is always zero. */
 export interface TabFrame {
@@ -18,6 +18,8 @@ export interface TabFrame {
   parentFrameId: number
   documentId?: string
   url: string
+  /** Background-owned delivery for specifically authorized Chrome iframe documents. */
+  send?: (message: unknown, dispatch?: PageDispatch) => Promise<unknown>
 }
 
 /** Per-frame limits whose sum never exceeds the negotiated tab budget. */

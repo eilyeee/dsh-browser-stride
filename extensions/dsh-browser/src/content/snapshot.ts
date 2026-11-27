@@ -489,7 +489,7 @@ export function renderSnapshot(view: SnapshotView, delta: boolean, maxChars: num
 }
 
 /** References are admitted only when their entire corresponding line survives the render cap. */
-export function renderSnapshotDetails(view: SnapshotView, delta: boolean, maxChars: number = view.budgetChars): {
+export function renderSnapshotDetails(view: SnapshotView, delta: boolean, maxChars: number = view.budgetChars, displayUrl = view.url): {
   text: string; targets: Set<number>; selects: Set<number>; renderComplete: boolean
 } {
   const lines: string[] = []
@@ -539,7 +539,7 @@ export function renderSnapshotDetails(view: SnapshotView, delta: boolean, maxCha
     lines.push(snapshotScope(view))
     lines.push(snapshotLimits(view))
     lines.push(`Title: ${view.title || '(untitled)'}`)
-    lines.push(`URL: ${view.url}`)
+    lines.push(`URL: ${displayUrl}`)
     lines.push(`Status: ${view.ready}${view.reindexed ? ' (element indices were reassigned; use the references in this snapshot)' : ''}`)
     if (view.main.length > 0) {
       lines.push('')

@@ -19,6 +19,8 @@
 
 import { createHash, randomUUID } from 'node:crypto'
 import { setTimeout as delay } from 'node:timers/promises'
+import { isAutonomousWikiTool, isLocalIframeTool, jenkinsQueueId, LOCAL_REQUEST_PREFIX, requestsJenkinsQueueReceipt } from './local-browser-contract.ts'
+import { allowsIframeOrigin } from './iframe-scopes.ts'
 import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer } from 'ws'
@@ -159,6 +161,7 @@ export interface BridgeServerDeps {
 interface PendingTool {
   action: ToolActionIdentity
   owner: ReadyConnection
+  expectsJenkinsQueue: boolean
   confirmation: ToolDispatchConfirmation
   confirmed: boolean
   authorityCurrent: () => boolean
@@ -195,6 +198,12 @@ interface ReadyConnection {
   elementScroll: boolean
   elementReadScope: boolean
   snapshotBase: boolean
+  iframeScopes?: BridgeCaps['iframeScopes']
+  localBrowser: boolean
+  localAutonomousWiki: boolean
+  localGuardedForms: boolean
+  localJenkinsQueue: boolean
+  versionedDocument: boolean
   pageDiagnostics: boolean
   manualRecovery: boolean
   guidedRecovery: boolean
@@ -352,12 +361,28 @@ export class BridgeServer {
     signal: AbortSignal,
     timeoutMs: number = this.deps.toolTimeoutMs,
     sessionId?: string,
+    client?: { local: true; requestId?: string },
   ): Promise<unknown> {
+    const guardedForm = args.localFormFill !== undefined || args.localJsonUrl !== undefined || args.localJenkinsLog !== undefined
+    const autonomousWiki = args.localAutonomousWiki !== undefined
+    const iframeOrigin = args.localIframeOrigin
+    if ((args.localPageUrl !== undefined || args.localDocument !== undefined || iframeOrigin !== undefined || guardedForm || autonomousWiki) && client?.local !== true) {
+      throw new BridgeToolError('bad-args', 'Local service arguments require the local browser endpoint', true)
+    }
+    if (autonomousWiki && !isAutonomousWikiTool(name, args)) {
+      throw new BridgeToolError('bad-args', 'Autonomous Wiki requests must target the exact document and use a supported read action.', true)
+    }
+    if (client !== undefined && (sessionId === undefined || this.deps.dispatches === undefined)) {
+      throw new BridgeToolError('execution-denied', 'Local service actions require a durable, selected session', true)
+    }
     let execution: BrowserRunExecution | undefined
     let referencePermit: (() => boolean) | undefined
     const offeredReference = name === 'browser_open_tab' ? this.consumeReference(sessionId, args) : undefined
     try { execution = this.deps.runs?.executionFor(sessionId, isReadOnlyBrowserTool(name) ? 'observe' : 'dispatch') }
     catch (error) {
+      if (client?.local === true && error instanceof BrowserRunStoreError && error.code === 'session-busy') {
+        throw new BridgeToolError('session-busy', 'The selected DSH session is currently busy.', true)
+      }
       if (error instanceof BrowserRunStoreError && error.code === 'reconciliation-required' && name === 'browser_open_tab'
         && (referencePermit = offeredReference) !== undefined) {
         try { execution = this.deps.runs?.executionFor(sessionId, 'prepare-target') }
@@ -373,17 +398,36 @@ export class BridgeServer {
     }
     const conn = this.current
     if (conn === null) {
-      if (this.deps.launchChrome !== undefined && execution === undefined && sessionId !== undefined
+      if (this.deps.launchChrome !== undefined && (client === undefined || autonomousWiki) && execution === undefined && sessionId !== undefined
         && name === 'browser_open_tab' && taskPageUrl(args.url) !== undefined) {
         const deadline = Date.now() + timeoutMs
         return this.waitForChrome(AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])).then(connected => {
           if (!connected || this.current === null || signal.aborted || Date.now() >= deadline) {
             throw new BridgeToolError('bridge-closed', 'No paired Chrome connected after requesting its startup.', true)
           }
-          return this.requestTool(name, args, signal, Math.max(1, deadline - Date.now()), sessionId)
+          return this.requestTool(name, args, signal, Math.max(1, deadline - Date.now()), sessionId, client)
         })
       }
       throw new BridgeToolError('bridge-closed', 'no browser extension is connected to the bridge', true)
+    }
+    if (client !== undefined && !conn.localBrowser) {
+      throw new BridgeToolError('content-unavailable', 'Local browser calls require an updated browser extension', true)
+    }
+    if (iframeOrigin !== undefined && (!isLocalIframeTool(name, args)
+      || !allowsIframeOrigin(conn.iframeScopes, String(args.localPageUrl), String(iframeOrigin)))) {
+      throw new BridgeToolError('content-unavailable', 'Iframe operations require a matching Chrome extension and an authorized origin pair.', true)
+    }
+    if (autonomousWiki && !conn.localAutonomousWiki) {
+      throw new BridgeToolError('content-unavailable', 'Autonomous Wiki reads require an updated Chrome extension.', true)
+    }
+    if (guardedForm && !conn.localGuardedForms) {
+      throw new BridgeToolError('execution-denied', 'Guarded forms require a matching extension and Host.', true)
+    }
+    if ((requestsJenkinsQueueReceipt(name, args) || args.localJenkinsLog !== undefined) && !conn.localJenkinsQueue) {
+      throw new BridgeToolError('execution-denied', 'Jenkins queue receipts require a matching extension and Host.', true)
+    }
+    if (args.document !== undefined && !conn.versionedDocument) {
+      throw new BridgeToolError('content-unavailable', 'Versioned document reads require an updated browser extension', true)
     }
     if (name === 'browser_snapshot' && args.delta === true && args.baseObservationId === undefined) args = { ...args, delta: false }
     if (name === 'browser_get_diagnostics' && !conn.pageDiagnostics) {
@@ -414,7 +458,7 @@ export class BridgeServer {
     if (signal.aborted) {
       throw new BridgeToolError('bridge-closed', 'tool call cancelled before dispatch', true)
     }
-    const id = randomUUID()
+    const id = client?.requestId ?? randomUUID()
     const expiresAt = Date.now() + timeoutMs
     let copied: Record<string, unknown>
     try { copied = JSON.parse(canonicalize(args)) as Record<string, unknown> }
@@ -470,6 +514,9 @@ export class BridgeServer {
       ? target.taskPageKey : undefined
     let action: ToolActionIdentity
     try {
+      if (id.startsWith(LOCAL_REQUEST_PREFIX) && ledger.get(id) !== undefined) {
+        throw new BridgeToolError('action-duplicate', 'This local browser operation already has a receipt', true)
+      }
       const prepared = await ledger.prepare({ requestId: id, connectionId: conn.connectionId,
         name, args, expiresAt, ...(sessionId === undefined ? {} : { sessionId }),
         ...(targetBinding === undefined ? {} : { targetBinding }),
@@ -529,6 +576,7 @@ export class BridgeServer {
     return new Promise<unknown>((resolve, reject) => {
       let timer: NodeJS.Timeout
       const pending: PendingTool = { action, owner: conn, confirmation, confirmed: false,
+        expectsJenkinsQueue: id.startsWith(LOCAL_REQUEST_PREFIX) && requestsJenkinsQueueReceipt(name, args),
         pageTarget: execution !== undefined && isPageBrowserTool(name),
         bindTarget: payload => execution === undefined || !isPageBrowserTool(name) ? payload.targetBinding === undefined
           : payload.targetBinding !== undefined && this.bindRunTarget(execution, conn, payload.targetBinding),
@@ -714,6 +762,13 @@ export class BridgeServer {
           ...(frame.caps.elementScroll === true && this.deps.caps.elementScroll === true ? { elementScroll: true } : {}),
           ...(frame.caps.elementReadScope === true && this.deps.caps.elementReadScope === true ? { elementReadScope: true } : {}),
           ...(frame.caps.snapshotBase === true && this.deps.caps.snapshotBase === true ? { snapshotBase: true } : {}),
+          ...(frame.caps.iframeScopes?.length === 0 && this.deps.caps.iframeScopes?.length
+            ? { iframeScopes: this.deps.caps.iframeScopes } : {}),
+          ...(frame.caps.localBrowser === true && this.deps.caps.localBrowser === true ? { localBrowser: true } : {}),
+          ...(frame.caps.localAutonomousWiki === true && this.deps.caps.localAutonomousWiki === true ? { localAutonomousWiki: true } : {}),
+          ...(frame.caps.localGuardedForms === true && this.deps.caps.localGuardedForms === true ? { localGuardedForms: true } : {}),
+          ...(frame.caps.localJenkinsQueue === true && this.deps.caps.localJenkinsQueue === true ? { localJenkinsQueue: true } : {}),
+          ...(frame.caps.versionedDocument === true && this.deps.caps.versionedDocument === true ? { versionedDocument: true } : {}),
           ...(frame.caps.pageDiagnostics === true && this.deps.caps.pageDiagnostics === true ? { pageDiagnostics: true } : {}),
           ...(manualRecovery ? { manualRecovery: true } : {}),
           ...(manualRecovery && frame.caps.guidedRecovery === true && this.deps.caps.guidedRecovery === true ? { guidedRecovery: true } : {}),
@@ -787,8 +842,12 @@ export class BridgeServer {
         }
       }
     })()
-    this.current = { connectionId: randomUUID(), ws, remoteAddress, abort, pump, ping, orderedSessionRpcs: new Map(), confirmedTools: new Set(), lostRunTargets: new Set(), taskTargetLoss: caps.taskTargetLoss === true, taskPageCommand: caps.taskPageCommand === true && installationId !== undefined && browserTabScope !== undefined, visualViewport: caps.visualViewport === true, layoutMetrics: caps.layoutMetrics === true, elementScroll: caps.elementScroll === true, elementReadScope: caps.elementReadScope === true, snapshotBase: caps.snapshotBase === true, pageDiagnostics: caps.pageDiagnostics === true, manualRecovery: caps.manualRecovery === true, guidedRecovery: caps.guidedRecovery === true, designViewZoom: caps.designViewZoom === true,
+    this.current = { connectionId: randomUUID(), ws, remoteAddress, abort, pump, ping, orderedSessionRpcs: new Map(), confirmedTools: new Set(), lostRunTargets: new Set(), taskTargetLoss: caps.taskTargetLoss === true, taskPageCommand: caps.taskPageCommand === true && installationId !== undefined && browserTabScope !== undefined, visualViewport: caps.visualViewport === true, layoutMetrics: caps.layoutMetrics === true, elementScroll: caps.elementScroll === true, elementReadScope: caps.elementReadScope === true, snapshotBase: caps.snapshotBase === true, localBrowser: caps.localBrowser === true, versionedDocument: caps.versionedDocument === true, pageDiagnostics: caps.pageDiagnostics === true, manualRecovery: caps.manualRecovery === true, guidedRecovery: caps.guidedRecovery === true, designViewZoom: caps.designViewZoom === true,
       ...(caps.taskPageOwnership === true ? { taskPageOwners: new Map() } : {}),
+      localGuardedForms: caps.localGuardedForms === true,
+      localAutonomousWiki: caps.localAutonomousWiki === true,
+      iframeScopes: caps.iframeScopes,
+      localJenkinsQueue: caps.localJenkinsQueue === true,
       ...(caps.taskPageOwnership === true && this.deps.pairing !== undefined && browserTabScope !== undefined ? { browserTabScope } : {}),
       ...(installationId === undefined ? {} : { installationId }),
       ...(extensionVersion === undefined ? {} : { extensionVersion }) }
@@ -1211,8 +1270,13 @@ export class BridgeServer {
   }
 
   private settleTool(conn: ReadyConnection, id: string, action: ToolActionIdentity, ok: boolean, payload: unknown): void {
-    const settlement: DispatchSettlement = { state: 'returned', receipt: transportReceipt(ok, ok ? undefined : payloadCode(payload),
-      ok && isRecord(payload) && parseToolFeedback(payload.feedback)?.state === 'readback-unconfirmed') }
+    const settle = (expectsQueue: boolean): DispatchSettlement => {
+      const result = ok && isRecord(payload) ? payload : undefined
+      const queue = expectsQueue ? jenkinsQueueId.safeParse(result?.jenkinsQueueId) : undefined
+      const unconfirmed = result !== undefined && parseToolFeedback(result.feedback)?.state === 'readback-unconfirmed'
+      return { state: 'returned', receipt: transportReceipt(ok, ok ? undefined : payloadCode(payload),
+        unconfirmed || expectsQueue && !queue?.success, false, queue?.success ? queue.data : undefined) }
+    }
     const pending = this.pendingTools.get(id)
     if (pending !== undefined) {
       if (pending.owner !== conn || pending.action.actionId !== action.actionId || pending.action.requestDigest !== action.requestDigest) return
@@ -1221,16 +1285,17 @@ export class BridgeServer {
           new BridgeToolError('execution-denied', 'The extension returned success without execution confirmation. Check the page before another write.'))
         return
       }
-      pending.finish(settlement, payload, ok ? undefined : new BridgeToolError(payloadCode(payload), payloadMessage(payload)))
+      pending.finish(settle(pending.expectsJenkinsQueue), payload, ok ? undefined : new BridgeToolError(payloadCode(payload), payloadMessage(payload)))
     } else {
       // A late result may settle transport uncertainty, but cannot resurrect
       // the old caller or cross into a replacement connection's authority.
       let row
       try { row = this.deps.dispatches?.get(id) } catch { return }
-      if (row?.connectionId === conn.connectionId && row.state === 'unresolved'
+      if (row?.connectionId === conn.connectionId
+        && (row.state === 'unresolved' || row.state === 'sent_unconfirmed' && row.expectsJenkinsQueue === true)
         && (!ok || conn.confirmedTools.has(id))
         && row.actionId === action.actionId && row.requestDigest === action.requestDigest) {
-        void this.track(this.deps.dispatches!.settle(id, settlement)).then(() => conn.confirmedTools.delete(id), () => {})
+        void this.track(this.deps.dispatches!.settle(id, settle(row.expectsJenkinsQueue === true))).then(() => conn.confirmedTools.delete(id), () => {})
       }
     }
   }

@@ -19,6 +19,10 @@ import { parseElementRef, type ObservationId } from '@eilyeee/dsh-browser-stride
 import { visualViewportState } from './visual.ts'
 import { measureLayout } from './layout.ts'
 import { componentText } from './component-text.ts'
+import { DOCUMENT_READ_MESSAGES, versionedDocumentRequest, type DocumentReadErrorCode } from '@eilyeee/dsh-browser-stride/src/local-browser-contract.ts'
+import { readLocalDocument, VersionedDocumentError } from './local-document.ts'
+import { fillLocalPostForm, readLocalJenkinsCheckout, readLocalJson } from './local-guarded-forms.ts'
+import { isSensitiveField } from './privacy.ts'
 import { OPEN_TREE_LIMITS, queryOpenRoots } from './dom-tree.ts'
 import { changeDesignZoom, nativeDesignZoomControls } from './design-zoom.ts'
 import { DesignZoomNotSelectedError } from './design-zoom-error.ts'
@@ -31,6 +35,7 @@ import type { SnapshotView } from './snapshot.ts'
 /** A settled action result. */
 export interface ActionResult {
   text: string
+  document?: Awaited<ReturnType<typeof readLocalDocument>>
   observation?: ContentObservation
   feedback?: { version: 1; state: 'observed' | 'dispatched' | 'readback-unconfirmed'; businessChange: 'not-verified' }
   designZoomStep?: DesignZoomStep
@@ -40,6 +45,7 @@ export interface ActionResult {
   pageContent?: string
   /** A same-frame document navigation was scheduled after this response. */
   navigationPending?: boolean
+  jenkinsQueueId?: number
 }
 
 /** How long an action should observe a ready document before returning. */
@@ -198,7 +204,7 @@ function referenceStillCurrent(args: Record<string, unknown>, ids: ElementIds, i
 /** Error carrying a stable wire code. */
 export class ActionError extends Error {
   constructor(
-    readonly code: 'element-stale' | 'field-readonly' | 'action-failed' | 'bad-args' | 'design-zoom-not-selected',
+    readonly code: 'element-stale' | 'field-readonly' | 'action-failed' | 'bad-args' | 'guarded-form-rejected' | 'design-zoom-not-selected' | 'target-navigated' | 'content-unavailable' | DocumentReadErrorCode,
     message: string,
   ) {
     super(message)
@@ -231,10 +237,15 @@ export interface ActionContext {
   requireObservation?: boolean
   /** Enabled only when the background may share page content without another approval. */
   includePageDelta?: boolean
+  /** Child-frame observations label their origin without the iframe's login URL. */
+  scopedIframe?: boolean
 }
 
 /** Run one named action with its args. */
 export async function runAction(action: string, args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
+  if (args.localPageUrl !== undefined && ctx.scopedIframe !== true && (window !== window.top || location.href !== args.localPageUrl)) {
+    throw new ActionError('target-navigated', 'This request targets a different page.')
+  }
   if (ctx.requireObservation === true && ['browser_click', 'browser_type', 'browser_select', 'browser_press', 'browser_scroll', 'browser_set_design_zoom'].includes(action)
     && !ctx.ids.hasCurrentObservation()) throw new ActionError('element-stale', 'The page was reloaded or native input changed its context. Take a fresh snapshot before DOM input.')
   // Capture the caller's reference before awaiting page events. Another call
@@ -328,7 +339,7 @@ function snapshotAction(args: Record<string, unknown>, ctx: ActionContext): Acti
   const delta = args.delta === true && fallback === undefined
   const view = buildSnapshot(ctx.ids, { delta, region, budget: ctx.budget }, lastSnapshot)
   if (args.delta === true && fallback !== undefined) view.deltaFallback = fallback
-  const rendered = renderSnapshotDetails(view, delta)
+  const rendered = renderSnapshotDetails(view, delta, undefined, ctx.scopedIframe ? location.origin : view.url)
   snapshotByRegistry.set(ctx.ids, { view, budget: { ...ctx.budget }, regionNode, renderComplete: rendered.renderComplete })
   ctx.ids.publishObservation(view.observationId, rendered.targets, rendered.selects)
   return { text: rendered.text, observation: snapshotObservation(view, delta, rendered.renderComplete) }
@@ -379,7 +390,7 @@ function withPageDelta(text: string, ctx: ActionContext, settled = true, state: 
     && actionBaseByContext.get(ctx) === lastSnapshot.observationId
     && previous.budget.maxItems === ctx.budget.maxItems && previous.budget.maxForms === ctx.budget.maxForms
   const view = buildSnapshot(ctx.ids, { delta, budget: ctx.budget }, lastSnapshot)
-  const rendered = renderSnapshotDetails(view, delta, Math.min(ctx.budget.maxChars, ACTION_DELTA_MAX_CHARS))
+  const rendered = renderSnapshotDetails(view, delta, Math.min(ctx.budget.maxChars, ACTION_DELTA_MAX_CHARS), ctx.scopedIframe ? location.origin : view.url)
   snapshotByRegistry.set(ctx.ids, { view, budget: { ...ctx.budget }, regionNode: null, renderComplete: rendered.renderComplete })
   ctx.ids.publishObservation(view.observationId, rendered.targets, rendered.selects)
   return {
@@ -397,6 +408,21 @@ async function clickAction(args: Record<string, unknown>, ctx: ActionContext): P
   // Synchronous scroll handlers can change the page before activation.
   referenceArg(args, ctx.ids)
   elementOrThrow(ctx.ids, index)
+  if (args.localFormFill !== undefined) {
+    if (typeof args.localPageUrl !== 'string') throw new ActionError('bad-args', 'A guarded form requires a local browser service.')
+    let enqueue
+    try { enqueue = fillLocalPostForm(el, args.localPageUrl, args.localFormFill) }
+    catch { throw new ActionError('guarded-form-rejected', 'The guarded form changed or cannot accept the exact values. No submit control was activated.') }
+    if (enqueue !== undefined) {
+      const jenkinsQueueId = await enqueue()
+      return jenkinsQueueId === undefined
+        ? { text: 'The original Jenkins queue receipt is unavailable.',
+          feedback: { version: 1, state: 'readback-unconfirmed', businessChange: 'not-verified' } }
+        : { text: 'Read the new Jenkins queue ID from this submission.', jenkinsQueueId }
+    }
+    ;(el as HTMLElement).click()
+    return { text: 'Sent one click to the verified POST form. Check the service for its result.', navigationPending: true }
+  }
   if (el instanceof HTMLAnchorElement) {
     const target = el.target.trim().toLowerCase()
     const sameFrameTarget = target === '' || target === '_self'
@@ -563,6 +589,7 @@ async function typeAction(args: Record<string, unknown>, ctx: ActionContext): Pr
   if (text === '') throw new ActionError('bad-args', 'text must not be empty.')
   const replace = args.replace === true
   const el = elementOrThrow(ctx.ids, index)
+  if (args.localPageUrl !== undefined && isSensitiveField(el)) throw new ActionError('bad-args', 'Fill sensitive fields manually.')
   if (isFieldReadOnly(el)) throw new ActionError('field-readonly', `Field [${index}] is read-only for direct editing. Do not force this edit; choose another writable control or ask the user.`)
   const editableHost = !(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) && isEditable(el)
     ? editingHost(el) ?? el : undefined
@@ -610,6 +637,7 @@ async function selectAction(args: Record<string, unknown>, ctx: ActionContext): 
   if (!(el instanceof HTMLSelectElement) || el.multiple) {
     throw new ActionError('action-failed', `Element [${index}] is not a supported single-select control.`)
   }
+  if (args.localPageUrl !== undefined && isSensitiveField(el)) throw new ActionError('bad-args', 'Fill sensitive fields manually.')
   if (isFieldReadOnly(el)) throw new ActionError('field-readonly', `Field [${index}] is read-only for direct editing. Do not force this edit; choose another writable control or ask the user.`)
   const option = optionIndex < SELECT_OPTION_LIMIT ? el.options.item(optionIndex) : null
   if (option === null || option.matches(':disabled')) {
@@ -737,7 +765,9 @@ async function navigateAction(args: Record<string, unknown>, ctx: ActionContext)
   // Cross-document navigation unloads this content script and destroys the
   // tabs.sendMessage response port before any await settles — so answer
   // FIRST, then navigate in a fresh task. The model re-snapshots after load.
-  setTimeout(() => { location.href = parsed.href }, 0)
+  setTimeout(() => {
+    if (args.localPageUrl === undefined || location.href === args.localPageUrl) location.href = parsed.href
+  }, 0)
   return {
     text: `Navigating to ${parsed.href}. Call browser_snapshot again after the page loads.`,
     navigationPending: true,
@@ -775,7 +805,33 @@ function readScope(args: Record<string, unknown>, ctx: ActionContext): Document 
   throw new ActionError('element-stale', 'The observed read scope is no longer accessible. Take a fresh snapshot.')
 }
 
+async function versionedDocumentAction(url: string, spec: unknown, includeImages: boolean): Promise<ActionResult> {
+  try {
+    return { text: 'Read versioned document.', document: await readLocalDocument(url, spec, includeImages) }
+  } catch (error) {
+    if (error instanceof VersionedDocumentError) throw new ActionError(error.code, error.message)
+    throw new ActionError('document-source-unavailable', DOCUMENT_READ_MESSAGES['document-source-unavailable'])
+  }
+}
+
 async function getTextAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
+  if (args.document !== undefined) {
+    const parsed = versionedDocumentRequest.safeParse(args.document)
+    if (!parsed.success) throw new ActionError('bad-args', 'Use an exact document URL and three valid selectors.')
+    const { expectedUrl, ...spec } = parsed.data
+    return versionedDocumentAction(expectedUrl, spec, false)
+  }
+  if (typeof args.localPageUrl === 'string') {
+    if (args.localJsonUrl !== undefined) return { text: await readLocalJson(args.localJsonUrl) }
+    if (args.localJenkinsLog !== undefined) return { text: JSON.stringify(await readLocalJenkinsCheckout(args.localJenkinsLog)) }
+    if (args.localDocument !== undefined) {
+      return versionedDocumentAction(args.localPageUrl, args.localDocument, true)
+    }
+    const matches = typeof args.selector === 'string' ? document.querySelectorAll(args.selector) : undefined
+    if (matches !== undefined && matches.length !== 1) throw new ActionError('bad-args', 'Choose a selector that matches one element.')
+    const { text, truncated } = truncate(componentText(matches?.[0] ?? document), 8_000)
+    return { text: text + (truncated > 0 ? `\n(Truncated ${truncated} characters.)` : '') }
+  }
   if (args.elementRef !== undefined) {
     const scope = readScope(args, ctx)
     let source: Document | ShadowRoot | Element = scope

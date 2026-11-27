@@ -9,7 +9,9 @@
  */
 
 import { DEFAULT_SNAPSHOT_MAX_CHARS } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
+import { httpOrigin, type IframeScope } from '@eilyeee/dsh-browser-stride/src/iframe-scopes.ts'
 import { parseToolFeedback } from '@eilyeee/dsh-browser-stride/src/tool-feedback.ts'
+import { jenkinsQueueId, localDocumentResult, requestsJenkinsQueueReceipt } from '@eilyeee/dsh-browser-stride/src/local-browser-contract.ts'
 import type { ToolError } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 import { parseElementRef } from '@eilyeee/dsh-browser-stride/src/contracts/ids.ts'
 import {
@@ -17,6 +19,7 @@ import {
   frameDocumentKey,
   frameOrigin,
   listTabFrames,
+  sortTabFrames,
   type TabFrame,
 } from './frames.ts'
 import { untrustedContentBudget, wrapUntrustedContent } from '../security/untrusted.ts'
@@ -25,7 +28,7 @@ import { approvalPromptForCall, originFromUrl } from './authorization.ts'
 import { waitForNextDocumentReady } from './navigation.ts'
 import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
 import { getUiLocale } from '../i18n.ts'
-import { debuggerPages, sendPageMessage, PageDispatchRevoked, type PageDispatch } from './debugger-pages.ts'
+import { AutomaticPageTargetChanged, debuggerPages, sendPageMessage, PageDispatchRevoked, type PageDispatch } from './debugger-pages.ts'
 import { readWithin } from './native-wait.ts'
 import type { CreatedPageAccess } from './page-access.ts'
 import { selectionAttemptSummary, type SelectionAttemptStatus } from './selection-attempts.ts'
@@ -105,6 +108,10 @@ const STATE_CHANGING_PAGE_TOOLS = new Set([
   'browser_forward',
   'browser_reload',
 ])
+const IFRAME_TOOLS = new Set([
+  'browser_snapshot', 'browser_get_text', 'browser_wait', 'browser_measure_layout',
+  'browser_click', 'browser_type', 'browser_select', 'browser_press', 'browser_scroll',
+])
 /** Tools that operate on the browser tab collection rather than one page document. */
 export const TAB_MANAGEMENT_TOOL_NAMES = new Set([
   'browser_list_tabs',
@@ -168,6 +175,8 @@ export interface TabManagementContext {
   observationScope?: string
   /** Original document, permission, connection and Host scope for visual observations. */
   visualAuthority?: VisualAuthority
+  /** Exact origin pairs negotiated with the authenticated Host. */
+  iframeScopes?: readonly IframeScope[]
   /** Immutable admission scope contains no authorized pages; return no metadata. */
   emptyAuthorizedScope?: boolean
   /** Controlled tab for the calling session, when one still exists. */
@@ -219,13 +228,15 @@ async function sendAction(
   includePageDelta: boolean = false,
   dispatch?: PageDispatch,
 ): Promise<unknown> {
-  return sendPageMessage(tabId, {
+  const message = {
     type: 'DSH_ACTION',
     action: call.name,
     args: withoutFrame(call.args),
     ...budget === undefined ? {} : { budget },
     ...includePageDelta ? { includePageDelta: true } : {},
-  }, frame.documentId === undefined ? { frameId: frame.frameId } : { documentId: frame.documentId }, dispatch)
+  }
+  if (frame.send !== undefined) return frame.send(message, dispatch)
+  return sendPageMessage(tabId, message, frame.documentId === undefined ? { frameId: frame.frameId } : { documentId: frame.documentId }, dispatch)
 }
 
 function contentScriptReceiverMissing(error: unknown): boolean {
@@ -369,7 +380,7 @@ function withoutFrame(args: Record<string, unknown>): Record<string, unknown> {
 function requestedFrame(args: Record<string, unknown>): number {
   const value = args.frame
   if (value === undefined) return 0
-  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) return -1
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) return -1
   return value
 }
 
@@ -513,6 +524,9 @@ async function snapshotAllFrames(
   // without deriving removals from another call's internal frame inventory.
   if (selected.length < frames.length) sections.push('\n(Additional iframes omitted by the snapshot budget.)')
 
+  if (call.args.localIframeOrigin !== undefined && ![...capturedDocuments.keys()].some(frameId => frameId !== 0)) {
+    return unavailable('No authorized iframe document could be observed. Snapshot the portal again when the iframe is ready.', 'target-navigated')
+  }
   snapshotDocumentsByTab.set(tabId, capturedDocuments)
   snapshotReviewControls.set(tabId, capturedControls)
   snapshotEpochsByTab.set(tabId, capturedEpochs)
@@ -616,7 +630,8 @@ async function dispatchOnce(
   const deltaBoundary = budget.maxChars - MAX_ACTION_STATUS_CHARS - ACTION_DELTA_GUIDANCE.length - 3
   const deltaChars = Math.max(0, untrustedContentBudget(deltaBoundary) - (frame.frameId === 0 ? 0 : frameHeader(frame).length + 1))
   const requestPageDelta = includeActionDelta && hasSnapshotBaseline && ACTION_DELTA_TOOLS.has(call.name) && deltaChars > 0
-  const navigationWait = includeActionDelta && isNavigationCandidateTool(call.name)
+  const autonomousReload = call.args.localAutonomousWiki === true && call.name === 'browser_reload'
+  const navigationWait = frame.send === undefined && (includeActionDelta || autonomousReload) && isNavigationCandidateTool(call.name)
     ? waitForNextDocumentReady(tabId, frameId, frame.documentId, signal)
     : undefined
   let response: unknown
@@ -651,6 +666,16 @@ async function dispatchOnce(
     if (preparedMenu && contentScriptReceiverMissing(error)) return unavailable('The prepared design zoom selection could not be delivered. Do not replay the operation.')
     throw error
   }
+  // A committed Jenkins POST may finish after the caller's timer. Relay
+  // only its receipt while the original connection and target still own it.
+  if (!signal?.aborted && targetStillAllowed?.() !== false && requestsJenkinsQueueReceipt(call.name, call.args)
+    && isToolAnswer(response) && response.ok) {
+    const queue = jenkinsQueueId.safeParse((response.result as { jenkinsQueueId?: unknown } | undefined)?.jenkinsQueueId)
+    if (queue.success) {
+      navigationWait?.cancel()
+      return { ok: true, result: { text: 'Read the new Jenkins queue ID from this submission.', jenkinsQueueId: queue.data } }
+    }
+  }
   if (isCancelled(call, signal)) {
     navigationWait?.cancel()
     return cancelled()
@@ -668,6 +693,12 @@ async function dispatchOnce(
     const ready = await navigationWait.ready
     if (isCancelled(call, signal)) return cancelled()
     if (targetStillAllowed?.() === false) return targetChanged()
+    if (autonomousReload) {
+      if (!ready) return unavailable('The Wiki document did not finish reloading.', 'document-source-unavailable')
+      const refreshed = await chrome.tabs.get(tabId)
+      return refreshed.url === call.args.localPageUrl && refreshed.pendingUrl === undefined && requestCurrent()
+        ? { ok: true, result: { text } } : targetChanged()
+    }
     if (ready) {
       try {
         const snapshot = await snapshotAfterNavigation(tabId, call, text, budget, requestCurrent)
@@ -679,6 +710,24 @@ async function dispatchOnce(
     }
   } else {
     navigationWait?.cancel()
+  }
+  if (call.name === 'browser_get_text') {
+    if (call.args.localPageUrl !== undefined && (call.args.localJsonUrl !== undefined || call.args.localJenkinsLog !== undefined)) {
+      // The local service needs an atomic JSON result, and is outside the model tool surface.
+      return { ok: true, result: { text } }
+    }
+    const localDocument = call.args.localPageUrl !== undefined && call.args.localDocument !== undefined
+    if (localDocument || call.args.document !== undefined) {
+      const document = localDocumentResult.safeParse((response.result as { document?: unknown } | undefined)?.document)
+      if (!document.success) return unavailable('The versioned document has an invalid result.', 'document-source-unavailable')
+      if (localDocument) return { ok: true, result: { text: 'Read versioned document.', document: document.data } }
+      const { materials: _materials, ...fields } = document.data
+      const content = JSON.stringify(fields)
+      if (content.length > untrustedContentBudget(budget.maxChars)) {
+        return unavailable('The document exceeds the text sharing budget. Increase the budget and read it again.')
+      }
+      return { ok: true, result: { text: wrapUntrustedContent(content, budget.maxChars) } }
+    }
   }
   if (call.name === 'browser_get_text' || call.name === 'browser_measure_layout') {
     // A partial JSON measurement can silently lose its comparison or nulls.
@@ -936,7 +985,28 @@ export async function dispatchToolCall(
   if (call.name === 'browser_click_at' && !hasVisualObservation(tab.id, call.args.screenshotRef, tabManagement.visualAuthority)) {
     return staleScreenshot()
   }
-  const frames = await listTabFrames(tab.id, tab.url)
+  const localClient = call.args.localPageUrl !== undefined
+  const iframeOrigin = localClient && typeof call.args.localIframeOrigin === 'string' ? call.args.localIframeOrigin : undefined
+  const authority = tabManagement.visualAuthority
+  const pageUrl = tab.url ?? ''
+  const parentOrigin = httpOrigin(pageUrl)
+  const childOrigins = new Set((tabManagement.iframeScopes ?? [])
+    .filter(scope => scope.parentOrigin === parentOrigin)
+    .map(scope => scope.childOrigin))
+  const tabFrames = async () => {
+    const discovered = await listTabFrames(tab.id!, tab.url)
+    const found = localClient ? discovered.filter(frame => frame.frameId === 0) : discovered
+    if (localClient && (iframeOrigin === undefined || !childOrigins.has(iframeOrigin))) return found
+    if (parentOrigin === undefined || childOrigins.size === 0 || authority === undefined || targetStillAllowed === undefined
+      || !IFRAME_TOOLS.has(call.name) || call.name !== 'browser_snapshot' && requestedFrame(call.args) === 0
+      || !found.some(frame => frame.frameId === 0)) return found
+    const current = () => !isCancelled(call, signal) && targetStillAllowed() && authority.current()
+    if (!current()) return found
+    const scoped = await debuggerPages.iframeFrames(tab.id!, pageUrl, childOrigins, current, authority.captureCurrent ?? authority.current, signal)
+      .catch(() => [])
+    return sortTabFrames([...found, ...scoped.filter(frame => iframeOrigin === undefined || frame.url === iframeOrigin)])
+  }
+  const frames = await tabFrames()
   if (isCancelled(call, signal)) return cancelled()
   if (targetStillAllowed?.() === false) return targetChanged()
   if (frames.length === 0) return unavailable('This page is not accessible. Click the DSH Stride toolbar icon on this tab to authorize it.')
@@ -960,7 +1030,7 @@ export async function dispatchToolCall(
   }
   let executionFrames = frames
   if (approval !== undefined) {
-    executionFrames = await listTabFrames(tab.id, tab.url)
+    executionFrames = await tabFrames()
     if (isCancelled(call, signal)) return cancelled()
     if (targetStillAllowed?.() === false) return targetChanged()
     const refreshedApproval = approvalPromptForCall(call, sharePageContent, executionFrames)
@@ -984,7 +1054,7 @@ export async function dispatchToolCall(
       effectiveBudget,
       signal,
       targetStillAllowed,
-      tabManagement.unrestrictedAccess || sharePageContent === 'auto',
+      !localClient && (tabManagement.unrestrictedAccess || sharePageContent === 'auto'),
       tabManagement.commitAction,
       tabManagement.rollbackActionCommit,
       tabManagement.visualAuthority,
@@ -998,7 +1068,7 @@ export async function dispatchToolCall(
     // Recover the packaged receiver only on the already-authorized native target.
     // This also covers same-origin documents loaded after the toolbar grant.
     try {
-      await injectContentScript(tab.id, executionFrames)
+      await injectContentScript(tab.id, executionFrames.filter(frame => frame.send === undefined))
     } catch {
       return await dispatchTabNativeTool(tab.id, tab.url, tab.title, tab.windowId, call, effectiveBudget, signal, targetStillAllowed, tabManagement.commitAction)
         ?? unavailable('The content script could not be loaded on this page. Its DOM does not support browser operations.')
@@ -1006,7 +1076,7 @@ export async function dispatchToolCall(
     try {
       if (isCancelled(call, signal)) return cancelled()
       if (targetStillAllowed?.() === false) return targetChanged()
-      const refreshedFrames = await listTabFrames(tab.id, tab.url)
+      const refreshedFrames = await tabFrames()
       if (isCancelled(call, signal)) return cancelled()
       if (targetStillAllowed?.() === false) return targetChanged()
       const refreshedTargetError = validateElementTarget(call, tab.id, refreshedFrames)
@@ -1026,7 +1096,7 @@ export async function dispatchToolCall(
         effectiveBudget,
         signal,
         targetStillAllowed,
-        tabManagement.unrestrictedAccess || sharePageContent === 'auto',
+        !localClient && (tabManagement.unrestrictedAccess || sharePageContent === 'auto'),
         tabManagement.commitAction,
         tabManagement.rollbackActionCommit,
         tabManagement.visualAuthority,
@@ -1042,6 +1112,10 @@ function staleScreenshot(): ToolAnswer {
 }
 
 function validateFrameTarget(call: ToolCall, frames: TabFrame[]): ToolAnswer | undefined {
+  if (call.args.localIframeOrigin !== undefined && !frames.some(frame => frame.send !== undefined
+    && frame.url === call.args.localIframeOrigin && (call.name === 'browser_snapshot' || frame.frameId === requestedFrame(call.args)))) {
+    return unavailable('The selected iframe is unavailable. Snapshot the authorized portal again.', 'target-navigated')
+  }
   if (call.name === 'browser_snapshot') return undefined
   const frameId = requestedFrame(call.args)
   if (frameId < 0) return { ok: false, error: { code: 'action-failed', message: 'frame must be a non-negative integer.' } }
@@ -1224,12 +1298,16 @@ export async function dispatchOpenTab(
       created = await chrome.tabs.get(tabId)
       ready = true
     } catch (error) {
+      if (error instanceof AutomaticPageTargetChanged) return rollback(unavailable('The Wiki opened at a different URL.', 'target-navigated'))
       const detail = error instanceof Error ? error.message.slice(0, 300) : 'Automatic control is unavailable.'
       return rollback(isCancelled(call, signal) ? cancelled() : unavailable(`The new tab could not be authorized for automatic control. ${detail} Check the extension settings and browser debugger status before a new request.`))
     }
   } else ready = await navigationWait.ready
   if (isCancelled(call, signal)) {
     return rollback(cancelled())
+  }
+  if (call.args.localAutonomousWiki === true && created.url !== parsed.href) {
+    return rollback(unavailable('The Wiki opened at a different URL.', 'target-navigated'))
   }
   try {
     commitAction?.()
@@ -1247,6 +1325,7 @@ export async function dispatchOpenTab(
   const status = active
     ? `Opened a new tab at ${parsed.href}.`
     : `Opened a new background tab at ${parsed.href}.`
+  if (call.args.localAutonomousWiki === true) return { ok: true, result: { text: status } }
   if (!ready || sharePageContent === 'off' || isCancelled(call, signal)) {
     return {
       ok: true,

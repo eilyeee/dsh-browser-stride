@@ -12,6 +12,9 @@
  * @module
  */
 
+import type { DocumentReadErrorCode } from './local-browser-contract.ts'
+import { isIframeScopes, type IframeScope } from './iframe-scopes.ts'
+
 /** WebSocket pathname the bridge plugin registers on the host webserver. */
 export const BRIDGE_PATH = '/ext/bridge'
 
@@ -108,6 +111,8 @@ export function isRunTabMutation(name: string): boolean { return TAB_TOOLS.has(n
 
 /** Error codes a tool call may settle with. Open set: consumers must tolerate unknown codes. */
 export type ToolErrorCode =
+  | DocumentReadErrorCode
+  | 'session-busy'
   | 'write-blocked-unconfirmed'
   | 'element-stale'
   | 'field-readonly'
@@ -129,6 +134,7 @@ export type ToolErrorCode =
   | 'action-conflict'
   | 'receipt-unavailable'
   | 'execution-denied'
+  | 'guarded-form-rejected'
 
 /** Host-issued logical command identity. It never grants browser permission. */
 export interface ToolActionIdentity { actionId: string; requestDigest: string }
@@ -201,6 +207,14 @@ export interface BridgeCaps {
   elementReadScope?: boolean
   /** Delta snapshots require a named, current and fully rendered baseline. */
   snapshotBase?: boolean
+  /** Chrome offers an empty list. The authenticated Host supplies its exact origin pairs. */
+  iframeScopes?: IframeScope[]
+  localBrowser?: boolean
+  localAutonomousWiki?: boolean
+  localGuardedForms?: boolean
+  localJenkinsQueue?: boolean
+  /** Read the exact selected top-level document with a verified source version. */
+  versionedDocument?: boolean
   /** Native panel-owned, bounded Chrome Console/Network metadata. */
   pageDiagnostics?: boolean
   /** Native one-use acknowledgement of uncertainty; never business verification. */
@@ -439,6 +453,12 @@ function isCaps(value: unknown): value is BridgeCaps {
     && (caps.elementScroll === undefined || typeof caps.elementScroll === 'boolean')
     && (caps.elementReadScope === undefined || typeof caps.elementReadScope === 'boolean')
     && (caps.snapshotBase === undefined || typeof caps.snapshotBase === 'boolean')
+    && (caps.iframeScopes === undefined || isIframeScopes(caps.iframeScopes))
+    && (caps.localBrowser === undefined || typeof caps.localBrowser === 'boolean')
+    && (caps.localGuardedForms === undefined || typeof caps.localGuardedForms === 'boolean')
+    && (caps.localAutonomousWiki === undefined || typeof caps.localAutonomousWiki === 'boolean')
+    && (caps.localJenkinsQueue === undefined || typeof caps.localJenkinsQueue === 'boolean')
+    && (caps.versionedDocument === undefined || typeof caps.versionedDocument === 'boolean')
     && (caps.pageDiagnostics === undefined || typeof caps.pageDiagnostics === 'boolean')
     && (caps.manualRecovery === undefined || typeof caps.manualRecovery === 'boolean')
     && (caps.guidedRecovery === undefined || typeof caps.guidedRecovery === 'boolean')

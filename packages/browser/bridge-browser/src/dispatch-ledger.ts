@@ -6,22 +6,24 @@ import { canonicalize, makeActionId } from './contracts/ids.ts'
 import { isReadOnlyBrowserTool } from './protocol.ts'
 import { toolCommandMaterial } from './tool-identity.ts'
 import { nativeReviewSchema, type NativeReview } from './native-review.ts'
+import { jenkinsQueueId, LOCAL_REQUEST_PREFIX, requestsJenkinsQueueReceipt } from './local-browser-contract.ts'
 
 const id = z.string().min(1).max(200).refine(value => value.trim() === value)
 const time = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER)
 const reason = z.enum(['cancelled', 'expired', 'connection-closed', 'send-failed', 'interrupted'])
 const errorCode = z.enum([
   'no-active-tab', 'content-unavailable', 'action-failed', 'timeout', 'bridge-closed', 'bad-args', 'internal', 'unknown',
-  'action-duplicate', 'action-conflict', 'receipt-unavailable', 'execution-denied',
+  'action-duplicate', 'action-conflict', 'receipt-unavailable', 'execution-denied', 'guarded-form-rejected',
 ])
-const receipt = z.strictObject({ ok: z.boolean(), errorCode: errorCode.optional(), readbackUnconfirmed: z.literal(true).optional(), notApplied: z.literal(true).optional() })
-  .refine(value => value.ok ? value.errorCode === undefined && value.notApplied === undefined : value.errorCode !== undefined && value.readbackUnconfirmed === undefined)
+const receipt = z.strictObject({ ok: z.boolean(), errorCode: errorCode.optional(), readbackUnconfirmed: z.literal(true).optional(), notApplied: z.literal(true).optional(), jenkinsQueueId: jenkinsQueueId.optional() })
+  .refine(value => value.ok ? value.errorCode === undefined && value.notApplied === undefined && !(value.readbackUnconfirmed && value.jenkinsQueueId)
+    : value.errorCode !== undefined && value.readbackUnconfirmed === undefined && value.jenkinsQueueId === undefined)
 // Packaged fixed pre-effect errors. Peer text and arbitrary unknown codes are
 // never promoted to this classification; a view menu may still be open.
-const NO_EFFECT_CODES = new Set(['element-stale', 'target-navigated', 'permission-required', 'approval-denied', 'approval-unavailable', 'approval-timeout', 'no-active-tab', 'bad-args', 'field-readonly', 'design-zoom-not-selected'])
-export function transportReceipt(ok: boolean, code?: string, readbackUnconfirmed = false, notApplied = false): z.infer<typeof receipt> {
+const NO_EFFECT_CODES = new Set(['element-stale', 'target-navigated', 'permission-required', 'approval-denied', 'approval-unavailable', 'approval-timeout', 'no-active-tab', 'bad-args', 'field-readonly', 'design-zoom-not-selected', 'guarded-form-rejected'])
+export function transportReceipt(ok: boolean, code?: string, readbackUnconfirmed = false, notApplied = false, queueId?: number): z.infer<typeof receipt> {
   const parsed = errorCode.safeParse(code)
-  return ok ? { ok: true, ...(readbackUnconfirmed ? { readbackUnconfirmed: true as const } : {}) }
+  return ok ? { ok: true, ...(readbackUnconfirmed ? { readbackUnconfirmed: true as const } : queueId === undefined ? {} : { jenkinsQueueId: queueId }) }
     : { ok: false, errorCode: parsed.success ? parsed.data : 'unknown', ...((notApplied || NO_EFFECT_CODES.has(code ?? '')) ? { notApplied: true as const } : {}) }
 }
 const recordSchema = z.strictObject({
@@ -34,6 +36,7 @@ const recordSchema = z.strictObject({
   targetBinding: id.optional(),
   taskPageKey: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   effect: z.enum(['read', 'write']),
+  expectsJenkinsQueue: z.literal(true).optional(),
   state: z.enum(['prepared', 'sent_unconfirmed', 'not_sent', 'unresolved', 'returned']),
   preparedAt: time, expiresAt: time,
   dispatchMarkedAt: time.optional(), settledAt: time.optional(),
@@ -46,6 +49,8 @@ const recordSchema = z.strictObject({
   const marked = row.dispatchMarkedAt !== undefined
   const settled = row.settledAt !== undefined
   const valid = row.expiresAt > 0
+    && (row.expectsJenkinsQueue !== true || row.name === 'browser_click' && row.requestId.startsWith(LOCAL_REQUEST_PREFIX))
+    && (row.receipt?.jenkinsQueueId === undefined || row.expectsJenkinsQueue === true)
     && (row.nativeReview === undefined || (row.effect === 'write' && (row.state === 'unresolved' || row.state === 'returned') && row.nativeReview.reviewedAt >= row.preparedAt))
     && (row.nativeReviewInvalidated !== true || row.nativeReview !== undefined)
     && (row.previousNativeReview === undefined || row.nativeReview !== undefined)
@@ -165,6 +170,7 @@ export class BrowserDispatchLedger {
         execution: metadata.runId === undefined ? { kind: 'legacy' } : { kind: 'run', runId: metadata.runId, controlRevision: metadata.controlRevision! },
         ...(metadata.sessionId === undefined ? {} : { sessionId: metadata.sessionId }) })).digest('hex')
       const candidate = recordSchema.parse({ ...metadata, actionId, requestDigest, transportDigest, identityVersion: 4,
+        ...(metadata.requestId.startsWith(LOCAL_REQUEST_PREFIX) && requestsJenkinsQueueReceipt(metadata.name, args) ? { expectsJenkinsQueue: true } : {}),
         effect: isReadOnlyBrowserTool(metadata.name) ? 'read' : 'write', state: 'prepared', preparedAt: Date.now() })
       await this.persist(candidate)
       return structuredClone(candidate)

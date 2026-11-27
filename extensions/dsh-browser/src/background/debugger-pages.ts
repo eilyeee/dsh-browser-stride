@@ -2,6 +2,7 @@
 import type { TabFrame } from './frames.ts'
 import { MAX_SCREENSHOT_BASE64, type VisualObservation } from '@eilyeee/dsh-browser-stride/src/visual.ts'
 import { readWithin } from './native-wait.ts'
+import { DebuggerIframes } from './debugger-iframes.ts'
 
 interface Session {
   current: () => boolean
@@ -10,9 +11,10 @@ interface Session {
   context?: { document: string; id: string }
   preparing?: Promise<string>
   defaultContexts?: Map<number, { frameId: string; uniqueId: string }>
+  iframes?: DebuggerIframes
 }
 interface Frame { id: string; loaderId: string; url: string }
-interface VisualConnection { valid: boolean; attached: boolean; current: () => boolean; preparing?: Promise<void>; closing?: Promise<void>; visualUsed?: boolean; readers?: Set<object>; defaultContexts?: Map<number, { frameId: string; uniqueId: string }> }
+interface VisualConnection { valid: boolean; attached: boolean; current: () => boolean; preparing?: Promise<void>; closing?: Promise<void>; retained?: boolean; readers?: Set<object>; defaultContexts?: Map<number, { frameId: string; uniqueId: string }>; iframes?: DebuggerIframes }
 interface Evaluation { result?: { value?: unknown }; exceptionDetails?: unknown }
 const CONTROLLER_WORLD = 'DSH Stride controller'
 const VISUAL_CAPTURES_KEY = 'dshVisualCaptures'
@@ -40,6 +42,8 @@ export interface ReadDebugLease {
 export class PageDispatchRevoked extends Error {
   constructor() { super('The original browser request was revoked before dispatch.') }
 }
+
+export class AutomaticPageTargetChanged extends Error {}
 function commitDispatch(dispatch?: PageDispatch): void {
   if (dispatch?.current?.() === false) throw new PageDispatchRevoked()
   dispatch?.commit?.()
@@ -72,6 +76,10 @@ export class DebuggerPages {
       this.onDetached(target.tabId)
     })
     if (typeof chrome !== 'undefined') chrome.debugger?.onEvent?.addListener((target, method, params) => {
+      if (target.tabId !== undefined) {
+        const owner = this.sessions.get(target.tabId) ?? this.captures.get(target.tabId)
+        owner?.iframes?.event(target.sessionId, method, params as Record<string, unknown> | undefined)
+      }
       if (target.tabId !== undefined && target.sessionId === undefined) {
         const owner = this.sessions.get(target.tabId) ?? this.captures.get(target.tabId)
         if (owner !== undefined) {
@@ -159,7 +167,7 @@ export class DebuggerPages {
     this.allowed(tabId, session)
     return answer
   }
-  async attachCreated(tabId: number, current: () => boolean, signal?: AbortSignal, timeoutMs = 8000): Promise<void> {
+  async attachCreated(tabId: number, current: () => boolean, signal?: AbortSignal, timeoutMs = 8000, expectedUrl?: string): Promise<void> {
     if (chrome.debugger === undefined || !current() || this.has(tabId) || this.retiring.has(tabId) || this.captures.has(tabId)) throw new Error('Automatic page control is unavailable.')
     const session: Session = { current, worlds: new Map() }
     this.sessions.set(tabId, session)
@@ -172,6 +180,7 @@ export class DebuggerPages {
           bounded.throwIfAborted()
           this.allowed(tabId, session)
           if (isCommittedHttpTab(tab)) {
+            if (expectedUrl !== undefined && tab.url !== expectedUrl) throw new AutomaticPageTargetChanged()
             try {
               session.attachment = chrome.debugger.attach({ tabId }, '1.3')
               await session.attachment
@@ -207,7 +216,7 @@ export class DebuggerPages {
   prepareViewportCapture(tabId: number, current: () => boolean, authorization: () => boolean): Promise<void> {
     return this.prepareAttachment(tabId, current, authorization, true)
   }
-  private async prepareAttachment(tabId: number, current: () => boolean, authorization: () => boolean, visual = false): Promise<void> {
+  private async prepareAttachment(tabId: number, current: () => boolean, authorization: () => boolean, retain = false): Promise<void> {
     await this.recoverCaptures()
     if (!current() || !authorization() || this.retiring.has(tabId)) throw new PageDispatchRevoked()
     if (this.has(tabId)) { this.session(tabId); return }
@@ -218,11 +227,11 @@ export class DebuggerPages {
     const live = this.captures.get(tabId)
     if (live !== undefined) {
       if (!live.attached) throw new Error('A visual connection is still being prepared.')
-      if (visual) live.visualUsed = true
+      if (retain) live.retained = true
       return
     }
     if (chrome.debugger === undefined) throw new Error('Chrome visual capture is unavailable.')
-    const lease: VisualConnection = { valid: true, attached: false, current: authorization, visualUsed: visual }
+    const lease: VisualConnection = { valid: true, attached: false, current: authorization, retained: retain }
     this.captures.set(tabId, lease)
     const preparing = (async () => {
       try {
@@ -258,7 +267,7 @@ export class DebuggerPages {
       && (session !== undefined ? this.sessions.get(tabId) === session && session.current()
         : capture !== undefined && this.captures.get(tabId) === capture && capture.valid && capture.attached && capture.current())
     if (!owned()) {
-      if (capture !== undefined && !capture.visualUsed && (capture.readers?.size ?? 0) === 0 && this.captures.get(tabId) === capture) await this.detachVisual(tabId)
+      if (capture !== undefined && !capture.retained && (capture.readers?.size ?? 0) === 0 && this.captures.get(tabId) === capture) await this.detachVisual(tabId)
       throw new PageDispatchRevoked()
     }
     if (capture !== undefined) (capture.readers ??= new Set()).add(owner)
@@ -268,7 +277,7 @@ export class DebuggerPages {
       active = false
       for (const stop of [...subscriptions]) stop()
       capture?.readers?.delete(owner)
-      releasing = capture !== undefined && !capture.visualUsed && capture.readers?.size === 0 && this.captures.get(tabId) === capture
+      releasing = capture !== undefined && !capture.retained && capture.readers?.size === 0 && this.captures.get(tabId) === capture
         ? this.detachVisual(tabId) : Promise.resolve()
       return releasing
     }
@@ -279,7 +288,7 @@ export class DebuggerPages {
         if (!['Page.enable', 'Page.getFrameTree', 'Runtime.enable', 'Runtime.disable', 'Network.enable', 'Network.disable'].includes(method)) throw new Error('Read debugger command is not allowed.')
         if (!owned()) throw new PageDispatchRevoked()
         // An automatic DOM controller depends on Runtime events too.
-        if (method === 'Runtime.disable' && session !== undefined) return undefined as T
+        if (method === 'Runtime.disable' && (session !== undefined || capture?.iframes !== undefined)) return undefined as T
         const result = await chrome.debugger.sendCommand({ tabId }, method, params) as T
         if (!owned()) throw new PageDispatchRevoked()
         if (method === 'Runtime.disable') (session ?? capture)?.defaultContexts?.clear()
@@ -295,7 +304,7 @@ export class DebuggerPages {
         return stop
       },
       detachIfExclusive: async () => {
-        if (!active || session !== undefined || capture === undefined || capture.visualUsed
+        if (!active || session !== undefined || capture === undefined || capture.retained
           || this.captures.get(tabId) !== capture || capture.readers?.size !== 1 || !capture.readers.has(owner)) return false
         // Release synchronously withdraws this owner before starting detach.
         await release()
@@ -383,18 +392,43 @@ export class DebuggerPages {
   }
   async frames(tabId: number): Promise<TabFrame[]> {
     const frame = await this.frame(tabId, this.session(tabId))
-    // Automatic control currently supports the top document only. Child frames get no authority.
     return [{ frameId: 0, parentFrameId: -1, url: frame.url, documentId: `${frame.id}:${frame.loaderId}` }]
+  }
+  async iframeFrames(
+    tabId: number, parentUrl: string, childOrigins: ReadonlySet<string>, current: () => boolean,
+    authorization: () => boolean, signal?: AbortSignal,
+  ): Promise<TabFrame[]> {
+    await readWithin(FRAME_READ_TIMEOUT_MS, bounded => this.prepareAttachment(tabId, () => !bounded.aborted && current(), authorization, true), signal)
+    const session = this.sessions.get(tabId), capture = this.captures.get(tabId)
+    const owner = session ?? capture
+    if (owner === undefined) throw new PageDispatchRevoked()
+    const owned = () => owner.current()
+      && (session !== undefined ? this.sessions.get(tabId) === session
+        : capture?.valid === true && capture.attached && this.captures.get(tabId) === capture)
+    owner.iframes ??= new DebuggerIframes(async <T>(
+      sessionId: string | undefined, method: string, params?: object, dispatch?: PageDispatch,
+    ): Promise<T> => {
+      if (!owned()) throw new PageDispatchRevoked()
+      commitDispatch(dispatch)
+      const target = sessionId === undefined ? { tabId } : { tabId, sessionId }
+      const result = await chrome.debugger.sendCommand(target, method, params) as T
+      if (!owned()) throw new PageDispatchRevoked()
+      return result
+    }, () => this.controllerSource())
+    return owner.iframes.frames(parentUrl, childOrigins, () => owned() && authorization() && current(), signal)
+  }
+  private controllerSource(): Promise<string> {
+    return this.source ??= fetch(chrome.runtime.getURL('debugger-content.js')).then(response => {
+      if (!response.ok) throw new Error('The packaged browser controller is unavailable.')
+      return response.text()
+    }).catch(error => { this.source = undefined; throw error })
   }
   private async context(tabId: number, session: Session, frame: Frame): Promise<string> {
     const document = `${frame.id}:${frame.loaderId}`
     if (session.context?.document === document) return session.context.id
     if (session.preparing !== undefined) { await session.preparing; this.allowed(tabId, session); return this.context(tabId, session, frame) }
     const preparing = (async () => {
-      const source = await (this.source ??= fetch(chrome.runtime.getURL('debugger-content.js')).then(response => {
-        if (!response.ok) throw new Error('The packaged browser controller is unavailable.')
-        return response.text()
-      }).catch(error => { this.source = undefined; throw error }))
+      const source = await this.controllerSource()
       const world = await this.command<{ executionContextId: number }>(tabId, session, 'Page.createIsolatedWorld', {
         frameId: frame.id, worldName: CONTROLLER_WORLD, grantUniveralAccess: false,
       })

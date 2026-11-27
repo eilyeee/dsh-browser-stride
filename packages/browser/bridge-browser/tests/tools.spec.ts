@@ -29,6 +29,18 @@ describe('registerBrowserTools', () => {
     expect(JSON.stringify(result.content)).not.toContain('synthetic-secret')
     expect(JSON.stringify(result.content)).not.toContain('executor diagnostic')
   })
+  it('guides a versioned read back to the authorized document when the target differs', async () => {
+    const h = makeHarness(); registerBrowserTools(h.ctx, h.bridge, { toolTimeoutMs: 1000, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
+    const hook = (h.ctx.on as ReturnType<typeof vi.fn>).mock.calls.find(([name]) => name === 'tools/execute')![1]
+    const failure = async () => ({ isError: true,
+      error: { message: 'Private page details', info: { name: 'BridgeToolError', code: 'target-navigated' } },
+      content: [{ type: 'text', text: 'Private page details' }] })
+    const versioned = await hook({ name: 'browser_get_text', arguments: { document: {} } }, failure)
+    expect(versioned.content[0].text).toContain('browser_follow_tab')
+    expect(versioned.content[0].text).not.toContain('Private page details')
+    const ordinary = await hook({ name: 'browser_get_text', arguments: {} }, failure)
+    expect(ordinary.content[0].text).not.toContain('browser_follow_tab')
+  })
   it('asks for native diagnostic capture only when the extension reports it missing', async () => {
     const h = makeHarness(); registerBrowserTools(h.ctx, h.bridge, { toolTimeoutMs: 1000, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
     const hook = (h.ctx.on as ReturnType<typeof vi.fn>).mock.calls.find(([name]) => name === 'tools/execute')![1]
@@ -295,6 +307,19 @@ describe('registerBrowserTools', () => {
     const exec = { agent: { id: 'read-scope-session' }, signal: new AbortController().signal }
     await execute({elementRef:'obs_test:1',selector:'#panel',region:'#panel',frame:2,sessionId:'forged',javascript:'forged'},exec)
     expect(h.requestTool).toHaveBeenCalledExactlyOnceWith(name==='browser_read_design_styles'?'browser_get_text':name,{elementRef:'obs_test:1',selector:'#panel',frame:2},exec.signal,1000,'read-scope-session')
+  })
+
+  it('pins versioned document reads to the conversation and top frame', async () => {
+    const h = makeHarness()
+    registerBrowserTools(h.ctx, h.bridge, { toolTimeoutMs: 1000, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
+    const execute = h.registered.find(item => item.name === 'browser_get_text')!.definition.execute as (a: unknown, e: unknown) => Promise<unknown>
+    const exec = { agent: { id: 'wiki-session' }, signal: new AbortController().signal }
+    const document = { expectedUrl: 'https://wiki.example.invalid/view?pageId=17', titleSelector: 'h1', contentSelector: 'main', versionSelector: 'meta[name="version"]' }
+    await execute({ document, sessionId: 'forged' }, exec)
+    await expect(execute({ document, frame: 1 }, exec)).rejects.toMatchObject({ code: 'bad-args' })
+    await expect(execute({ document, selector: 'body' }, exec)).rejects.toMatchObject({ code: 'bad-args' })
+    await expect(execute({ document: { ...document, expectedUrl: 'https://user:password@wiki.example.invalid/' } }, exec)).rejects.toMatchObject({ code: 'bad-args' })
+    expect(h.requestTool).toHaveBeenCalledExactlyOnceWith('browser_get_text', { document, frame: 0 }, exec.signal, 1000, 'wiki-session')
   })
 
   it('executes every remaining tool with mapped args', async () => {

@@ -49,6 +49,10 @@ Chrome 可以在扩展设置中开启「自动控制 DSH 新建页面」并保�
 
 对话中提供网页链接时，Stride 默认优先复用网址匹配的已授权页面，保留原页状态。需要单独的副本时，请明确说明“新开一个独立标签页”。同一网站的不同文档不会仅凭域名被合并，详见[选页说明](extensions/dsh-browser/README.zh.md#自动控制-chrome-新页面)。
 
+Chrome 125 及以上支持在已授权的门户内控制跨域的直接 iframe。通过 Host 的 `iframeScopes` 登记门户和子应用的来源对。[Host 配置说明](packages/browser/bridge-browser/README.zh.md#配置)
+
+本机服务可以自主读取 Confluence Wiki。在 `localBrowser.autonomousWiki` 登记专用 `sessionId` 和 `allowedOrigins` 的来源子集 `origins`，并在 `document` 请求中带上 `autoOpen: true`。该模式使用 Chrome 已启用的自动控页和自动内容共享设置，绑定指定的 `/pages/viewpage.action?pageId=<数字>`。版本过期时自动刷新一次并核验新版本。
+
 ### 更新
 
 当前使用源码安装：在原检出目录拉取更新，用项目要求的 Node/pnpm 安装锁定依赖并运行 `pnpm build`，重启 Host，在 `chrome://extensions/` 点击扩展的「重新加载」。重载会清除页面授权，请回到需要控制的原标签页，再点击一次 DSH Stride 工具栏图标；刷新网页不能代替这一步，无需另开页面。保留原扩展安装、相同浏览器配置和 Host 数据即可沿用配对；更换扩展安装身份或清除数据后需要重新配对。Firefox 临时扩展需重新载入。Bridge 和扩展应来自同一检出，不兼容时会提示更新哪一端。
@@ -84,6 +88,7 @@ Host 管理员令牌默认保存在 `$DSH_HOME/ext-bridge-token`，未设置 `DS
 ## 当前能力
 
 - Chrome 可见区域截图附件、绑定截图的画布坐标点击；文本快照、绑定观察的 DOM 控件引用、页面导航、标签管理和划词引用。同一 frame 的新观察会使旧引用失效。
+- Wiki 暴露文档版本时，`browser_get_text` 可以核对并读取当前对话已选中的授权标签页。通过 `document` 提供 `expectedUrl`、`titleSelector`、`contentSelector` 和 `versionSelector`。页面版本与同源响应一致后返回标题、正文和版本。选错页、需要登录、版本过旧会分别提示，刷新时可以继续用原标签页。
 - 通过本机 Harness 会话 API 提供侧栏聊天；聊天图片附件依赖 Host 能力。
 - 页面写操作的用户审批、目标执行前检查、单选下拉框选择，以及输入框和复选框状态回读。控件状态回读不能证明表单已经保存。
 - Host 与扩展分别对写操作排队，保存未确认派发并提供人工逐项核对；自动恢复和通用业务结果核验仍未实现。

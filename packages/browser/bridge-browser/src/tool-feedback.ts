@@ -31,16 +31,16 @@ export function failureFeedback(code: string, readOnly: boolean, notDispatched =
   let state: BrowserToolFeedback['state'] = 'failed'
   switch (code) {
     case 'write-blocked-unconfirmed': kind = 'result_unknown'; state = 'not-applied'; break
-    case 'element-stale': kind = 'target_expired'; state = 'not-applied'; break
+    case 'element-stale': case 'document-version-stale': kind = 'target_expired'; state = 'not-applied'; break
     case 'target-navigated': kind = 'navigated'; state = 'not-applied'; break
-    case 'permission-required': case 'approval-denied': case 'approval-unavailable': case 'approval-timeout':
+    case 'document-login-required': case 'permission-required': case 'approval-denied': case 'approval-unavailable': case 'approval-timeout':
       kind = 'permission_denied'; state = 'not-applied'; break
     case 'no-active-tab': kind = 'target_unavailable'; state = 'not-applied'; break
     case 'bad-args': kind = 'bad_args'; state = 'not-applied'; break
     case 'field-readonly': case 'design-zoom-not-selected': kind = 'action_failed'; state = 'not-applied'; break
     case 'timeout': case 'bridge-closed': case 'action-duplicate': case 'action-conflict': case 'receipt-unavailable': case 'execution-denied':
       kind = readOnly ? 'connection_unavailable' : 'result_unknown'; state = readOnly ? 'failed' : 'uncertain'; break
-    case 'content-unavailable': kind = 'target_unavailable'; state = readOnly ? 'failed' : 'uncertain'; break
+    case 'document-source-unavailable': case 'content-unavailable': kind = 'target_unavailable'; state = readOnly ? 'failed' : 'uncertain'; break
     case 'diagnostics-not-enabled': kind = readOnly ? 'diagnostics_not_enabled' : 'result_unknown'; state = readOnly ? 'failed' : 'uncertain'; break
     case 'action-failed': kind = readOnly ? 'action_failed' : 'result_unknown'; state = readOnly ? 'failed' : 'uncertain'; break
     default: kind = readOnly ? 'internal' : 'result_unknown'; state = readOnly ? 'failed' : 'uncertain'

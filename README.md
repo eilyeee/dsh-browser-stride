@@ -43,6 +43,8 @@ To authorize a page, open it and click the **DSH Stride toolbar icon**. Only tha
 
 On Chrome, enable **Automatically control pages opened by DSH** in extension settings and save to let ordinary DSH chat open and bind new pages without a toolbar click. Chrome requests `debugger` and tab-metadata permissions at installation or upgrade; Stride uses debugger control for newly created tabs while this opt-in is enabled. Explicit screenshots can also attach a visual connection to an already authorized group page; its existing origin restrictions still apply. This is an application restriction, not browser-enforced per-tab isolation. Existing tabs still need separate authorization. Automatic control covers the main HTTP(S) document and follows navigation within that tab. Page sharing and action confirmations retain their settings. Stop control, leaving the group, disabling the setting or disconnecting the debugger revokes control. Worker/browser restarts and extension reloads do not restore automatic page grants. On Chrome, queued `/browser` tasks can also use the explicit **Open a new page and start** control described below. Firefox retains the selected-page flow.
 
+Chrome 125 and later can also control embedded cross-origin apps in an authorized tab. For each direct iframe, configure the portal and app origins in the Host's `iframeScopes`. [Host configuration](packages/browser/bridge-browser/README.md#configuration)
+
 To disconnect, choose **Unpair DSH** in extension settings. This removes the local credential, stops automatic reconnects even after a browser restart, and revokes this installation on the Host when reachable. If DSH is offline or cannot confirm revocation, the extension reports local removal only. Open pages and conversations stay intact. Pair again explicitly to reconnect.
 
 Manual pairing remains available: run `pnpm run pair:browser` in another terminal and enter the one-time code in extension settings. It expires after five minutes and is exchanged for an installation credential. The address is discovered automatically. For a nondefault port set `ws://127.0.0.1:PORT/ext/bridge` in the extension and add `-- issue --url http://127.0.0.1:PORT` to the manual command. Run `pnpm run pair:browser -- list` to see installations or `pnpm run pair:browser -- revoke INSTALLATION_ID` to revoke and disconnect one, including its outstanding pairing requests. Add the same `--url` when needed.
@@ -61,6 +63,30 @@ For the package-name migration, run the installer once after pulling and buildin
 For release packages, download the new version and follow the included README to update the Host plugin and Chrome extension separately. To build those files locally, run `pnpm run release:prepare`. It writes to `.stride-private/releases/<version>/`, using the root package version.
 
 Connected settings show installed Host, DSH, extension and wire versions. Different package versions prompt a coordinated update; older Hosts may omit version metadata. A compatible wire does not establish feature parity. Wait for active work to finish, retain the original DSH home/profile, restart the Host and reload the extension. Reauthorize existing pages afterwards; pairing and task notes remain available.
+
+## Local browser clients
+
+An external process on the same machine can use the paired browser through an opt-in Host route. Build both components from a checkout with this feature. Configure the Host profile with a dedicated service credential, an existing DSH session ID and the exact allowed origins. Keep the secret in the Host and client service environments.
+
+```yaml
+- id: bridge-browser
+  config:
+    localBrowser:
+      credentialEnv: STRIDE_LOCAL_BROWSER_KEY
+      sessionId: YOUR_DSH_SESSION_ID
+      allowedOrigins: ["https://wiki.example.invalid"]
+      allowActions: true
+```
+
+Open the target URL, authorize the tab using the DSH toolbar and select it in the configured session. The route accepts server requests on loopback with `Authorization: Bearer …`. POST JSON to `/ext/local-browser` with `action` and the exact `expectedUrl` of the selected page. `snapshot` returns observed element references. `text` takes an optional CSS `selector`. `document` takes `document` with `titleSelector`, `contentSelector`, `versionSelector` and optional `includeProjectEntries: true`. It compares the visible page version with a fresh, same-origin read and asks for a page reload if they differ.
+
+For unattended Confluence reads, configure localBrowser.autonomousWiki with a dedicated sessionId and a subset origins list from allowedOrigins. Send autoOpen: true with a document request for the exact /pages/viewpage.action?pageId=<number> URL. Chrome must already have automatic tab control and automatic content sharing enabled. Stride keeps the tab scoped to this session and refreshes a stale version once.
+
+For multiple open documents, set `documentSessionIds` to additional sessions with separately granted pages. Document reads choose the session whose selected tab matches the requested URL. Page actions still use `sessionId`.
+
+Enable `allowActions` to use `navigate` with `url` on the same origin, `click` with `elementRef`, `type` with `elementRef`, `text` and optional `replace`, or `select` with `elementRef` and `optionIndex`. Supply a new UUIDv4 `operationId` for each intended operation. DSH checks the page grant, refs, sharing policy and action approvals. After a timeout, use `GET /ext/local-browser?operationId=…` to query the original receipt. Treat `pending`, `unknown` and `not-recorded` as unresolved. A `returned` receipt records the browser response. Verify the saved state independently for business operations.
+
+Enable `allowGuardedForms` for a trusted local integration that needs to fill an observed POST form before clicking its submit button. A `snapshot` can use `region` to observe one form. Send `formFill` with `fields`, each containing a `selector` and `value`, and an optional `formSelector` on that `click` request. The matching Host and extension negotiate this feature. Stride checks the observed form and each editable text field before activating the submit button once. The opt-in also allows `action: "json"` to GET a same-origin `/api/json` URL through the selected browser tab, using its authenticated session. Verify the resulting operation using the service's own readback.
 
 ## Task materials and acceptance
 
@@ -87,6 +113,7 @@ The token file uses restrictive permissions where supported; protect the DSH hom
 ## What exists today
 
 - Chrome viewport image attachments and screenshot-bound coordinate clicks for canvas/image pages; text snapshots, observation-bound DOM control references, page navigation, tab management and selected-text quoting. A new observation invalidates earlier references in that frame.
+- For Wiki documents that expose a version, `browser_get_text` can check and read the authorized tab already selected for the conversation. Pass `document` with `expectedUrl`, `titleSelector`, `contentSelector` and `versionSelector`. The tool returns the title, text and version when the open page matches the same-origin source. A different target, a sign-in requirement and a stale version have separate results. A stale read leaves the tab open for refresh.
 - A side-panel conversation connected to the local Harness session API; chat image attachments depend on Host support.
 - User approval for page-changing actions, target checks, single-select options, and input/checkbox readback. Control readback does not prove a form was saved.
 - Bounded Host/worker write ordering, durable uncertain-write records and explicit native human review; automatic task recovery remains unsupported.

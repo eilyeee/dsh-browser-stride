@@ -25,7 +25,7 @@ for (const event of ['pagehide', 'pageshow', 'popstate', 'hashchange']) {
 lifecycleGlobal[lifecycleKey] = lifecycle
 Object.defineProperty(globalThis, '__strideDebuggerAction', {
   configurable: true,
-  value: async (message: { type?: string; action?: string; args?: Record<string, unknown>; budget?: { maxItems: number; maxChars: number }; includePageDelta?: boolean }) => {
+  value: async (message: { type?: string; action?: string; args?: Record<string, unknown>; budget?: { maxItems: number; maxChars: number }; includePageDelta?: boolean }, scopedIframe = false) => {
     if (message.type === 'DSH_PING') return { ok: true }
     if (message.type !== 'DSH_ACTION') return { ok: true }
     try {
@@ -34,6 +34,7 @@ Object.defineProperty(globalThis, '__strideDebuggerAction', {
         requireObservation: true,
         budget: { maxForms: 30, maxItems: 60, maxChars: DEFAULT_SNAPSHOT_MAX_CHARS, ...message.budget },
         includePageDelta: message.includePageDelta === true,
+        scopedIframe,
       })
       return { ok: true, result }
     } catch (error) {

@@ -1,11 +1,12 @@
 import { readPageAccessEpoch, writePageAccessEpoch } from './credential-store.ts'
-import { debuggerPages, isCommittedHttpTab } from './debugger-pages.ts'
+import { AutomaticPageTargetChanged, debuggerPages, isCommittedHttpTab } from './debugger-pages.ts'
 import { PageAuthorizationError, type PageAuthorizationFailure } from '../page-authorization.ts'
 
 /** Native action or the opted-in newly-created-tab path grants access. Group membership never does. */
 export const PAGE_ACCESS_KEY = 'dshPageAccess'
 export const CONTROL_GROUP_TITLE = 'DSH 控制'
-interface Grant { tabId: number; windowId: number; origin: string; nonce: string; groupId?: number; mode?: 'debugger'; pending?: true }
+interface WikiTabScope { sessionId: string; url: string }
+interface Grant { tabId: number; windowId: number; origin: string; nonce: string; groupId?: number; mode?: 'debugger'; pending?: true; wiki?: WikiTabScope }
 /** Cleanup belongs to one creation attempt and cannot revoke a newer user grant. */
 export interface CreatedPageAccess {
   current: () => boolean
@@ -95,10 +96,15 @@ export class PageAccess {
     const grant = tab.id === undefined ? undefined : this.grants.get(tab.id)
     return !this.restoring && grant !== undefined && grant.pending !== true && grant.windowId === tab.windowId
       && (grant.mode === 'debugger' ? origin(tab.url) !== undefined && debuggerPages.has(grant.tabId) : grant.origin === origin(tab.url))
+      && (grant.wiki === undefined || grant.wiki.url === tab.url)
       && (!requiresGroup() || grant.groupId !== undefined)
       && (grant.groupId === undefined || grant.groupId === tab.groupId)
   }
   allowsFrame(tabId: number, url: string | undefined): boolean { return this.has(tabId) && this.grants.get(tabId)?.mode !== 'debugger' && this.grants.get(tabId)?.origin === origin(url) && origin(url) !== undefined }
+  ownsWikiTab(tabId: number, sessionId: string, url: string): boolean {
+    const scope = this.grants.get(tabId)?.wiki
+    return this.has(tabId) && scope?.sessionId === sessionId && scope.url === url
+  }
   lease(tabId: number): () => boolean {
     const captured = this.has(tabId) ? this.grants.get(tabId) : undefined
     return () => captured !== undefined && this.grants.get(tabId) === captured
@@ -163,12 +169,12 @@ export class PageAccess {
     }
   }
   /** Only called with the native result of this request's tabs.create, after explicit settings opt-in. */
-  async grantCreated(tabId: number, current: () => boolean, signal: AbortSignal, capture?: (access: CreatedPageAccess) => void): Promise<void> {
+  async grantCreated(tabId: number, current: () => boolean, signal: AbortSignal, capture?: (access: CreatedPageAccess) => void, wiki?: WikiTabScope): Promise<void> {
     await this.ready
     if (!current() || signal.aborted || this.grants.has(tabId)) throw new Error('Automatic page control was cancelled.')
     const tab = await chrome.tabs.get(tabId)
     if (!current() || signal.aborted) throw new Error('Automatic page control was cancelled.')
-    const grant: Grant = { tabId, windowId: tab.windowId, origin: origin(tab.url) ?? 'https://pending.invalid', nonce: crypto.randomUUID(), mode: 'debugger', pending: true }
+    const grant: Grant = { tabId, windowId: tab.windowId, origin: origin(tab.url) ?? 'https://pending.invalid', nonce: crypto.randomUUID(), mode: 'debugger', pending: true, ...(wiki === undefined ? {} : { wiki }) }
     this.grants.set(tabId, grant)
     const allowed = () => this.grants.get(tabId) === grant && current()
     let releasedByOwner = false
@@ -191,9 +197,10 @@ export class PageAccess {
       const deadline = Date.now() + 8000
       await this.persist()
       if (!allowed() || signal.aborted) throw new Error('Automatic page control was cancelled.')
-      await debuggerPages.attachCreated(tabId, allowed, signal, Math.max(0, deadline - Date.now()))
+      await debuggerPages.attachCreated(tabId, allowed, signal, Math.max(0, deadline - Date.now()), wiki?.url)
       if (!await debuggerPages.ready(tabId, undefined, signal, Math.max(0, deadline - Date.now()), 'committed')) throw new Error('The new page did not become ready for automatic control.')
       const live = await chrome.tabs.get(tabId)
+      if (wiki !== undefined && live.url !== wiki.url) throw new AutomaticPageTargetChanged()
       if (!allowed() || signal.aborted || live.id !== tabId || live.windowId !== grant.windowId || !isCommittedHttpTab(live)
         || (requiresGroup() && live.pinned)) throw new Error('The new page changed before it could be controlled.')
       grant.origin = origin(live.url)!

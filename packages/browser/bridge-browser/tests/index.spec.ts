@@ -68,11 +68,13 @@ describe('config', () => {
       sessionWorkspacePath: dshHomePath('browser-sessions'),
       deferSessionCreate: true,
       launchChromeOnRequest: false,
+      iframeScopes: [],
     })
     expect(new Config().sessionWorkspacePath).toBe(dshHomePath('browser-sessions'))
   })
 
   it('preserves explicit values and the empty-string workspace opt-out', () => {
+    const iframeScopes = [{ parentOrigin: 'https://portal.example.invalid', childOrigin: 'http://app.example.invalid:8080' }]
     expect(resolveConfig({
       token: 'fixed',
       allowHostManagement: true,
@@ -83,6 +85,7 @@ describe('config', () => {
       sessionWorkspacePath: '',
       deferSessionCreate: false,
       launchChromeOnRequest: true,
+      iframeScopes,
     })).toEqual({
       token: 'fixed',
       allowHostManagement: true,
@@ -93,8 +96,14 @@ describe('config', () => {
       sessionWorkspacePath: '',
       deferSessionCreate: false,
       launchChromeOnRequest: true,
+      iframeScopes,
     })
     expect(new Config({ sessionWorkspacePath: '' }).sessionWorkspacePath).toBe('')
+  })
+
+  it.each(['https://*.example.invalid', 'https://app.example.invalid/path', 'https://app.example.invalid?login=fixture',
+    'https://owner@app.example.invalid', 'file:///tmp'])('rejects iframe scope %s', childOrigin => {
+    expect(() => resolveConfig({ iframeScopes: [{ parentOrigin: 'https://portal.example.invalid', childOrigin }] })).toThrow(/iframeScopes/)
   })
 })
 

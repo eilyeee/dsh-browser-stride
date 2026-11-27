@@ -64,6 +64,21 @@ Host 与扩展都要支持可选的 wire-v4 `layoutMetrics`：更新后重启 Ho
 | `sessionWorkspacePath` | `DSH_HOME/browser-sessions` | 扩展会话的工作区；空字符串关闭分组。 |
 | `deferSessionCreate` | `true` | 第一条提示发送时才创建会话。 |
 | `launchChromeOnRequest` | `false` | macOS 已配对时，普通对话的开页请求或带网址的 `/browser` 可以启动常用 Chrome 并等待连接。扩展须开启「后台连接 DSH」。 |
+| `iframeScopes` | `[]` | Chrome 125 及以上可控的跨域直接子页来源对。 |
+
+在 Host profile 登记门户和嵌入应用的来源对。
+
+```yaml
+- id: bridge-browser
+  config:
+    iframeScopes:
+      - parentOrigin: "https://portal.example.invalid"
+        childOrigin: "https://app.example.invalid"
+```
+
+来源包含协议、主机名和可选的非默认端口。规则只适用于已经授权的门户标签页和已提交的直接 HTTP(S) 子文档。Chrome 控制子页时可能显示调试提示，页面分享、操作审批和撤销授权仍然生效。模型用 `browser_snapshot` 获取按来源标记的 iframe 编号和控件引用，再向 `browser_get_text`、`browser_click` 等工具传入 `frame`。子页导航后需要重新快照。
+
+调用 `/ext/local-browser` 时，两个来源也要登记在 `localBrowser.allowedOrigins`。请求始终使用门户的完整 `expectedUrl`。先用 `action: "snapshot"` 和 `iframe: { "origin": "https://app.example.invalid" }` 获取子页编号，再在 `text`、`click`、`type` 或 `select` 请求的 `iframe` 中填入来源和 `frame`。写操作沿用原有的操作编号和回执。Wiki 和带保护的 Jenkins 请求继续在主文档执行。
 
 `/ext/bridge-config` 只提供本机 WebSocket 地址。配对管理接口仅限本机，要求单独的管理员令牌并拒绝浏览器 Origin 请求；一次性配对码五分钟后失效，Host 只持久化安装级凭据的哈希。签发、查看和撤销命令见仓库首页。扩展凭据保存在扩展源的 IndexedDB 中，包括无法限制 `storage.local` 访问的 Firefox。
 

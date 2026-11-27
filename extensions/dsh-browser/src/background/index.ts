@@ -36,6 +36,8 @@
 import { PageAuthorizationAttempts, PageAuthorizationError } from '../page-authorization.ts'
 import { SelectionAttempts } from './selection-attempts.ts'
 import { pageDiagnostics } from './diagnostics.ts'
+import { isAutonomousWikiTool, isLocalIframeTool, requestsJenkinsQueueReceipt, versionedDocumentRequest } from '@eilyeee/dsh-browser-stride/src/local-browser-contract.ts'
+import { allowsIframeOrigin } from '@eilyeee/dsh-browser-stride/src/iframe-scopes.ts'
 import { NATIVE_RECOVERY_PREPARE, NATIVE_RECOVERY_CONFIRM, NATIVE_RECOVERY_STATUS, recoveryOfferSchema, recoveryCommitSchema, recoveryDecisionsSchema, recoveryStatusSchema } from '@eilyeee/dsh-browser-stride/src/native-review.ts'
 import {
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
@@ -54,6 +56,7 @@ import {
   type BridgeCaps,
   type CommandPageStatus,
   type RespondResult,
+  type ToolError,
 } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 import type { ServerFrame } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
 import { BRIDGE_CONFIG_PATH, BRIDGE_PATH } from '@eilyeee/dsh-browser-stride/src/protocol.ts'
@@ -1426,7 +1429,31 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
     reviewRead.used = true
   }
   const controller = new AbortController()
-  const unrestrictedAccess = unrestrictedAccessEnabled()
+  const localPageUrl = call.args.localPageUrl
+  const localIframeOrigin = call.args.localIframeOrigin
+  const localIframe = typeof localIframeOrigin === 'string' && typeof localPageUrl === 'string'
+    && isLocalIframeTool(call.name, call.args) && allowsIframeOrigin(caps?.iframeScopes, localPageUrl, localIframeOrigin)
+  if (localIframeOrigin !== undefined && !localIframe) {
+    bridge.send({ t: 'tool.result', id: call.id, action: call.action, ok: false,
+      error: { code: 'permission-required', message: 'The requested iframe origin is not authorized for this page.' } })
+    return
+  }
+  const autonomousWiki = call.args.localAutonomousWiki !== undefined
+  if (autonomousWiki && (caps?.localAutonomousWiki !== true || caps.localBrowser !== true || call.sessionId === undefined
+    || !isAutonomousWikiTool(call.name, call.args) || !automaticAccessActive || settings.sharePageContent !== 'auto')) {
+    bridge.send({ t: 'tool.result', id: call.id, action: call.action, ok: false,
+      error: { code: 'approval-unavailable', message: 'Autonomous Wiki requires Chrome automatic tab control and automatic page sharing.' } })
+    return
+  }
+  if (((call.args.localFormFill !== undefined || call.args.localJsonUrl !== undefined || call.args.localJenkinsLog !== undefined)
+    && (localPageUrl === undefined || caps?.localGuardedForms !== true))
+    || ((requestsJenkinsQueueReceipt(call.name, call.args) || call.args.localJenkinsLog !== undefined) && caps?.localJenkinsQueue !== true)) {
+    bridge.send({ t: 'tool.result', id: call.id, action: call.action, ok: false,
+      error: { code: 'execution-denied', message: 'Guarded forms require a matching local browser connection.' } })
+    return
+  }
+  const documentRequest = call.args.document === undefined ? undefined : versionedDocumentRequest.safeParse(call.args.document)
+  const unrestrictedAccess = !autonomousWiki && localPageUrl === undefined && unrestrictedAccessEnabled()
   const automaticRevision = automaticAccessRevision
   const automaticOpen = call.name === 'browser_open_tab' && automaticAccessActive
   const automaticAllowed = () => automaticAccessActive && automaticAccessRevision === automaticRevision
@@ -1458,7 +1485,36 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
   const admittedPages = pageAccess.snapshot()
   const pageLease = target !== undefined && !('ok' in target) ? pageAccess.lease(target.target.tabId) : () => true
   const isCurrentCall = (): boolean => activeToolCalls.get(call.id) === activeCall
-  const targetAllowed = (): boolean => reviewRead?.current() !== false && writeAllowed() && (!automaticOpen || automaticAllowed()) && (reusedPageAccess?.() ?? true) && (!['browser_list_tabs', 'browser_open_tab'].includes(call.name) || admittedPages.current()) && pageLease() && !tabAffinity.isDetached(call.sessionId) && isCurrentCall() && executionFence?.current() === true && (runTarget === undefined || runTarget.current()) && (activeCall.targetLease === undefined
+  const localTargetAllowed = (): boolean => {
+    if (localPageUrl === undefined) return true
+    if (caps?.localBrowser !== true || typeof localPageUrl !== 'string' || call.sessionId === undefined || (call.args.frame !== 0 && !localIframe)
+      || target === undefined || 'ok' in target) return false
+    const selected = tabAffinity.getSessionTab(call.sessionId)
+    return selected?.tabId === target.target.tabId && (activeCall.committed
+      || selected.url === localPageUrl && target.target.url === localPageUrl
+        && (autonomousWiki ? pageAccess.ownsWikiTab(selected.tabId, call.sessionId, localPageUrl) : pageAccess.allowsFrame(selected.tabId, selected.url)))
+  }
+  const documentTargetError = (): ToolError | undefined => {
+    if (documentRequest === undefined) return
+    if (!documentRequest.success || call.name !== 'browser_get_text' || call.args.frame !== 0 || localPageUrl !== undefined) {
+      return { code: 'bad-args', message: 'A versioned read requires the exact top-level document URL and its selectors.' }
+    }
+    if (caps?.versionedDocument !== true) {
+      return { code: 'content-unavailable', message: 'Versioned document reads require an updated extension and Host Bridge.' }
+    }
+    const selected = call.sessionId === undefined ? undefined : tabAffinity.getSessionTab(call.sessionId)
+    if (selected === undefined || target === undefined) {
+      return { code: 'no-active-tab', message: 'Select the authorized document in this conversation before reading it.' }
+    }
+    if (selected.url !== documentRequest.data.expectedUrl || !('ok' in target) && (selected.tabId !== target.target.tabId || selected.url !== target.target.url)) {
+      return { code: 'target-navigated', message: 'Select the exact document in this conversation and try again.' }
+    }
+    if (!pageAccess.allowsFrame(selected.tabId, selected.url)) {
+      return { code: 'permission-required', message: 'Authorize this document from the extension toolbar before reading it.' }
+    }
+    return 'ok' in target ? target.error : undefined
+  }
+  const targetAllowed = (): boolean => localTargetAllowed() && documentTargetError() === undefined && reviewRead?.current() !== false && writeAllowed() && (!automaticOpen || automaticAllowed()) && (!autonomousWiki || automaticAllowed() && settings.sharePageContent === 'auto') && (reusedPageAccess?.() ?? true) && (!['browser_list_tabs', 'browser_open_tab'].includes(call.name) || admittedPages.current()) && pageLease() && !tabAffinity.isDetached(call.sessionId) && isCurrentCall() && executionFence?.current() === true && (runTarget === undefined || runTarget.current()) && (activeCall.targetLease === undefined
     || (activeCall.committed ? activeCall.targetLease.sameBinding() : activeCall.targetLease.current())
       && (!activeCall.observationBound || activeCall.targetLease.observationCurrent()))
   const commitAction = (): void => {
@@ -1539,6 +1595,10 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
     )
   }
   const authorize = async (prompt: ApprovalPrompt, windowId: number): Promise<ApprovalAuthorization> => {
+    if (autonomousWiki && (call.name === 'browser_reload'
+      || call.name === 'browser_open_tab' && prompt.action === 'browser_follow_tab')) {
+      return targetAllowed() ? 'approved' : 'cancelled'
+    }
     const notify = async (waiting: boolean) => {
       if (call.taskBudget !== true || callRpc === null) return
       await callRpc.request(BRIDGE_TASK_APPROVAL_METHOD, { requestId: call.id, waiting },
@@ -1547,13 +1607,19 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
     return authorizeToolCall(prompt, controller.signal, windowId, call.sessionId, unrestrictedAccess, notify)
   }
   const visualSharingRevision = pageSharingRevision
+  const observationScope = () => {
+    if (target === undefined || 'ok' in target) return undefined
+    const scope = toolObservationScope(target, call.sessionId, call.execution, runTarget?.id ?? null)
+    return localPageUrl === undefined ? scope : `local-client:${scope}`
+  }
   const openDispatch = async (): Promise<ToolAnswer> => {
     await affinityReady
     const controlledTabId = call.sessionId === undefined ? tabAffinity.snapshot().controlled?.tabId : tabAffinity.getSessionTab(call.sessionId)?.tabId
     const reused = await reuseAuthorizedTab(call, {
       empty: admittedPages.empty,
       ...(controlledTabId === undefined ? {} : { controlledTabId }),
-      allows: admittedPages.allows,
+      allows: tab => admittedPages.allows(tab) && (!autonomousWiki || (tab.id === controlledTabId && tab.id !== undefined
+        && pageAccess.ownsWikiTab(tab.id, call.sessionId!, call.args.url as string))),
       capture: tabId => { reusedPageAccess = pageAccess.lease(tabId); return reusedPageAccess },
       follow: (tabId, allows, active) => managementDispatch({ ...call, name: 'browser_follow_tab', args: { tabId } }, allows, active),
     })
@@ -1574,7 +1640,8 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
           !automaticOpen,
           automaticOpen ? async tabId => {
             if (!targetAllowed() || controller.signal.aborted) throw new Error('The open request is no longer current.')
-            await pageAccess.grantCreated(tabId, automaticAllowed, controller.signal, access => { openedPageAccess = access })
+            await pageAccess.grantCreated(tabId, automaticAllowed, controller.signal, access => { openedPageAccess = access },
+              autonomousWiki ? { sessionId: call.sessionId!, url: call.args.url as string } : undefined)
             if (!targetAllowed() || controller.signal.aborted || openedPageAccess?.current() !== true) {
               await openedPageAccess?.release()
               throw new Error('The open request is no longer current.')
@@ -1602,8 +1669,8 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
           controller.signal,
           prepared,
           () => targetAllowed() && prepared.id !== undefined && tabAffinity.allowsTarget(prepared.id, call.sessionId),
-          { unrestrictedAccess, commitAction, rollbackActionCommit,
-            observationScope: target !== undefined && !('ok' in target) ? toolObservationScope(target, call.sessionId, call.execution, runTarget?.id ?? null) : undefined,
+          { unrestrictedAccess, commitAction, rollbackActionCommit, iframeScopes: caps?.iframeScopes,
+            observationScope: observationScope(),
             visualAuthority: {
               scope: target !== undefined && !('ok' in target) ? toolObservationScope(target, call.sessionId, call.execution, runTarget?.id ?? null) : '',
               current: () => target !== undefined && !('ok' in target) && target.current() && pageLease() && pageSharingRevision === visualSharingRevision,
@@ -1614,6 +1681,10 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
   )
   const dispatchAndCheckpoint = async (): Promise<ToolAnswer> => {
     await nativeTakeover.ready
+    const documentError = documentTargetError()
+    if (documentError !== undefined) return { ok: false, error: documentError }
+    if (!localTargetAllowed()) return { ok: false, error: { code: 'permission-required',
+      message: 'Authorize the exact page in the toolbar and select it for the configured session.' } }
     if (!writeAllowed()) return { ok: false, error: { code: 'permission-required', message: 'A person took control of this page. Keep actions stopped; inspect the account, workspace and current result, then explicitly select the intended page in the extension. A fresh snapshot or model tab switch cannot resume writes.' } }
     if (tabAffinity.isDetached(call.sessionId)) return affinityFailure('detached')
     if ((call.name === 'browser_screenshot' || call.name === 'browser_click_at') && caps?.visualViewport !== true) {
@@ -1660,7 +1731,7 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
     if (answer.ok && isNavigationCandidateTool(call.name) && activeToolCalls.get(call.id) === activeCall) {
       await checkpointSessionPage(call.sessionId, targetAllowed)
     }
-    if (sharingAtDispatch !== pageSharingRevision && !unrestrictedAccessEnabled() && settings.sharePageContent !== 'auto') {
+    if (sharingAtDispatch !== pageSharingRevision && (localPageUrl !== undefined || !unrestrictedAccessEnabled()) && settings.sharePageContent !== 'auto') {
       if (call.name === 'browser_snapshot' || call.name === 'browser_get_text' || call.name === 'browser_screenshot' || call.name === 'browser_get_diagnostics') {
         answer = { ok: false, error: { code: 'action-failed', message: 'Page sharing changed before the observation could be delivered.' } }
       } else if (answer.ok && typeof answer.result === 'object' && answer.result !== null
@@ -1677,6 +1748,11 @@ function routeToolCall(call: Extract<ServerFrame, { t: 'tool.call' }>): void {
     async (answer) => {
       if (activeToolCalls.get(call.id) !== activeCall) return
       if (answer.ok && !targetAllowed()) answer = staleTarget()
+      // Once delivered, target and page errors cannot prove an external operation had no effect.
+      if (localPageUrl !== undefined && activeCall.committed && !answer.ok
+        && !(call.name === 'browser_click' && call.args.localFormFill !== undefined && answer.error?.code === 'guarded-form-rejected')) {
+        answer = { ok: false, error: { code: 'action-failed', message: 'The browser operation was delivered; verify the page before another action.' } }
+      }
       // A committed browser_open_tab already rebound affinity; prefer that
       // factual success over a generic cancel that would leave the model wrong.
       if (controller.signal.aborted && !(call.name === 'browser_open_tab' && answer.ok)) {
